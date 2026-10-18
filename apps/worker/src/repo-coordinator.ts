@@ -270,6 +270,8 @@ export class RepoCoordinator extends DurableObject<Env> {
       return Response.json({ ok: false, error: "no deliveryIds" }, { status: 400 });
     }
 
+    // Pass 1: validate every claim in the batch before mutating any rows (fixes cloud-factory-cf-010)
+    const toAcknowledge: string[] = [];
     for (const claim of claims) {
       if (!claim.leaseId) {
         return Response.json(
@@ -297,7 +299,7 @@ export class RepoCoordinator extends DurableObject<Env> {
         continue;
       }
 
-      // Conflict: status changed or lease mismatch (fixes cloud-factory-cf-1q4)
+      // Conflict: status changed or lease mismatch
       if (row.status !== "processing" || row.lease_id !== claim.leaseId) {
         return Response.json(
           { ok: false, error: "lease conflict", deliveryId: claim.deliveryId },
@@ -305,11 +307,15 @@ export class RepoCoordinator extends DurableObject<Env> {
         );
       }
 
+      toAcknowledge.push(claim.deliveryId);
+    }
+
+    // Pass 2: mutate state only after the whole batch passed validation
+    for (const deliveryId of toAcknowledge) {
       this.sql.exec(
         `UPDATE events SET status = 'processed', last_error = NULL, lease_id = NULL
-         WHERE delivery_id = ? AND lease_id = ?`,
-        claim.deliveryId,
-        claim.leaseId,
+         WHERE delivery_id = ?`,
+        deliveryId,
       );
     }
 
@@ -324,8 +330,13 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
     const reason = typeof body?.["error"] === "string" ? (body["error"] as string) : "unknown error";
 
-    let retried = 0;
-    let deadLettered = 0;
+    // Pass 1: validate every claim in the batch before mutating any rows (fixes cloud-factory-cf-010)
+    interface ValidatedFail {
+      deliveryId: string;
+      attempts: number;
+    }
+    const toFail: ValidatedFail[] = [];
+
     for (const claim of claims) {
       if (!claim.leaseId) {
         return Response.json(
@@ -348,7 +359,7 @@ export class RepoCoordinator extends DurableObject<Env> {
         );
       }
 
-      // Conflict: status changed or lease mismatch (fixes cloud-factory-cf-1q4)
+      // Conflict: status changed or lease mismatch
       if (row.status !== "processing" || row.lease_id !== claim.leaseId) {
         return Response.json(
           { ok: false, error: "lease conflict", deliveryId: claim.deliveryId },
@@ -356,25 +367,30 @@ export class RepoCoordinator extends DurableObject<Env> {
         );
       }
 
-      if (row.attempts >= MAX_ATTEMPTS) {
+      toFail.push({ deliveryId: claim.deliveryId, attempts: row.attempts });
+    }
+
+    // Pass 2: execute state changes only after whole batch is validated
+    let retried = 0;
+    let deadLettered = 0;
+    for (const { deliveryId, attempts } of toFail) {
+      if (attempts >= MAX_ATTEMPTS) {
         this.sql.exec(
-          "UPDATE events SET status = 'failed', last_error = ?, lease_id = NULL WHERE delivery_id = ? AND lease_id = ?",
+          "UPDATE events SET status = 'failed', last_error = ?, lease_id = NULL WHERE delivery_id = ?",
           reason,
-          claim.deliveryId,
-          claim.leaseId,
+          deliveryId,
         );
         deadLettered += 1;
         continue;
       }
 
-      const backoff = Math.min(RETRY_BACKOFF_MS * Math.max(row.attempts, 1), RETRY_BACKOFF_CAP_MS);
+      const backoff = Math.min(RETRY_BACKOFF_MS * Math.max(attempts, 1), RETRY_BACKOFF_CAP_MS);
       this.sql.exec(
         `UPDATE events SET status = 'pending', last_error = ?, available_at = ?, lease_id = NULL
-         WHERE delivery_id = ? AND lease_id = ?`,
+         WHERE delivery_id = ?`,
         reason,
         new Date(Date.now() + backoff).toISOString(),
-        claim.deliveryId,
-        claim.leaseId,
+        deliveryId,
       );
       retried += 1;
     }

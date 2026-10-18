@@ -234,6 +234,79 @@ describe("coordinator queue", () => {
     expect(processed.count).toBe(1);
   });
 
+  it("atomic batch ack and fail reject mixed-validity batches with 409 without mutating earlier rows (fixes cloud-factory-cf-010)", async () => {
+    const repository = "acme/atomic-batch";
+    await queue(repository, ["batch-A", "batch-B"]);
+
+    const claim = await call<ClaimResponse>(repository, "/claim", { limit: 2 });
+    expect(claim.claimed).toHaveLength(2);
+    const claimA = claim.claimed.find((c) => c.deliveryId === "batch-A")!;
+    const claimB = claim.claimed.find((c) => c.deliveryId === "batch-B")!;
+
+    // Test mixed batch /fail: A has valid lease, B has stale lease
+    const mixedFail = await coordinator(repository).fetch(`${COORDINATOR_URL}/fail`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        claims: [
+          { deliveryId: "batch-A", leaseId: claimA.leaseId },
+          { deliveryId: "batch-B", leaseId: "stale-lease-token" },
+        ],
+        error: "test batch failure",
+      }),
+    });
+    expect(mixedFail.status).toBe(409);
+
+    // Verify row A was NOT mutated: still in processing state with claimA.leaseId!
+    const eventsAfterFail = await call<{ events: Array<{ deliveryId: string; status: string; leaseId: string }> }>(
+      repository,
+      "/events?status=processing",
+    );
+    expect(eventsAfterFail.events.find((e) => e.deliveryId === "batch-A")).toMatchObject({
+      status: "processing",
+      leaseId: claimA.leaseId,
+    });
+
+    // Test mixed batch /ack: A has valid lease, B has stale lease
+    const mixedAck = await coordinator(repository).fetch(`${COORDINATOR_URL}/ack`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        claims: [
+          { deliveryId: "batch-A", leaseId: claimA.leaseId },
+          { deliveryId: "batch-B", leaseId: "stale-lease-token" },
+        ],
+      }),
+    });
+    expect(mixedAck.status).toBe(409);
+
+    // Verify row A was NOT processed: still in processing state!
+    const processedEvents = await call<{ events: Array<{ deliveryId: string }> }>(
+      repository,
+      "/events?status=processed",
+    );
+    expect(processedEvents.events).toHaveLength(0);
+
+    // Now valid batch ack succeeds atomically
+    const validBatchAck = await coordinator(repository).fetch(`${COORDINATOR_URL}/ack`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        claims: [
+          { deliveryId: "batch-A", leaseId: claimA.leaseId },
+          { deliveryId: "batch-B", leaseId: claimB.leaseId },
+        ],
+      }),
+    });
+    expect(validBatchAck.status).toBe(200);
+
+    const finalProcessed = await call<{ events: Array<{ deliveryId: string }> }>(
+      repository,
+      "/events?status=processed",
+    );
+    expect(finalProcessed.events).toHaveLength(2);
+  });
+
   it("rejects acks and fails without delivery ids or leaseId", async () => {
     const repository = "acme/bad-requests";
     const noAck = await coordinator(repository).fetch(`${COORDINATOR_URL}/ack`, {
