@@ -294,9 +294,15 @@ export class RepoCoordinator extends DurableObject<Env> {
         );
       }
 
-      // Idempotent: already processed
+      // If already processed, allow idempotent retry only if lease matches (fixes cloud-factory-cf-wa8)
       if (row.status === "processed") {
-        continue;
+        if (row.lease_id === claim.leaseId) {
+          continue;
+        }
+        return Response.json(
+          { ok: false, error: "lease conflict", deliveryId: claim.deliveryId },
+          { status: 409 },
+        );
       }
 
       // Conflict: status changed or lease mismatch
@@ -313,7 +319,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     // Pass 2: mutate state only after the whole batch passed validation
     for (const deliveryId of toAcknowledge) {
       this.sql.exec(
-        `UPDATE events SET status = 'processed', last_error = NULL, lease_id = NULL
+        `UPDATE events SET status = 'processed', last_error = NULL
          WHERE delivery_id = ?`,
         deliveryId,
       );

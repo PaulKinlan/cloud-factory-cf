@@ -230,6 +230,24 @@ describe("coordinator queue", () => {
     });
     expect(validAck.status).toBe(200);
 
+    // Stale runner 1 attempting to ack after runner 2 completed must return 409 Conflict (fixes cloud-factory-cf-wa8)
+    const staleAckAfterCompleted = await coordinator(repository).fetch(`${COORDINATOR_URL}/ack`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deliveryId, leaseId: lease1 }),
+    });
+    expect(staleAckAfterCompleted.status).toBe(409);
+    const staleAckAfterCompletedBody = (await staleAckAfterCompleted.json()) as { error: string };
+    expect(staleAckAfterCompletedBody.error).toBe("lease conflict");
+
+    // Idempotent retry by the runner that actually completed it succeeds -> 200 OK
+    const idempotentAck = await coordinator(repository).fetch(`${COORDINATOR_URL}/ack`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deliveryId, leaseId: lease2 }),
+    });
+    expect(idempotentAck.status).toBe(200);
+
     const processed = await call<{ count: number }>(repository, "/events?status=processed");
     expect(processed.count).toBe(1);
   });
