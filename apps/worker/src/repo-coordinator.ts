@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
+import { MemoryHandler, migrateMemoryTable } from "./memory";
 import {
   deliveryIdFor,
   eventNameFor,
@@ -36,11 +37,14 @@ const RETRY_BACKOFF_CAP_MS = 60_000;
  * owns only the durable contract, which is what every sink depends on.
  */
 export class RepoCoordinator extends DurableObject<Env> {
+  private memoryHandler!: MemoryHandler;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       this.migrate();
     });
+    this.memoryHandler = new MemoryHandler(this.ctx.storage.sql);
   }
 
   private get sql(): SqlStorage {
@@ -72,6 +76,13 @@ export class RepoCoordinator extends DurableObject<Env> {
       const requeued = await this.requeueExpiredLeases();
       return Response.json({ ok: true, requeued });
     }
+    if (url.pathname.startsWith("/memory")) {
+      const scope = url.searchParams.get("scope") ?? "repo";
+      if (scope === "org") {
+        return this.forwardToOrg(request);
+      }
+      return this.handleMemory(request, url);
+    }
     if (request.method === "GET" && url.pathname === "/stats") {
       return this.stats();
     }
@@ -86,6 +97,7 @@ export class RepoCoordinator extends DurableObject<Env> {
   }
 
   private migrate(): void {
+    migrateMemoryTable(this.sql);
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS events (
         delivery_id TEXT PRIMARY KEY,
@@ -466,7 +478,60 @@ export class RepoCoordinator extends DurableObject<Env> {
       ok: true,
       repository: this.ctx.id.name ?? "unknown",
       counts: Object.fromEntries(counts.map((row) => [row.status, row.total])),
+      memoryKeys: this.memoryHandler.total(),
     });
+  }
+
+  // ------------------------------------------------------------------ memory
+
+  private async forwardToOrg(request: Request): Promise<Response> {
+    const repoName = this.ctx.id.name;
+    const owner = repoName ? repoName.split("/")[0] : null;
+    if (!owner || !this.env.ORG_COORDINATOR) {
+      return Response.json({ ok: false, error: "org coordinator not available" }, { status: 503 });
+    }
+    const stub = this.env.ORG_COORDINATOR.get(this.env.ORG_COORDINATOR.idFromName(owner));
+    const targetUrl = new URL(request.url);
+    targetUrl.hostname = "org-coordinator.internal";
+    targetUrl.searchParams.delete("scope");
+    return stub.fetch(new Request(targetUrl.toString(), request));
+  }
+
+  private async handleMemory(request: Request, url: URL): Promise<Response> {
+    if (request.method === "GET" && url.pathname.startsWith("/memory/")) {
+      const key = safeDecode(url.pathname.slice("/memory/".length));
+      if (key === null) return Response.json({ ok: false, error: "malformed key" }, { status: 400 });
+      return this.memoryHandler.get(key);
+    }
+    if (request.method === "GET" && url.pathname === "/memory") {
+      const key = url.searchParams.get("key");
+      if (key) return this.memoryHandler.get(key);
+      const prefix = url.searchParams.get("prefix") ?? "";
+      return this.memoryHandler.list(prefix);
+    }
+    if ((request.method === "POST" || request.method === "PUT") && url.pathname.startsWith("/memory/")) {
+      const key = safeDecode(url.pathname.slice("/memory/".length));
+      if (key === null) return Response.json({ ok: false, error: "malformed key" }, { status: 400 });
+      const body = await readJson(request);
+      return this.memoryHandler.set(key, body as Record<string, unknown> | null);
+    }
+    if (request.method === "POST" && url.pathname === "/memory") {
+      const body = (await readJson(request)) as Record<string, unknown> | null;
+      const key = typeof body?.["key"] === "string" ? body["key"] : undefined;
+      if (!key) return Response.json({ ok: false, error: "missing key" }, { status: 400 });
+      return this.memoryHandler.set(key, body);
+    }
+    if (request.method === "DELETE" && url.pathname.startsWith("/memory/")) {
+      const key = safeDecode(url.pathname.slice("/memory/".length));
+      if (key === null) return Response.json({ ok: false, error: "malformed key" }, { status: 400 });
+      return this.memoryHandler.delete(key);
+    }
+    if (request.method === "DELETE" && url.pathname === "/memory") {
+      const key = url.searchParams.get("key");
+      if (!key) return Response.json({ ok: false, error: "missing key" }, { status: 400 });
+      return this.memoryHandler.delete(key);
+    }
+    return new Response("not found", { status: 404 });
   }
 
   // ------------------------------------------------------------------ leases
@@ -579,6 +644,14 @@ function claimsFrom(payload: unknown): ClaimToken[] {
   return list
     .filter((id): id is string => typeof id === "string" && id.length > 0)
     .map((id) => ({ deliveryId: id, leaseId: defaultLease }));
+}
+
+function safeDecode(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
 }
 
 async function readJson(request: Request): Promise<unknown> {

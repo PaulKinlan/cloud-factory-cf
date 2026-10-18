@@ -3,6 +3,7 @@ import { MAX_WEBHOOK_BYTES } from "./webhooks";
 
 // Durable Object classes are resolved from the Worker's main module, so the
 // coordinator has to be exported here (see `durable_objects` in wrangler.jsonc).
+export { OrgCoordinator } from "./org-coordinator";
 export { RepoCoordinator } from "./repo-coordinator";
 
 const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;

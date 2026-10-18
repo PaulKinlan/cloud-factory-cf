@@ -71,6 +71,11 @@ export {
 } from './context/agent-context.ts';
 
 export {
+  CoordinatorMemoryStore,
+  type MemoryFetcher,
+} from './context/coordinator-memory-store.ts';
+
+export {
   ActionSinkRegistry,
   MemoryActionSink,
 } from './sinks/sink-registry.ts';
