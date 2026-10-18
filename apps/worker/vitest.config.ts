@@ -11,6 +11,10 @@ export default defineConfig({
           // `wrangler secret put` and never commit a value.
           WEBHOOK_SECRET: "test-webhook-secret",
           GITLAB_WEBHOOK_TOKEN: "test-gitlab-token",
+          BROKER_SIGNING_KEY: "test-broker-signing-key",
+          BROKER_CONTROL_KEY: "test-control-key",
+          GITHUB_TOKEN: "ghp_test_github_credential",
+          GITLAB_TOKEN: "glpat_test_gitlab_credential",
         },
       },
     }),

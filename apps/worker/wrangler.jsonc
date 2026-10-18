@@ -24,6 +24,10 @@
         "class_name": "RepoCoordinator"
       },
       {
+        "name": "CREDENTIAL_BROKER",
+        "class_name": "CredentialBroker"
+      },
+      {
         "name": "ORG_COORDINATOR",
         "class_name": "OrgCoordinator"
       }
@@ -33,6 +37,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["RepoCoordinator"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["CredentialBroker"]
     },
     {
       "tag": "v2",

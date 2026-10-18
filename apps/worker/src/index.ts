@@ -1,12 +1,15 @@
 import type { Env } from "./env";
 import { MAX_WEBHOOK_BYTES } from "./webhooks";
 
-// Durable Object classes are resolved from the Worker's main module, so the
-// coordinator has to be exported here (see `durable_objects` in wrangler.jsonc).
+// Durable Object classes are resolved from the Worker's main module, so they
+// have to be exported here (see `durable_objects` in wrangler.jsonc).
+export { CredentialBroker } from "./credential-broker-object";
 export { OrgCoordinator } from "./org-coordinator";
 export { RepoCoordinator } from "./repo-coordinator";
 
 const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
+const BROKER_PATH =
+  /^\/broker\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>capabilities|permissions|proxy|audit)$/;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -18,6 +21,16 @@ export default {
         service: "cloud-factory-cf",
         environment: env.ENVIRONMENT ?? "unknown",
       });
+    }
+
+    const broker = BROKER_PATH.exec(url.pathname);
+    if (broker?.groups) {
+      const { owner, repo, operation } = broker.groups as {
+        owner: string;
+        repo: string;
+        operation: string;
+      };
+      return routeBroker(request, env, owner, repo, operation, url.search);
     }
 
     const match = WEBHOOK_PATH.exec(url.pathname);
@@ -58,6 +71,44 @@ export default {
     return stub.fetch(forwarded);
   },
 } satisfies ExportedHandler<Env>;
+
+/**
+ * Routes to the per-repository credential broker. The agent's request carries a
+ * capability, never a credential; the object in front of the secrets decides.
+ */
+async function routeBroker(
+  request: Request,
+  env: Env,
+  owner: string,
+  repo: string,
+  operation: string,
+  search: string,
+): Promise<Response> {
+  if (operation !== "permissions" && operation !== "audit" && request.method !== "POST") {
+    return new Response("method not allowed", { status: 405 });
+  }
+  if ((operation === "permissions" || operation === "audit") && request.method !== "GET") {
+    return new Response("method not allowed", { status: 405 });
+  }
+
+  const stub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(`${owner}/${repo}`));
+  const forwarded = new Request(
+    `https://credential-broker.internal/${operation}${search}`,
+    {
+      method: request.method,
+      headers: brokerHeaders(request.headers),
+      body: request.method === "POST" ? await request.text() : undefined,
+    },
+  );
+  return stub.fetch(forwarded);
+}
+
+function brokerHeaders(headers: Headers): Headers {
+  const forwarded = new Headers({ "content-type": "application/json" });
+  const controlKey = headers.get("x-factory-control-key");
+  if (controlKey !== null) forwarded.set("x-factory-control-key", controlKey);
+  return forwarded;
+}
 
 /**
  * Copy only the headers the coordinator acts on. Replaying the inbound
