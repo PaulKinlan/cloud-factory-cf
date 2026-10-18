@@ -2,7 +2,7 @@
  * AgentContext implementation and memory/credential defaults.
  */
 
-import { randomUUID } from 'node:crypto';
+import { generateId } from '../utils/id.ts';
 import type {
   AgentContext,
   AgentContextOptions,
@@ -55,19 +55,31 @@ export class InMemoryHierarchicalMemoryStore implements HierarchicalMemoryStore 
   }
 }
 
+export type CredentialExecutor = (
+  request: CredentialCapabilityRequest
+) => Promise<unknown>;
+
+/**
+ * DefaultCredentialBroker: fail-closed by default.
+ * Denies all requests unless explicitly allowed, and delegates signed requests
+ * to an optional executor (such as a Cloudflare Worker signed capability subrequest).
+ */
 export class DefaultCredentialBroker implements CredentialBroker {
   private readonly allowedCapabilities = new Set<string>();
+  private readonly executor?: CredentialExecutor;
 
-  constructor(allowed?: readonly string[]) {
+  constructor(allowed?: readonly string[], executor?: CredentialExecutor) {
     if (allowed) {
       for (const cap of allowed) {
         this.allowedCapabilities.add(cap);
       }
     }
+    this.executor = executor;
   }
 
   async hasPermission(service: string, action: string): Promise<boolean> {
-    if (this.allowedCapabilities.size === 0) return true;
+    // Fail closed: empty allowlist denies all capabilities
+    if (this.allowedCapabilities.size === 0) return false;
     return (
       this.allowedCapabilities.has(`${service}:${action}`) ||
       this.allowedCapabilities.has(`${service}:*`) ||
@@ -82,13 +94,13 @@ export class DefaultCredentialBroker implements CredentialBroker {
         `CredentialBroker: permission denied for capability "${request.service}:${request.action}"`
       );
     }
-    // Signed capability proxy stub: in production runtime, delegates to cloudflare signed subrequest
-    return {
-      status: 'brokered',
-      service: request.service,
-      action: request.action,
-      timestamp: Date.now(),
-    } as unknown as T;
+    if (!this.executor) {
+      throw new Error(
+        `CredentialBroker: no capability executor configured to perform "${request.service}:${request.action}"`
+      );
+    }
+    const res = await this.executor(request);
+    return res as T;
   }
 }
 
@@ -108,7 +120,7 @@ export class AgentContextImpl implements AgentContext {
   private readonly logs: LogEntry[];
 
   constructor(options: AgentContextOptions) {
-    this.id = options.id ?? randomUUID();
+    this.id = options.id ?? generateId();
     this.sessionId = options.sessionId ?? this.id;
     this.repo = options.repo;
     this.org = options.org;
@@ -119,7 +131,8 @@ export class AgentContextImpl implements AgentContext {
     this.sinks = options.sinks ?? new ActionSinkRegistry();
     this.credentials = options.credentials ?? new DefaultCredentialBroker();
     this.state = options.state ?? {};
-    this.logs = options.logs ? [...options.logs] : [];
+    // Share logs array reference so child context logs propagate to parent
+    this.logs = options.logs ?? [];
   }
 
   log(level: LogLevel, message: string, data?: unknown): void {
@@ -137,7 +150,7 @@ export class AgentContextImpl implements AgentContext {
 
   createChildContext(overrides?: Partial<AgentContextOptions>): AgentContext {
     return new AgentContextImpl({
-      id: overrides?.id ?? randomUUID(),
+      id: overrides?.id ?? generateId(),
       sessionId: overrides?.sessionId ?? this.sessionId,
       repo: overrides?.repo ?? this.repo,
       org: overrides?.org ?? this.org,
@@ -148,7 +161,7 @@ export class AgentContextImpl implements AgentContext {
       sinks: overrides?.sinks ?? this.sinks,
       credentials: overrides?.credentials ?? this.credentials,
       state: overrides?.state ? { ...this.state, ...overrides.state } : { ...this.state },
-      logs: this.logs,
+      logs: this.logs, // Pass shared logs array
     });
   }
 }

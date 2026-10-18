@@ -2,7 +2,7 @@
  * ActionSinkRegistry implementation and built-in sinks.
  */
 
-import { randomUUID } from 'node:crypto';
+import { generateId } from '../utils/id.ts';
 import type { AgentContext } from '../types/context.ts';
 import type {
   ActionSink,
@@ -36,7 +36,7 @@ export class ActionSinkRegistry implements ActionSinkDispatcher {
     ctx?: AgentContext
   ): Promise<SinkDispatchResult[]> {
     const action: SinkAction<TPayload> = {
-      id: actionInput.id ?? randomUUID(),
+      id: actionInput.id ?? generateId(),
       type: actionInput.type,
       payload: actionInput.payload,
       timestamp: actionInput.timestamp ?? Date.now(),
@@ -51,10 +51,20 @@ export class ActionSinkRegistry implements ActionSinkDispatcher {
         sink.supportedActions.includes(action.type);
 
       if (acceptsType) {
-        if (!sink.canHandle || (ctx && sink.canHandle(action, ctx))) {
+        if (!sink.canHandle) {
           matchingSinks.push(sink);
-        } else if (!ctx && !sink.canHandle) {
-          matchingSinks.push(sink);
+        } else if (ctx) {
+          try {
+            if (sink.canHandle(action, ctx)) {
+              matchingSinks.push(sink);
+            }
+          } catch (err) {
+            ctx.log(
+              'error',
+              `ActionSink "${sink.name}" canHandle threw error for action "${action.type}"`,
+              err
+            );
+          }
         }
       }
     }

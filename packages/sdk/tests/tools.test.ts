@@ -44,6 +44,15 @@ test('ToolRegistry: registers tools and validates parameters', async () => {
   assert.equal(success.success, true);
   assert.deepEqual(success.result, { lines: 100 });
   assert.ok(success.durationMs >= 0);
+
+  // Type mismatch validation
+  const typeMismatch = await registry.executeTool(
+    'read_lines',
+    { path: 'src/main.ts', count: 'not-a-number' as unknown as number },
+    ctx
+  );
+  assert.equal(typeMismatch.success, false);
+  assert.match(typeMismatch.error ?? '', /Invalid type for parameter "count".*expected number, got string/);
 });
 
 test('ToolRegistry: handles handler exceptions gracefully', async () => {

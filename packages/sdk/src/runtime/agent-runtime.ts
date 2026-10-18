@@ -2,7 +2,7 @@
  * AgentRuntime orchestrating extensions, lifecycle hooks, tools, and sinks.
  */
 
-import { randomUUID } from 'node:crypto';
+import { generateId } from '../utils/id.ts';
 import type { AgentContext } from '../types/context.ts';
 import type {
   Extension,
@@ -146,12 +146,14 @@ export class AgentRuntime implements ExtensionAPI {
     ctx: AgentContext,
     executionFn: AgentExecutionFn,
     options?: {
+      runId?: string;
       systemPrompt?: string;
       tools?: readonly string[];
       metadata?: Record<string, unknown>;
     }
   ): Promise<AgentRunSummary> {
-    const runId = ctx.id ?? randomUUID();
+    // Generate fresh runId per run, rather than reusing ctx.id
+    const runId = options?.runId ?? generateId();
     const startTime = Date.now();
     const availableToolNames = options?.tools ?? this.tools.getToolDefinitions().map((t) => t.name);
 

@@ -7,6 +7,7 @@ import type {
   ToolDefinition,
   AgentTool,
   ToolExecutionResult,
+  JSONSchemaProperty,
 } from '../types/tools.ts';
 
 export class ToolRegistry {
@@ -94,7 +95,9 @@ export class ToolRegistry {
     definition: ToolDefinition,
     params: Record<string, unknown>
   ): void {
-    const { required } = definition.parameters;
+    const { required, properties } = definition.parameters;
+
+    // Check required presence
     if (required && Array.isArray(required)) {
       for (const requiredProp of required) {
         if (!(requiredProp in params) || params[requiredProp] === undefined) {
@@ -103,6 +106,56 @@ export class ToolRegistry {
           );
         }
       }
+    }
+
+    // Check declared types
+    if (properties) {
+      for (const [propName, propSchema] of Object.entries(properties)) {
+        if (propName in params && params[propName] !== undefined) {
+          this.validatePropertyType(definition.name, propName, params[propName], propSchema);
+        }
+      }
+    }
+  }
+
+  private validatePropertyType(
+    toolName: string,
+    propName: string,
+    value: unknown,
+    schema: JSONSchemaProperty
+  ): void {
+    const expectedType = schema.type;
+    let isValid = true;
+
+    switch (expectedType) {
+      case 'string':
+        isValid = typeof value === 'string';
+        break;
+      case 'number':
+        isValid = typeof value === 'number' && !Number.isNaN(value);
+        break;
+      case 'integer':
+        isValid = typeof value === 'number' && Number.isInteger(value);
+        break;
+      case 'boolean':
+        isValid = typeof value === 'boolean';
+        break;
+      case 'array':
+        isValid = Array.isArray(value);
+        break;
+      case 'object':
+        isValid = typeof value === 'object' && value !== null && !Array.isArray(value);
+        break;
+      case 'null':
+        isValid = value === null;
+        break;
+    }
+
+    if (!isValid) {
+      const actualType = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
+      throw new Error(
+        `Invalid type for parameter "${propName}" on tool "${toolName}": expected ${expectedType}, got ${actualType}`
+      );
     }
   }
 }

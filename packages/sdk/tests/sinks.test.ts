@@ -100,6 +100,42 @@ test('ActionSinkRegistry: isolates sink errors so sibling sinks still execute', 
   assert.equal(reliableSink.getEmittedActions().length, 1);
 });
 
+test('ActionSinkRegistry: isolates throwing canHandle so sibling sinks still execute', async () => {
+  const registry = new ActionSinkRegistry();
+  const ctx = createAgentContext({
+    repo: { owner: 'PaulKinlan', name: 'cloud-factory-cf' },
+    org: { id: 'test-org' },
+    sinks: registry,
+  });
+
+  const throwingPredicateSink: ActionSink = {
+    name: 'throwing-predicate-sink',
+    supportedActions: ['beads.task'],
+    canHandle: () => {
+      throw new Error('Predicate crashed unexpectedly');
+    },
+    handle: async () => {
+      return { sinkName: 'throwing-predicate-sink', actionId: '1', actionType: 'beads.task', success: true, durationMs: 0 };
+    },
+  };
+
+  const reliableSink = new MemoryActionSink('working-beads-sink', ['beads.task']);
+
+  registry.registerSink(throwingPredicateSink);
+  registry.registerSink(reliableSink);
+
+  const results = await registry.emit(
+    { type: 'beads.task', payload: { title: 'Test task', description: 'Testing' } },
+    ctx
+  );
+
+  // Throwing predicate sink should be safely skipped without throwing, and reliableSink should succeed
+  assert.equal(results.length, 1);
+  assert.equal(results[0]?.sinkName, 'working-beads-sink');
+  assert.equal(results[0]?.success, true);
+  assert.equal(reliableSink.getEmittedActions().length, 1);
+});
+
 test('AgentRuntime: loadExtension with registerSink and dispatch via after_run hook', async () => {
   const runtime = new AgentRuntime();
   const memorySink = new MemoryActionSink('audit-sink', ['*']);

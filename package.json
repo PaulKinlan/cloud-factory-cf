@@ -20,5 +20,8 @@
     "dev": "npm run dev -w @factory-cloud/worker",
     "deploy": "npm run deploy -w @factory-cloud/worker",
     "ci": "npm run build && npm run typecheck && npm run test"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
   }
 }

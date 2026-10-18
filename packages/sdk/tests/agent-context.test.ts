@@ -4,6 +4,7 @@ import {
   createAgentContext,
   InMemoryHierarchicalMemoryStore,
   DefaultCredentialBroker,
+  AgentRuntime,
 } from '../src/index.ts';
 
 test('AgentContext: initializes with default hierarchical memory, credentials, and logging', async () => {
@@ -20,6 +21,10 @@ test('AgentContext: initializes with default hierarchical memory, credentials, a
   assert.equal(ctx.org.id, 'org_fleet_1');
   assert.equal(ctx.env.FLEET_ENV, 'testing');
   assert.equal(ctx.signal.aborted, false);
+
+  // Default credentials fail closed
+  assert.equal(await ctx.credentials.hasPermission('github', 'delete_repo'), false);
+  assert.equal(await ctx.credentials.hasPermission('aws', 's3_upload'), false);
 
   // Logging
   ctx.log('info', 'Test log message', { detail: 123 });
@@ -58,34 +63,43 @@ test('HierarchicalMemoryStore: isolates org and repo memory scopes', async () =>
   assert.equal(await memory.get('org', 'coding_standards'), 'Clean TypeScript with no raw secrets');
 });
 
-test('CredentialBroker: enforces capability permissions and proxies requests', async () => {
-  const broker = new DefaultCredentialBroker(['github:pull_request', 'beads:*']);
+test('CredentialBroker: fails closed by default and requires executor for signed requests', async () => {
+  // Empty allowlist fails closed
+  const emptyBroker = new DefaultCredentialBroker();
+  assert.equal(await emptyBroker.hasPermission('aws', 's3_upload'), false);
+  assert.equal(await emptyBroker.hasPermission('github', 'pull_request'), false);
 
-  assert.equal(await broker.hasPermission('github', 'pull_request'), true);
-  assert.equal(await broker.hasPermission('beads', 'create_task'), true);
-  assert.equal(await broker.hasPermission('aws', 's3_upload'), false);
-
-  // Permitted signed request succeeds without raw secret
-  const signedResult = await broker.executeSignedRequest<{ status: string }>({
-    service: 'github',
-    action: 'pull_request',
-    params: { pr: 12 },
-  });
-  assert.equal(signedResult.status, 'brokered');
-
-  // Denied request throws error
   await assert.rejects(
     async () => {
-      await broker.executeSignedRequest({
-        service: 'aws',
-        action: 's3_upload',
-      });
+      await emptyBroker.executeSignedRequest({ service: 'aws', action: 's3_upload' });
     },
     /permission denied for capability "aws:s3_upload"/
   );
+
+  // Permitted without executor throws configuration error rather than returning fake success
+  const brokerNoExecutor = new DefaultCredentialBroker(['github:pull_request']);
+  assert.equal(await brokerNoExecutor.hasPermission('github', 'pull_request'), true);
+  await assert.rejects(
+    async () => {
+      await brokerNoExecutor.executeSignedRequest({ service: 'github', action: 'pull_request' });
+    },
+    /no capability executor configured/
+  );
+
+  // Permitted with executor executes real handler
+  const mockExecutor = async (req: { service: string; action: string }) => {
+    return { ok: true, proxiedService: req.service };
+  };
+  const brokerWithExecutor = new DefaultCredentialBroker(['github:pull_request'], mockExecutor);
+  const result = await brokerWithExecutor.executeSignedRequest<{ ok: boolean; proxiedService: string }>({
+    service: 'github',
+    action: 'pull_request',
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.proxiedService, 'github');
 });
 
-test('AgentContext: createChildContext inherits parents and overrides correctly', async () => {
+test('AgentContext: createChildContext propagates logs to parent', async () => {
   const parent = createAgentContext({
     repo: { owner: 'PaulKinlan', name: 'cloud-factory-cf' },
     org: { id: 'org_root' },
@@ -102,4 +116,30 @@ test('AgentContext: createChildContext inherits parents and overrides correctly'
   assert.equal(child.repo.name, 'cloud-factory-cf');
   assert.equal(child.state.parentState, 'inherited');
   assert.equal(child.state.childState, 'active');
+
+  // Log in child should be visible in parent
+  child.log('info', 'Logged from child context');
+  const parentLogs = parent.getLogs();
+  assert.equal(parentLogs.length, 1);
+  assert.equal(parentLogs[0]?.message, 'Logged from child context');
+});
+
+test('AgentRuntime: multiple runAgent calls generate unique runIds', async () => {
+  const runtime = new AgentRuntime();
+  const ctx = createAgentContext({
+    repo: { owner: 'PaulKinlan', name: 'cloud-factory-cf' },
+    org: { id: 'org_root' },
+  });
+
+  const run1 = await runtime.runAgent('Prompt 1', ctx, async (input) => {
+    return { status: 'success', output: `run1:${input.runId}`, toolCallsCount: 0 };
+  });
+
+  const run2 = await runtime.runAgent('Prompt 2', ctx, async (input) => {
+    return { status: 'success', output: `run2:${input.runId}`, toolCallsCount: 0 };
+  });
+
+  assert.notEqual(run1.runId, ctx.id);
+  assert.notEqual(run2.runId, ctx.id);
+  assert.notEqual(run1.runId, run2.runId);
 });
