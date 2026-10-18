@@ -14,7 +14,7 @@ served by `fleet-deps`.
 | `npm test` | `vitest run` inside workerd (`@cloudflare/vitest-plugin`) | 7.4s |
 | `npm run ci` | build + typecheck + test | 13–15s |
 | `npm run test:file -- test/<file>.test.ts` | one workerd test file | 2–3s |
-| `npm run test:changed` | `vitest run --changed` (tests affected vs `origin/main`) | 3–5s |
+| `vitest run --changed` | dev-loop only, **not a gate** — see below | selects 0 tests in a committed worktree |
 
 Per file (inside the 7.4s suite): `test/computer-dependency.test.ts` ≈ 1.0s
 (it imports the 11 MB `@cloudflare/computer` bundle, which is the point of the
@@ -27,7 +27,8 @@ is vitest + workerd pool startup.
 - **Iterating (everyone):** run the tests for what you changed —
   `npm run test:file -- test/<file>.test.ts` — in the foreground with a
   `timeout`. Do not run the full suite per edit.
-- **Implementers:** `fleet-check --fast` on the committed tree.
+- **Implementers:** `fleet-check --fast` on the committed tree (this repo's fast
+  tier, once installed, is `npm run ci` — it runs everything).
 - **Mergers:** `fleet-check` once on the merged union, not per branch.
 - Never re-gate an unchanged tree: verdicts are cached per commit tree.
 
@@ -47,9 +48,27 @@ CHECK_FAST_TIMEOUT=180
 
 `~/.fleet/check.conf` is host-wide machine state, so the coordinator/hub owns
 writing it; this file only records the values and the measurements behind them.
-If the suite grows past ~60s, split the tier instead of copying this line:
-`CHECK_FAST_CMD="npm run test:changed"` (3–5s) plus a typecheck is the next
-step, and the full gate then keeps the build.
+If the suite grows past ~60s, split the tier by *scope*, not by change
+detection: keep `npm run ci` as the fast tier and move the slow suite (browsers,
+integration journeys) behind its own npm script that the full gate adds. A fast
+tier must run tests unconditionally (see the next section).
+
+### Why `vitest --changed` is not a gate here
+
+Verified on this tree (vitest 4.1.12, 2026-10-18) — `vitest run --changed`
+reported **"No test files found, exiting with code 0"**, i.e. a green run that
+executed nothing, in all three states:
+
+1. clean committed worktree (the state `fleet-check` requires),
+2. after an uncommitted edit to `apps/worker/src/webhooks.ts`,
+3. with an explicit ref, `vitest run --changed=origin/main`.
+
+The mechanism (finding `cloud-factory-cf-gy5`): the change list comes from
+staged/unstaged git state, not from the branch's commits, so a committed branch
+looks unchanged and selects no tests. The `test:changed` npm scripts are removed
+for that reason: a gate whose "nothing to test" is indistinguishable from a
+green suite is worse than no gate. Use `npm run test:file -- test/<file>.test.ts`
+while iterating, and `npm run ci` for any verdict.
 
 ## Budgets
 
