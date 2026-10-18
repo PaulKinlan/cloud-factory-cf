@@ -219,6 +219,7 @@ export class RepoCoordinator extends DurableObject<Env> {
   // ---------------------------------------------------------------- queue API
 
   private async claim(payload: unknown): Promise<Response> {
+    await this.requeueExpiredLeases();
     const body = asRecord(payload);
     const limit = clampInt(body?.["limit"], 1, 100, 10);
     const visibilityMs = clampInt(body?.["visibilityMs"], 0, 3_600_000, DEFAULT_VISIBILITY_MS);
@@ -270,6 +271,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       return Response.json({ ok: false, error: "no deliveryIds" }, { status: 400 });
     }
 
+    const now = new Date().toISOString();
     // Pass 1: validate every claim in the batch before mutating any rows (fixes cloud-factory-cf-010)
     const toAcknowledge: string[] = [];
     for (const claim of claims) {
@@ -281,8 +283,8 @@ export class RepoCoordinator extends DurableObject<Env> {
       }
 
       const row = this.sql
-        .exec<{ status: string; lease_id: string | null }>(
-          "SELECT status, lease_id FROM events WHERE delivery_id = ?",
+        .exec<{ status: string; lease_id: string | null; available_at: string }>(
+          "SELECT status, lease_id, available_at FROM events WHERE delivery_id = ?",
           claim.deliveryId,
         )
         .toArray()[0];
@@ -305,8 +307,8 @@ export class RepoCoordinator extends DurableObject<Env> {
         );
       }
 
-      // Conflict: status changed or lease mismatch
-      if (row.status !== "processing" || row.lease_id !== claim.leaseId) {
+      // Conflict: status changed, lease mismatch, or lease expired (fixes cloud-factory-cf-xh7)
+      if (row.status !== "processing" || row.lease_id !== claim.leaseId || row.available_at <= now) {
         return Response.json(
           { ok: false, error: "lease conflict", deliveryId: claim.deliveryId },
           { status: 409 },
@@ -336,6 +338,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
     const reason = typeof body?.["error"] === "string" ? (body["error"] as string) : "unknown error";
 
+    const now = new Date().toISOString();
     // Pass 1: validate every claim in the batch before mutating any rows (fixes cloud-factory-cf-010)
     interface ValidatedFail {
       deliveryId: string;
@@ -352,8 +355,8 @@ export class RepoCoordinator extends DurableObject<Env> {
       }
 
       const row = this.sql
-        .exec<{ attempts: number; status: string; lease_id: string | null }>(
-          "SELECT attempts, status, lease_id FROM events WHERE delivery_id = ?",
+        .exec<{ attempts: number; status: string; lease_id: string | null; available_at: string }>(
+          "SELECT attempts, status, lease_id, available_at FROM events WHERE delivery_id = ?",
           claim.deliveryId,
         )
         .toArray()[0];
@@ -365,8 +368,8 @@ export class RepoCoordinator extends DurableObject<Env> {
         );
       }
 
-      // Conflict: status changed or lease mismatch
-      if (row.status !== "processing" || row.lease_id !== claim.leaseId) {
+      // Conflict: status changed, lease mismatch, or lease expired (fixes cloud-factory-cf-xh7)
+      if (row.status !== "processing" || row.lease_id !== claim.leaseId || row.available_at <= now) {
         return Response.json(
           { ok: false, error: "lease conflict", deliveryId: claim.deliveryId },
           { status: 409 },

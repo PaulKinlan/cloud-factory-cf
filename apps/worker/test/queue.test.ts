@@ -325,6 +325,45 @@ describe("coordinator queue", () => {
     expect(finalProcessed.events).toHaveLength(2);
   });
 
+  it("rejects acks and fails with 409 when lease has expired even before alarm runs (fixes cloud-factory-cf-xh7)", async () => {
+    const repository = "acme/expired-lease";
+    await queue(repository, ["expired-ack", "expired-fail"]);
+
+    const claim = await call<ClaimResponse>(repository, "/claim", { limit: 2, visibilityMs: 60_000 });
+    expect(claim.claimed).toHaveLength(2);
+    const ackClaim = claim.claimed.find((c) => c.deliveryId === "expired-ack")!;
+    const failClaim = claim.claimed.find((c) => c.deliveryId === "expired-fail")!;
+
+    // Time passes past visibilityMs without alarm having fired yet
+    await makeDue(repository, "expired-ack");
+    await makeDue(repository, "expired-fail");
+
+    // Ack with expired lease must return 409 Conflict
+    const expiredAck = await coordinator(repository).fetch(`${COORDINATOR_URL}/ack`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deliveryId: "expired-ack", leaseId: ackClaim.leaseId }),
+    });
+    expect(expiredAck.status).toBe(409);
+    const expiredAckBody = (await expiredAck.json()) as { error: string };
+    expect(expiredAckBody.error).toBe("lease conflict");
+
+    // Fail with expired lease must return 409 Conflict
+    const expiredFail = await coordinator(repository).fetch(`${COORDINATOR_URL}/fail`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deliveryId: "expired-fail", leaseId: failClaim.leaseId, error: "too late" }),
+    });
+    expect(expiredFail.status).toBe(409);
+    const expiredFailBody = (await expiredFail.json()) as { error: string };
+    expect(expiredFailBody.error).toBe("lease conflict");
+
+    // Next claim re-claims both expired events with fresh leases
+    const reclaim = await call<ClaimResponse>(repository, "/claim", { limit: 2, visibilityMs: 60_000 });
+    expect(reclaim.claimed).toHaveLength(2);
+    expect(reclaim.claimed.map((c) => c.deliveryId).sort()).toEqual(["expired-ack", "expired-fail"]);
+  });
+
   it("rejects acks and fails without delivery ids or leaseId", async () => {
     const repository = "acme/bad-requests";
     const noAck = await coordinator(repository).fetch(`${COORDINATOR_URL}/ack`, {
