@@ -68,6 +68,24 @@ test('createLocalTools: provides file operations and blocks path traversal', asy
     // Exec command
     const execRes = (await execTool.handler({ command: 'node -e "console.log(12345)"' })) as any;
     assert.match(execRes.stdout, /12345/);
+
+    // Block exec_command escaping workspace via absolute path (fixes cloud-factory-cf-ad5)
+    const outsideTmp = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-exec-out-'));
+    await assert.rejects(
+      async () => {
+        await execTool.handler({ command: `printf ESCAPED > "${outsideTmp}/marker"` });
+      },
+      /Command containment violation: path '.*' is outside workspace root/,
+    );
+    await fs.rm(outsideTmp, { recursive: true, force: true });
+
+    // Block exec_command escaping workspace via .. traversal (fixes cloud-factory-cf-ad5)
+    await assert.rejects(
+      async () => {
+        await execTool.handler({ command: 'cat ../outside.txt' });
+      },
+      /Command containment violation: traversal '\.\.' is not allowed in command/,
+    );
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }

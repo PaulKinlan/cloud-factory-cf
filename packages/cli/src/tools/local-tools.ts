@@ -120,6 +120,37 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
     },
   };
 
+  function validateCommandContainment(cmd: string): void {
+    if (/(?:^|\s|\/)\.\.(?:\/|\s|$)/.test(cmd)) {
+      throw new Error(`Command containment violation: traversal '..' is not allowed in command`);
+    }
+
+    const allowedSystemPrefixes = [
+      '/bin/',
+      '/usr/bin/',
+      '/usr/local/bin/',
+      '/dev/null',
+      '/dev/zero',
+      '/dev/urandom',
+      '/dev/stdout',
+      '/dev/stderr',
+    ];
+    const matches = cmd.match(/(?:^|[\s"'=><|;&])(\/[^\s"'><|;&]+)/g);
+    if (matches) {
+      for (const rawMatch of matches) {
+        const cleanPath = rawMatch.replace(/^[=\s"'><|;&]+/, '');
+        const isSystem = allowedSystemPrefixes.some((p) => cleanPath === p || cleanPath.startsWith(p));
+        const isRoot =
+          cleanPath === rootDir ||
+          cleanPath.startsWith(rootDir + path.sep) ||
+          cleanPath.startsWith(rootDir + '/');
+        if (!isSystem && !isRoot) {
+          throw new Error(`Command containment violation: path '${cleanPath}' is outside workspace root`);
+        }
+      }
+    }
+  }
+
   const execCommandTool: ToolDefinition = {
     name: 'exec_command',
     description: 'Execute a shell command within the local workspace directory',
@@ -132,8 +163,10 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
       required: ['command'],
     },
     handler: async (params) => {
+      const cmdStr = params.command as string;
+      validateCommandContainment(cmdStr);
       const timeout = typeof params.timeoutMs === 'number' ? params.timeoutMs : commandTimeoutMs;
-      const { stdout, stderr } = await execAsync(params.command as string, {
+      const { stdout, stderr } = await execAsync(cmdStr, {
         cwd: rootDir,
         timeout,
         maxBuffer: 5 * 1024 * 1024,
