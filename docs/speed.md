@@ -55,20 +55,27 @@ tier must run tests unconditionally (see the next section).
 
 ### Why `vitest --changed` is not a gate here
 
-Verified on this tree (vitest 4.1.12, 2026-10-18) — `vitest run --changed`
-reported **"No test files found, exiting with code 0"**, i.e. a green run that
-executed nothing, in all three states:
+Background: this section started as a "changed tests" fast tier. It is not one,
+for two different reasons (findings `cloud-factory-cf-gy5`, `cloud-factory-cf-l0q`):
 
-1. clean committed worktree (the state `fleet-check` requires),
-2. after an uncommitted edit to `apps/worker/src/webhooks.ts`,
-3. with an explicit ref, `vitest run --changed=origin/main`.
+**No ref** (`vitest run --changed`, vitest 4.1.12, verified on this tree
+2026-10-18) — the change list comes from staged/unstaged git state only, never
+from the branch's commits. A committed branch therefore looks unchanged, and
+`fleet-check` only accepts a committed tree, so this mode reported
+**"No test files found, exiting with code 0"** on the state a gate actually
+verifies. (On this pool it also selected nothing with an uncommitted edit to
+`apps/worker/src/webhooks.ts`, which is why it is not trusted here at all.)
 
-The mechanism (finding `cloud-factory-cf-gy5`): the change list comes from
-staged/unstaged git state, not from the branch's commits, so a committed branch
-looks unchanged and selects no tests. The `test:changed` npm scripts are removed
-for that reason: a gate whose "nothing to test" is indistinguishable from a
-green suite is worse than no gate. Use `npm run test:file -- test/<file>.test.ts`
-while iterating, and `npm run ci` for any verdict.
+**Explicit ref** (`vitest run --changed=origin/main`) — vitest diffs
+`ref...HEAD` in addition to staged/unstaged files, so a branch that only touches
+docs or manifests legitimately selects zero tests. That zero is correct, not a
+bug; the problem is that it still exits 0, so "no affected tests" is
+indistinguishable from "the selection broke" or "there are no tests".
+
+Either way a green run can mean nothing ran. Gates here run tests
+unconditionally: `npm run test:file -- test/<file>.test.ts` while iterating,
+`npm run ci` for any verdict. The `test:changed` npm scripts were removed so the
+false-green path cannot be reached by habit or by a copied gate config.
 
 ## Budgets
 

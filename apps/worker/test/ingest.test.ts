@@ -4,10 +4,10 @@ import { githubRequest, gitlabRequest, signBody, TEST_SECRET } from "./support/w
 
 describe("webhook ingestion", () => {
   it("accepts a GitLab webhook authenticated with X-Gitlab-Token", async () => {
-    const response = await SELF.fetch(await gitlabRequest("gitlab-1", "acme/widgets"));
+    const response = await SELF.fetch(await gitlabRequest("gitlab-1", "acme/ingest-repo"));
     expect(response.status).toBe(202);
 
-    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/widgets"));
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/ingest-repo"));
     const events = (await (await stub.fetch("https://repo-coordinator.internal/events")).json()) as {
       events: Array<Record<string, unknown>>;
     };
@@ -16,29 +16,29 @@ describe("webhook ingestion", () => {
       provider: "gitlab",
       event: "Merge Request Hook",
       action: "open",
-      repository: "acme/widgets",
+      repository: "acme/ingest-repo",
       actor: "tanuki",
       status: "pending",
     });
   });
 
   it("rejects a GitLab webhook with a wrong or missing token", async () => {
-    const wrong = await SELF.fetch(await gitlabRequest("gitlab-2", "acme/widgets", { token: "nope" }));
+    const wrong = await SELF.fetch(await gitlabRequest("gitlab-2", "acme/ingest-repo", { token: "nope" }));
     expect(wrong.status).toBe(401);
     await expect(wrong.json()).resolves.toMatchObject({ error: "invalid token" });
 
     const missing = await SELF.fetch(
-      new Request("https://example.com/webhooks/gitlab/acme/widgets", {
+      new Request("https://example.com/webhooks/gitlab/acme/ingest-repo", {
         method: "POST",
         headers: { "content-type": "application/json", "x-gitlab-event-uuid": "gitlab-3" },
-        body: JSON.stringify({ object_kind: "push", project: { path_with_namespace: "acme/widgets" } }),
+        body: JSON.stringify({ object_kind: "push", project: { path_with_namespace: "acme/ingest-repo" } }),
       }),
     );
     expect(missing.status).toBe(401);
   });
 
   it("rejects an unsupported provider and a missing delivery id", async () => {
-    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/widgets"));
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/ingest-repo"));
 
     const unknownProvider = await stub.fetch("https://repo-coordinator.internal/events?provider=bitbucket", {
       method: "POST",
@@ -71,7 +71,7 @@ describe("webhook ingestion", () => {
     const signed = await githubRequest("malformed-1");
     const body = "{not json";
     const signature = signed.headers.get("x-hub-signature-256");
-    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/widgets"));
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/ingest-repo"));
 
     const malformed = await stub.fetch("https://repo-coordinator.internal/events?provider=github", {
       method: "POST",
