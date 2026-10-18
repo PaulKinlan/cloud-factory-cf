@@ -10,6 +10,7 @@ export interface LocalToolsOptions {
   cwd?: string;
   maxFileSize?: number;
   commandTimeoutMs?: number;
+  sandbox?: 'auto' | 'bwrap' | 'containment';
 }
 
 export function createLocalTools(options: LocalToolsOptions = {}): readonly ToolDefinition[] {
@@ -159,6 +160,10 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
     }
   }
 
+  function escapeArg(arg: string): string {
+    return "'" + arg.replace(/'/g, "'\\''") + "'";
+  }
+
   const execCommandTool: ToolDefinition = {
     name: 'exec_command',
     description: 'Execute a shell command within the local workspace directory',
@@ -172,18 +177,44 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
     },
     handler: async (params) => {
       const cmdStr = params.command as string;
-      validateCommandContainment(cmdStr);
       const timeout = typeof params.timeoutMs === 'number' ? params.timeoutMs : commandTimeoutMs;
+      const realRoot = await fs.realpath(rootDir).catch(() => rootDir);
+
+      const hasBwrap =
+        options.sandbox !== 'containment' &&
+        (await fs
+          .stat('/usr/bin/bwrap')
+          .then(() => true)
+          .catch(() => false));
+
+      if (hasBwrap) {
+        const bwrapCmd = `/usr/bin/bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --bind ${escapeArg(realRoot)} ${escapeArg(realRoot)} --chdir ${escapeArg(realRoot)} -- /bin/sh -c ${escapeArg(cmdStr)}`;
+        const { stdout, stderr } = await execAsync(bwrapCmd, {
+          cwd: realRoot,
+          timeout,
+          maxBuffer: 5 * 1024 * 1024,
+          env: {
+            PATH: process.env.PATH ?? '/bin:/usr/bin',
+            HOME: realRoot,
+            TMPDIR: realRoot,
+            TEMP: realRoot,
+            TMP: realRoot,
+          },
+        });
+        return { stdout, stderr, exitCode: 0 };
+      }
+
+      validateCommandContainment(cmdStr);
       const { stdout, stderr } = await execAsync(cmdStr, {
-        cwd: rootDir,
+        cwd: realRoot,
         timeout,
         maxBuffer: 5 * 1024 * 1024,
         env: {
           PATH: process.env.PATH ?? '/bin:/usr/bin',
-          HOME: rootDir,
-          TMPDIR: rootDir,
-          TEMP: rootDir,
-          TMP: rootDir,
+          HOME: realRoot,
+          TMPDIR: realRoot,
+          TEMP: realRoot,
+          TMP: realRoot,
         },
       });
       return { stdout, stderr, exitCode: 0 };
