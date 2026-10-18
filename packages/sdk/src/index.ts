@@ -81,6 +81,30 @@ export {
 } from './sinks/sink-registry.ts';
 
 export {
+  GitHubPRReviewSink,
+  type GitHubPRReviewExecutor,
+  type GitHubPRReviewSinkOptions,
+} from './sinks/github-pr-review-sink.ts';
+
+export {
+  GitHubIssueSink,
+  type GitHubIssueExecutor,
+  type GitHubIssueSinkOptions,
+} from './sinks/github-issue-sink.ts';
+
+export {
+  BeadsTaskSink,
+  type BeadsTaskExecutor,
+  type BeadsTaskSinkOptions,
+} from './sinks/beads-task-sink.ts';
+
+export {
+  CloudTelemetrySink,
+  type TelemetryExporter,
+  type CloudTelemetrySinkOptions,
+} from './sinks/cloud-telemetry-sink.ts';
+
+export {
   ToolRegistry,
 } from './tools/tool-registry.ts';
 
