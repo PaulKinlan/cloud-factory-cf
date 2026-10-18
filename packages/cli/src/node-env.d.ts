@@ -7,6 +7,9 @@ interface Process {
   cwd(): string;
   exit(code?: number): never;
   argv: string[];
+  on?(event: string, listener: (...args: any[]) => void): this;
+  once?(event: string, listener: (...args: any[]) => void): this;
+  off?(event: string, listener: (...args: any[]) => void): this;
 }
 
 declare var process: Process;
@@ -38,12 +41,18 @@ declare module 'node:fs/promises' {
   export function readdir(path: string, options: { withFileTypes: true }): Promise<Dirent[]>;
   export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
   export function mkdtemp(prefix: string): Promise<string>;
+  export function symlink(target: string, path: string): Promise<void>;
 }
 
 declare module 'node:child_process' {
   export function exec(
     command: string,
-    options: { cwd?: string; timeout?: number; maxBuffer?: number },
+    options: {
+      cwd?: string;
+      timeout?: number;
+      maxBuffer?: number;
+      env?: Record<string, string | undefined>;
+    },
     callback: (error: Error | null, stdout: string, stderr: string) => void,
   ): void;
 }

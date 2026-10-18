@@ -11,6 +11,7 @@ export interface CliParsedArgs {
   limit?: number;
   interval?: number;
   extensions?: string[];
+  once?: boolean;
 }
 
 export function parseArgs(args: readonly string[]): CliParsedArgs {
@@ -50,6 +51,7 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
   let coordinator: string | undefined;
   let limit: number | undefined;
   let interval: number | undefined;
+  let once: boolean | undefined;
   const extensions: string[] = [];
 
   for (let i = 0; i < remaining.length; i++) {
@@ -68,6 +70,8 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
       interval = Number.parseInt(remaining[++i]!, 10);
     } else if (arg === '--extension' && i + 1 < remaining.length) {
       extensions.push(remaining[++i]!);
+    } else if (arg === '--once') {
+      once = true;
     } else if (!arg.startsWith('-') && !prompt) {
       prompt = arg;
     }
@@ -82,6 +86,7 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
     limit,
     interval,
     extensions,
+    once,
   };
 }
 
@@ -100,6 +105,7 @@ OPTIONS:
   --coordinator <url>    Coordinator Durable Object URL (default: http://localhost:8787)
   --limit <n>            Maximum events to claim per batch (default: 5)
   --interval <ms>        Poll interval in milliseconds when idle (default: 1000)
+  --once                 Process a single batch and exit (worker command)
   --extension <path>     Path to extension module to load
 `;
 }
@@ -187,11 +193,41 @@ export async function runCli(
       pollIntervalMs: parsed.interval,
     });
 
-    io.stdout(`[factory-cloud] Starting queue worker polling ${coordinatorUrl}...`);
-    // Run single batch or loop depending on environment
-    const batch = await worker.processNextBatch();
-    io.stdout(`[factory-cloud] Processed batch: ${batch.claimedCount} claimed, ${batch.successCount} succeeded, ${batch.failCount} failed.`);
-    return 0;
+    if (parsed.once) {
+      io.stdout(`[factory-cloud] Processing single batch from ${coordinatorUrl}...`);
+      const batch = await worker.processNextBatch();
+      io.stdout(
+        `[factory-cloud] Processed batch: ${batch.claimedCount} claimed, ${batch.successCount} succeeded, ${batch.failCount} failed.`,
+      );
+      return batch.failCount > 0 ? 1 : 0;
+    }
+
+    io.stdout(`[factory-cloud] Starting queue worker daemon polling ${coordinatorUrl}...`);
+    const ac = new AbortController();
+    const handleSignal = () => {
+      io.stdout('[factory-cloud] Stopping queue worker...');
+      worker.stop();
+      ac.abort();
+    };
+
+    if (typeof process !== 'undefined' && process.once) {
+      process.once('SIGINT', handleSignal);
+      process.once('SIGTERM', handleSignal);
+    }
+
+    try {
+      await worker.start(ac.signal);
+      return 0;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      io.stderr(`[factory-cloud] Worker error: ${msg}`);
+      return 1;
+    } finally {
+      if (typeof process !== 'undefined' && process.off) {
+        process.off('SIGINT', handleSignal);
+        process.off('SIGTERM', handleSignal);
+      }
+    }
   }
 
   return 0;

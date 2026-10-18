@@ -121,6 +121,14 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
   };
 
   function validateCommandContainment(cmd: string): void {
+    if (/[><]/.test(cmd)) {
+      throw new Error("Command containment violation: shell redirection ('>', '<') is not permitted; use write_file/read_file");
+    }
+
+    if (/[\$`]/.test(cmd)) {
+      throw new Error("Command containment violation: shell variable expansion ('$') and command substitution ('`') are not permitted");
+    }
+
     if (/(?:^|\s|\/)\.\.(?:\/|\s|$)/.test(cmd)) {
       throw new Error(`Command containment violation: traversal '..' is not allowed in command`);
     }
@@ -170,6 +178,13 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
         cwd: rootDir,
         timeout,
         maxBuffer: 5 * 1024 * 1024,
+        env: {
+          PATH: process.env.PATH ?? '/bin:/usr/bin',
+          HOME: rootDir,
+          TMPDIR: rootDir,
+          TEMP: rootDir,
+          TMP: rootDir,
+        },
       });
       return { stdout, stderr, exitCode: 0 };
     },
