@@ -7,6 +7,7 @@ interface Process {
   cwd(): string;
   exit(code?: number): never;
   argv: string[];
+  execPath: string;
   on?(event: string, listener: (...args: any[]) => void): this;
   once?(event: string, listener: (...args: any[]) => void): this;
   off?(event: string, listener: (...args: any[]) => void): this;

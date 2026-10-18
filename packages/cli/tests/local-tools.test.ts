@@ -110,6 +110,21 @@ test('createLocalTools: provides file operations and blocks path traversal', asy
     await execTool.handler({ command: dynamicCmd });
     const hostEscaped = await fs.stat(hostEscapePath).then(() => true).catch(() => false);
     assert.equal(hostEscaped, false, 'Host filesystem outside workspace must not be modified by dynamic command');
+
+    // Test bwrap sandbox blocks reading host files outside workspace (fixes cloud-factory-cf-7c2)
+    const baseDir = await fs.mkdtemp(path.join(os.homedir(), 'cf-review-test-'));
+    try {
+      const privateMarkerPath = path.join(baseDir, 'private-marker');
+      await fs.writeFile(privateMarkerPath, 'PRIVATE_OUTSIDE_WORKSPACE');
+      await assert.rejects(
+        async () => {
+          await execTool.handler({ command: `cat ${privateMarkerPath}` });
+        },
+        /No such file or directory|Command failed/,
+      );
+    } finally {
+      await fs.rm(baseDir, { recursive: true, force: true });
+    }
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }

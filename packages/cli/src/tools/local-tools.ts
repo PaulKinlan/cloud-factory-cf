@@ -188,7 +188,58 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
           .catch(() => false));
 
       if (hasBwrap) {
-        const bwrapCmd = `/usr/bin/bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --bind ${escapeArg(realRoot)} ${escapeArg(realRoot)} --chdir ${escapeArg(realRoot)} -- /bin/sh -c ${escapeArg(cmdStr)}`;
+        const bwrapArgs: string[] = [
+          '/usr/bin/bwrap',
+          '--ro-bind',
+          '/usr',
+          '/usr',
+          '--symlink',
+          'usr/bin',
+          '/bin',
+          '--symlink',
+          'usr/lib',
+          '/lib',
+          '--symlink',
+          'usr/lib64',
+          '/lib64',
+          '--dev',
+          '/dev',
+          '--proc',
+          '/proc',
+          '--tmpfs',
+          '/tmp',
+          '--tmpfs',
+          '/home',
+        ];
+
+        // Read-only mount node runtime directory if installed outside /usr (e.g. nvm)
+        const nodeDir = path.dirname(path.dirname(process.execPath));
+        if (nodeDir && nodeDir !== '/usr' && nodeDir !== '/') {
+          bwrapArgs.push('--ro-bind', nodeDir, nodeDir);
+        }
+
+        // Mount DNS/SSL configuration read-only if present
+        const hasEtcResolv = await fs
+          .stat('/etc/resolv.conf')
+          .then(() => true)
+          .catch(() => false);
+        if (hasEtcResolv) {
+          bwrapArgs.push('--ro-bind', '/etc/resolv.conf', '/etc/resolv.conf');
+        }
+        const hasEtcSsl = await fs
+          .stat('/etc/ssl')
+          .then(() => true)
+          .catch(() => false);
+        if (hasEtcSsl) {
+          bwrapArgs.push('--ro-bind', '/etc/ssl', '/etc/ssl');
+        }
+
+        // Mount workspace root read-write only
+        bwrapArgs.push('--bind', realRoot, realRoot);
+        bwrapArgs.push('--chdir', realRoot);
+        bwrapArgs.push('--', '/bin/sh', '-c', cmdStr);
+
+        const bwrapCmd = bwrapArgs.map((arg) => escapeArg(arg)).join(' ');
         const { stdout, stderr } = await execAsync(bwrapCmd, {
           cwd: realRoot,
           timeout,
