@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { MAX_WEBHOOK_BYTES } from "./webhooks";
 
 // Durable Object classes are resolved from the Worker's main module, so the
 // coordinator has to be exported here (see `durable_objects` in wrangler.jsonc).
@@ -24,6 +25,12 @@ export default {
     }
     if (request.method !== "POST") {
       return new Response("method not allowed", { status: 405 });
+    }
+
+    // Refuse oversized payloads before buffering them into a string.
+    const declared = Number(request.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > MAX_WEBHOOK_BYTES) {
+      return Response.json({ ok: false, error: "payload too large" }, { status: 413 });
     }
 
     const { provider, owner, repo } = match.groups as {
@@ -59,9 +66,14 @@ export default {
 function forwardableHeaders(headers: Headers, repository: string): Headers {
   const forwarded = new Headers({ "x-factory-repository": repository });
   for (const name of [
+    // GitHub
     "x-hub-signature-256",
     "x-github-delivery",
     "x-github-event",
+    // GitLab
+    "x-gitlab-token",
+    "x-gitlab-event-uuid",
+    "x-gitlab-event",
     "content-type",
   ]) {
     const value = headers.get(name);

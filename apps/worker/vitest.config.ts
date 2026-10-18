@@ -10,6 +10,7 @@ export default defineConfig({
           // Test-only secret: real deployments set WEBHOOK_SECRET with
           // `wrangler secret put` and never commit a value.
           WEBHOOK_SECRET: "test-webhook-secret",
+          GITLAB_WEBHOOK_TOKEN: "test-gitlab-token",
         },
       },
     }),

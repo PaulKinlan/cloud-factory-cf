@@ -1,18 +1,39 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
-import { verifyHmacSha256 } from "./hmac";
+import {
+  deliveryIdFor,
+  eventNameFor,
+  isProvider,
+  MAX_WEBHOOK_BYTES,
+  normaliseEvent,
+  verifyGithubSignature,
+  verifyGitlabToken,
+  type NormalisedEvent,
+  type Provider,
+} from "./webhooks";
+
+/** An event that keeps failing is dead-lettered instead of retried forever. */
+export const MAX_ATTEMPTS = 5;
+/** How long a runner may hold a claimed event before it is handed back. */
+export const DEFAULT_VISIBILITY_MS = 60_000;
+/** Exponential-ish backoff between attempts: attempt * this, capped below. */
+const RETRY_BACKOFF_MS = 2_000;
+const RETRY_BACKOFF_CAP_MS = 60_000;
 
 /**
- * Per-repository Durable Object.
+ * Per-repository Durable Object: the coordinator for one repo's event stream.
  *
- * The scaffold proves out the three things every later station depends on:
- *   1. a SQLite-backed Durable Object class (see `migrations` in wrangler.jsonc),
- *   2. signed webhook ingestion with delivery-id deduplication,
- *   3. a durable queue that survives isolate restarts and can be drained.
+ * Responsibilities (webhook ingestion + a durable queue):
+ *   1. verify the provider signature/token over the raw body,
+ *   2. dedupe on the provider delivery id (redeliveries are acknowledged but
+ *      not queued twice),
+ *   3. persist the event in SQLite and expose a claim/ack/fail queue, so a
+ *      runner can process events at-least-once,
+ *   4. hand unacknowledged leases back to the queue (alarm driven), and
+ *      dead-letter events that exhaust `MAX_ATTEMPTS`.
  *
- * Agent runs, hierarchical memory and the action sinks are layered on top of
- * this object (see the epic `cloud-factory-cf-rta`); the queue contract here is
- * deliberately small so it stays cheap to extend.
+ * The runner (agent) that consumes the queue is layered on later; this object
+ * owns only the durable contract, which is what every sink depends on.
  */
 export class RepoCoordinator extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -28,19 +49,40 @@ export class RepoCoordinator extends DurableObject<Env> {
 
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const provider = url.searchParams.get("provider") ?? "github";
 
     if (request.method === "POST" && url.pathname === "/events") {
-      return this.ingest(request, provider);
+      return this.ingest(request, url.searchParams.get("provider") ?? "github");
     }
     if (request.method === "GET" && url.pathname === "/events") {
-      return this.listEvents();
+      return this.listEvents(url);
+    }
+    if (request.method === "POST" && url.pathname === "/claim") {
+      return this.claim(await readJson(request));
+    }
+    if (request.method === "POST" && url.pathname === "/ack") {
+      return this.ack(await readJson(request));
+    }
+    if (request.method === "POST" && url.pathname === "/fail") {
+      return this.fail(await readJson(request));
     }
     if (request.method === "POST" && url.pathname === "/drain") {
       return this.drain();
     }
+    if (request.method === "POST" && url.pathname === "/requeue-expired") {
+      const requeued = await this.requeueExpiredLeases();
+      return Response.json({ ok: true, requeued });
+    }
+    if (request.method === "GET" && url.pathname === "/stats") {
+      return this.stats();
+    }
 
     return new Response("not found", { status: 404 });
+  }
+
+  /** Alarm entry point: hand expired leases back and re-arm for the next retry. */
+  override async alarm(): Promise<void> {
+    await this.requeueExpiredLeases();
+    await this.armAlarm();
   }
 
   private migrate(): void {
@@ -49,37 +91,41 @@ export class RepoCoordinator extends DurableObject<Env> {
         delivery_id TEXT PRIMARY KEY,
         provider TEXT NOT NULL,
         event TEXT NOT NULL,
+        action TEXT,
         repository TEXT NOT NULL,
+        actor TEXT,
         received_at TEXT NOT NULL,
         payload TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending'
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        available_at TEXT NOT NULL,
+        last_error TEXT
       );
     `);
     this.sql.exec(`
-      CREATE INDEX IF NOT EXISTS events_status_idx ON events (status, received_at);
+      CREATE INDEX IF NOT EXISTS events_queue_idx ON events (status, available_at, received_at);
     `);
   }
 
-  private async ingest(request: Request, provider: string): Promise<Response> {
-    const secret = this.env.WEBHOOK_SECRET;
-    if (!secret) {
-      return Response.json(
-        { ok: false, error: "webhook secret not configured" },
-        { status: 503 },
-      );
+  // ---------------------------------------------------------------- ingestion
+
+  private async ingest(request: Request, providerParam: string): Promise<Response> {
+    if (!isProvider(providerParam)) {
+      return Response.json({ ok: false, error: "unsupported provider" }, { status: 400 });
     }
+    const provider: Provider = providerParam;
 
     const body = await request.text();
-    const valid = await verifyHmacSha256(
-      secret,
-      body,
-      request.headers.get("x-hub-signature-256"),
-    );
-    if (!valid) {
-      return Response.json({ ok: false, error: "invalid signature" }, { status: 401 });
+    if (byteLength(body) > MAX_WEBHOOK_BYTES) {
+      return Response.json({ ok: false, error: "payload too large" }, { status: 413 });
     }
 
-    const deliveryId = request.headers.get("x-github-delivery");
+    const authorised = await this.authorise(provider, request.headers, body);
+    if (!authorised.ok) {
+      return Response.json({ ok: false, error: authorised.error }, { status: authorised.status });
+    }
+
+    const deliveryId = deliveryIdFor(provider, request.headers);
     if (!deliveryId) {
       return Response.json({ ok: false, error: "missing delivery id" }, { status: 400 });
     }
@@ -91,9 +137,29 @@ export class RepoCoordinator extends DurableObject<Env> {
       return Response.json({ ok: false, error: "invalid json body" }, { status: 400 });
     }
 
-    const repository =
-      request.headers.get("x-factory-repository") ?? repositoryFromPayload(payload);
-    const event = request.headers.get("x-github-event") ?? "unknown";
+    const normalised: NormalisedEvent = normaliseEvent(provider, payload);
+    const routedRepository = request.headers.get("x-factory-repository");
+    const repository = normalised.repository !== "unknown"
+      ? normalised.repository
+      : (routedRepository ?? "unknown");
+
+    // A payload that names a different repository than the endpoint it arrived
+    // on is either a misconfigured hook or a forgery attempt: refuse it.
+    if (
+      routedRepository !== null &&
+      normalised.repository !== "unknown" &&
+      !sameRepository(routedRepository, normalised.repository)
+    ) {
+      return Response.json(
+        {
+          ok: false,
+          error: "repository mismatch",
+          expected: routedRepository,
+          received: normalised.repository,
+        },
+        { status: 400 },
+      );
+    }
 
     const existing = this.sql
       .exec<{ delivery_id: string }>(
@@ -105,70 +171,315 @@ export class RepoCoordinator extends DurableObject<Env> {
       return Response.json({ ok: true, duplicate: true, deliveryId }, { status: 200 });
     }
 
+    const now = new Date().toISOString();
+    const headerEvent = eventNameFor(provider, request.headers);
     this.sql.exec(
-      `INSERT INTO events (delivery_id, provider, event, repository, received_at, payload, status)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
+      `INSERT INTO events (
+         delivery_id, provider, event, action, repository, actor,
+         received_at, payload, status, attempts, available_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)`,
       deliveryId,
       provider,
-      event,
+      headerEvent !== "unknown" ? headerEvent : (normalised.payloadEvent ?? "unknown"),
+      normalised.action,
       repository,
-      new Date().toISOString(),
+      normalised.actor,
+      now,
       body,
+      now,
     );
 
     return Response.json({ ok: true, queued: true, deliveryId }, { status: 202 });
   }
 
-  private listEvents(): Response {
-    const rows = this.sql
+  private async authorise(
+    provider: Provider,
+    headers: Headers,
+    body: string,
+  ): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+    if (provider === "github") {
+      const secret = this.env.WEBHOOK_SECRET;
+      if (!secret) return { ok: false, status: 503, error: "webhook secret not configured" };
+      const valid = await verifyGithubSignature(secret, body, headers.get("x-hub-signature-256"));
+      return valid ? { ok: true } : { ok: false, status: 401, error: "invalid signature" };
+    }
+
+    const token = this.env.GITLAB_WEBHOOK_TOKEN;
+    if (!token) return { ok: false, status: 503, error: "gitlab token not configured" };
+    const valid = await verifyGitlabToken(token, headers.get("x-gitlab-token"));
+    return valid ? { ok: true } : { ok: false, status: 401, error: "invalid token" };
+  }
+
+  // ---------------------------------------------------------------- queue API
+
+  private async claim(payload: unknown): Promise<Response> {
+    const body = asRecord(payload);
+    const limit = clampInt(body?.["limit"], 1, 100, 10);
+    const visibilityMs = clampInt(body?.["visibilityMs"], 0, 3_600_000, DEFAULT_VISIBILITY_MS);
+    const now = new Date().toISOString();
+
+    const due = this.sql
+      .exec<{ delivery_id: string }>(
+        `SELECT delivery_id FROM events
+         WHERE status = 'pending' AND available_at <= ?
+         ORDER BY received_at, delivery_id LIMIT ?`,
+        now,
+        limit,
+      )
+      .toArray();
+
+    if (due.length === 0) return Response.json({ ok: true, claimed: [] });
+
+    const leaseUntil = new Date(Date.now() + visibilityMs).toISOString();
+    const placeholders = due.map(() => "?").join(", ");
+    this.sql.exec(
+      `UPDATE events
+       SET status = 'processing', attempts = attempts + 1, available_at = ?
+       WHERE delivery_id IN (${placeholders})`,
+      leaseUntil,
+      ...due.map((row) => row.delivery_id),
+    );
+
+    const claimed = this.sql
       .exec<EventRow>(
-        `SELECT delivery_id, provider, event, repository, received_at, payload, status
-         FROM events ORDER BY received_at DESC LIMIT 50`,
+        `SELECT ${EVENT_COLUMNS} FROM events WHERE delivery_id IN (${placeholders})
+         ORDER BY received_at, delivery_id`,
+        ...due.map((row) => row.delivery_id),
+      )
+      .toArray()
+      .map(toWireEvent);
+
+    await this.armAlarm();
+
+    return Response.json({ ok: true, claimed, leaseUntil });
+  }
+
+  private async ack(payload: unknown): Promise<Response> {
+    const ids = deliveryIdsFrom(payload);
+    if (ids.length === 0) {
+      return Response.json({ ok: false, error: "no deliveryIds" }, { status: 400 });
+    }
+
+    const placeholders = ids.map(() => "?").join(", ");
+    // Only a live lease may be acknowledged: an ack for a row that is already
+    // processed, dead-lettered or still pending is a no-op, never a state change.
+    this.sql.exec(
+      `UPDATE events SET status = 'processed', last_error = NULL
+       WHERE status = 'processing' AND delivery_id IN (${placeholders})`,
+      ...ids,
+    );
+
+    return Response.json({ ok: true, acknowledged: ids.length });
+  }
+
+  private async fail(payload: unknown): Promise<Response> {
+    const body = asRecord(payload);
+    const ids = deliveryIdsFrom(payload);
+    if (ids.length === 0) {
+      return Response.json({ ok: false, error: "no deliveryIds" }, { status: 400 });
+    }
+    const reason = typeof body?.["error"] === "string" ? (body["error"] as string) : "unknown error";
+
+    let retried = 0;
+    let deadLettered = 0;
+    for (const id of ids) {
+      const row = this.sql
+        .exec<{ attempts: number; status: string }>(
+          "SELECT attempts, status FROM events WHERE delivery_id = ?",
+          id,
+        )
+        .toArray()[0];
+      if (!row || row.status !== "processing") continue;
+
+      if (row.attempts >= MAX_ATTEMPTS) {
+        this.sql.exec(
+          "UPDATE events SET status = 'failed', last_error = ? WHERE delivery_id = ?",
+          reason,
+          id,
+        );
+        deadLettered += 1;
+        continue;
+      }
+
+      const backoff = Math.min(RETRY_BACKOFF_MS * Math.max(row.attempts, 1), RETRY_BACKOFF_CAP_MS);
+      this.sql.exec(
+        `UPDATE events SET status = 'pending', last_error = ?, available_at = ?
+         WHERE delivery_id = ?`,
+        reason,
+        new Date(Date.now() + backoff).toISOString(),
+        id,
+      );
+      retried += 1;
+    }
+
+    await this.armAlarm();
+
+    return Response.json({ ok: true, retried, deadLettered });
+  }
+
+  /** Convenience path for tests/tools: process everything that is due right now. */
+  private async drain(): Promise<Response> {
+    const now = new Date().toISOString();
+    const due = this.sql
+      .exec<{ delivery_id: string }>(
+        "SELECT delivery_id FROM events WHERE status = 'pending' AND available_at <= ?",
+        now,
+      )
+      .toArray();
+
+    if (due.length > 0) {
+      this.sql.exec("UPDATE events SET status = 'processed' WHERE status = 'pending' AND available_at <= ?", now);
+    }
+
+    return Response.json({ ok: true, drained: due.length });
+  }
+
+  private listEvents(url: URL): Response {
+    const limit = clampInt(url.searchParams.get("limit"), 1, 200, 50);
+    const status = url.searchParams.get("status");
+    const rows = status
+      ? this.sql
+          .exec<EventRow>(
+            `SELECT ${EVENT_COLUMNS} FROM events WHERE status = ?
+             ORDER BY received_at DESC LIMIT ?`,
+            status,
+            limit,
+          )
+          .toArray()
+      : this.sql
+          .exec<EventRow>(
+            `SELECT ${EVENT_COLUMNS} FROM events ORDER BY received_at DESC LIMIT ?`,
+            limit,
+          )
+          .toArray();
+
+    return Response.json({
+      ok: true,
+      count: rows.length,
+      events: rows.map(toWireEvent),
+    });
+  }
+
+  private stats(): Response {
+    const counts = this.sql
+      .exec<{ status: string; total: number }>(
+        "SELECT status, count(*) AS total FROM events GROUP BY status",
       )
       .toArray();
 
     return Response.json({
       ok: true,
-      count: rows.length,
-      events: rows.map((row) => ({
-        deliveryId: row.delivery_id,
-        provider: row.provider,
-        event: row.event,
-        repository: row.repository,
-        receivedAt: row.received_at,
-        status: row.status,
-      })),
+      repository: this.ctx.id.name ?? "unknown",
+      counts: Object.fromEntries(counts.map((row) => [row.status, row.total])),
     });
   }
 
-  private drain(): Response {
-    const pending = this.sql
+  // ------------------------------------------------------------------ leases
+
+  private async requeueExpiredLeases(): Promise<number> {
+    const now = new Date().toISOString();
+    const expired = this.sql
       .exec<{ total: number }>(
-        "SELECT count(*) AS total FROM events WHERE status = 'pending'",
+        "SELECT count(*) AS total FROM events WHERE status = 'processing' AND available_at <= ?",
+        now,
       )
       .one().total;
 
-    if (pending > 0) {
-      this.sql.exec("UPDATE events SET status = 'processed' WHERE status = 'pending'");
+    if (expired > 0) {
+      this.sql.exec(
+        "UPDATE events SET status = 'pending' WHERE status = 'processing' AND available_at <= ?",
+        now,
+      );
     }
+    return expired;
+  }
 
-    return Response.json({ ok: true, drained: pending });
+  /**
+   * Schedule a wake-up for the next lease expiry or retry backoff. Rows that are
+   * already due are left to the runner: arming an alarm for "now" would spin.
+   */
+  private async armAlarm(): Promise<void> {
+    const now = new Date().toISOString();
+    const next = this.sql
+      .exec<{ next: string | null }>(
+        `SELECT MIN(available_at) AS next FROM events
+         WHERE status IN ('pending', 'processing') AND available_at > ?`,
+        now,
+      )
+      .one().next;
+
+    if (next) {
+      await this.ctx.storage.setAlarm(Date.parse(next) + 1_000);
+    } else {
+      await this.ctx.storage.deleteAlarm();
+    }
   }
 }
+
+const EVENT_COLUMNS =
+  "delivery_id, provider, event, action, repository, actor, received_at, status, attempts, available_at, last_error";
 
 interface EventRow extends Record<string, SqlStorageValue> {
   delivery_id: string;
   provider: string;
   event: string;
+  action: string | null;
   repository: string;
+  actor: string | null;
   received_at: string;
-  payload: string;
   status: string;
+  attempts: number;
+  available_at: string;
+  last_error: string | null;
 }
 
-function repositoryFromPayload(payload: unknown): string {
-  if (typeof payload !== "object" || payload === null) return "unknown";
-  const repository = (payload as { repository?: { full_name?: unknown } }).repository;
-  const fullName = repository?.full_name;
-  return typeof fullName === "string" ? fullName : "unknown";
+function toWireEvent(row: EventRow) {
+  return {
+    deliveryId: row.delivery_id,
+    provider: row.provider,
+    event: row.event,
+    action: row.action,
+    repository: row.repository,
+    actor: row.actor,
+    receivedAt: row.received_at,
+    status: row.status,
+    attempts: row.attempts,
+    availableAt: row.available_at,
+    lastError: row.last_error,
+  };
+}
+
+function deliveryIdsFrom(payload: unknown): string[] {
+  const body = asRecord(payload);
+  const raw = body?.["deliveryIds"] ?? body?.["deliveryId"];
+  const list = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw];
+  return list.filter((id): id is string => typeof id === "string" && id.length > 0);
+}
+
+async function readJson(request: Request): Promise<unknown> {
+  const text = await request.text();
+  if (text.length === 0) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function clampInt(value: unknown, min: number, max: number, fallback: number): number {
+  const parsed = typeof value === "string" ? Number.parseInt(value, 10) : value;
+  if (typeof parsed !== "number" || !Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(Math.trunc(parsed), min), max);
+}
+
+function sameRepository(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+function byteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }

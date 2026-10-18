@@ -1,2 +1,3 @@
 # Copy to .dev.vars for `wrangler dev`. Never commit real secrets.
-WEBHOOK_SECRET=replace-me
+WEBHOOK_SECRET=replace-me          # GitHub: X-Hub-Signature-256 HMAC key
+GITLAB_WEBHOOK_TOKEN=replace-me    # GitLab: X-Gitlab-Token shared secret
