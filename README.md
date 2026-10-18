@@ -15,6 +15,9 @@ apps/worker/     Cloudflare Worker entry point + per-repo Durable Object
 packages/sdk/    @factory-cloud/sdk — Pi-inspired extension hooks (see epic)
 ```
 
+Gate commands, their measured cost and the test-tier rules live in
+[docs/speed.md](docs/speed.md).
+
 ## Local development
 
 ```bash

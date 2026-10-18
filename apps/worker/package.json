@@ -11,7 +11,6 @@
     "build": "wrangler deploy --dry-run --outdir dist",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "test:changed": "vitest run --changed",
     "test:file": "vitest run"
   },
   "dependencies": {

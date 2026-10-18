@@ -15,7 +15,6 @@
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "test:changed": "npm run test:changed --workspaces --if-present",
     "test:file": "npm run test:file --workspaces --if-present",
     "dev": "npm run dev -w @factory-cloud/worker",
     "deploy": "npm run deploy -w @factory-cloud/worker",
