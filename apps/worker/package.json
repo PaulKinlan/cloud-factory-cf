@@ -1,0 +1,27 @@
+{
+  "name": "@factory-cloud/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Workers entry point and Durable Object repo coordinator for Cloud Factory CF",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:changed": "vitest run --changed",
+    "test:file": "vitest run"
+  },
+  "dependencies": {
+    "@cloudflare/computer": "^0.5.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.4.4",
+    "@cloudflare/workers-types": "^5.20261018.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.151.1"
+  }
+}
