@@ -11,6 +11,7 @@ export interface JSONSchemaProperty {
   readonly items?: JSONSchemaProperty;
   readonly properties?: Readonly<Record<string, JSONSchemaProperty>>;
   readonly required?: readonly string[];
+  readonly additionalProperties?: boolean;
   readonly default?: unknown;
 }
 

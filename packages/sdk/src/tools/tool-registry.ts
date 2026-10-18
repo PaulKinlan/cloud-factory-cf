@@ -108,10 +108,11 @@ export class ToolRegistry {
       }
     }
 
-    // Check additionalProperties: false
-    if (additionalProperties === false && properties) {
+    // Check additionalProperties: false (enforce even when properties is undefined, fixes cloud-factory-cf-q1a)
+    if (additionalProperties === false) {
+      const allowedProps = properties ?? {};
       for (const key of Object.keys(params)) {
-        if (!Object.prototype.hasOwnProperty.call(properties, key)) {
+        if (!Object.prototype.hasOwnProperty.call(allowedProps, key)) {
           throw new Error(
             `Unexpected parameter "${key}" for tool "${definition.name}" (additionalProperties is false)`
           );
@@ -119,7 +120,7 @@ export class ToolRegistry {
       }
     }
 
-    // Check declared types, enums, items, and nested schemas (fixes cloud-factory-cf-z4f)
+    // Check declared types, enums, items, and nested schemas (fixes cloud-factory-cf-z4f, cloud-factory-cf-q1a)
     if (properties) {
       for (const [propName, propSchema] of Object.entries(properties)) {
         if (Object.prototype.hasOwnProperty.call(params, propName) && params[propName] !== undefined) {
@@ -138,35 +139,37 @@ export class ToolRegistry {
     const expectedType = schema.type;
     let isValid = true;
 
-    switch (expectedType) {
-      case 'string':
-        isValid = typeof value === 'string';
-        break;
-      case 'number':
-        isValid = typeof value === 'number' && !Number.isNaN(value);
-        break;
-      case 'integer':
-        isValid = typeof value === 'number' && Number.isInteger(value);
-        break;
-      case 'boolean':
-        isValid = typeof value === 'boolean';
-        break;
-      case 'array':
-        isValid = Array.isArray(value);
-        break;
-      case 'object':
-        isValid = typeof value === 'object' && value !== null && !Array.isArray(value);
-        break;
-      case 'null':
-        isValid = value === null;
-        break;
-    }
+    if (expectedType) {
+      switch (expectedType) {
+        case 'string':
+          isValid = typeof value === 'string';
+          break;
+        case 'number':
+          isValid = typeof value === 'number' && !Number.isNaN(value);
+          break;
+        case 'integer':
+          isValid = typeof value === 'number' && Number.isInteger(value);
+          break;
+        case 'boolean':
+          isValid = typeof value === 'boolean';
+          break;
+        case 'array':
+          isValid = Array.isArray(value);
+          break;
+        case 'object':
+          isValid = typeof value === 'object' && value !== null && !Array.isArray(value);
+          break;
+        case 'null':
+          isValid = value === null;
+          break;
+      }
 
-    if (!isValid) {
-      const actualType = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
-      throw new Error(
-        `Invalid type for parameter "${propPath}" on tool "${toolName}": expected ${expectedType}, got ${actualType}`
-      );
+      if (!isValid) {
+        const actualType = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
+        throw new Error(
+          `Invalid type for parameter "${propPath}" on tool "${toolName}": expected ${expectedType}, got ${actualType}`
+        );
+      }
     }
 
     // Enforce enum if declared
@@ -178,16 +181,19 @@ export class ToolRegistry {
       }
     }
 
-    // Enforce items for arrays
-    if (expectedType === 'array' && schema.items && Array.isArray(value)) {
-      for (let i = 0; i < value.length; i++) {
-        this.validateProperty(toolName, `${propPath}[${i}]`, value[i], schema.items);
+    // Enforce items for arrays (whether or not type was explicitly declared)
+    if ((expectedType === 'array' || schema.items) && Array.isArray(value)) {
+      if (schema.items) {
+        for (let i = 0; i < value.length; i++) {
+          this.validateProperty(toolName, `${propPath}[${i}]`, value[i], schema.items);
+        }
       }
     }
 
-    // Enforce nested properties for objects
-    if (expectedType === 'object' && schema.properties && typeof value === 'object' && value !== null) {
+    // Enforce object validation: required, additionalProperties, and nested properties (fixes cloud-factory-cf-q1a)
+    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
       const obj = value as Record<string, unknown>;
+
       if (schema.required && Array.isArray(schema.required)) {
         for (const req of schema.required) {
           if (!Object.prototype.hasOwnProperty.call(obj, req) || obj[req] === undefined) {
@@ -197,9 +203,23 @@ export class ToolRegistry {
           }
         }
       }
-      for (const [subKey, subSchema] of Object.entries(schema.properties)) {
-        if (Object.prototype.hasOwnProperty.call(obj, subKey) && obj[subKey] !== undefined) {
-          this.validateProperty(toolName, `${propPath}.${subKey}`, obj[subKey], subSchema);
+
+      if (schema.additionalProperties === false) {
+        const allowedProps = schema.properties ?? {};
+        for (const key of Object.keys(obj)) {
+          if (!Object.prototype.hasOwnProperty.call(allowedProps, key)) {
+            throw new Error(
+              `Unexpected property "${key}" in parameter "${propPath}" on tool "${toolName}" (additionalProperties is false)`
+            );
+          }
+        }
+      }
+
+      if (schema.properties) {
+        for (const [subKey, subSchema] of Object.entries(schema.properties)) {
+          if (Object.prototype.hasOwnProperty.call(obj, subKey) && obj[subKey] !== undefined) {
+            this.validateProperty(toolName, `${propPath}.${subKey}`, obj[subKey], subSchema);
+          }
         }
       }
     }

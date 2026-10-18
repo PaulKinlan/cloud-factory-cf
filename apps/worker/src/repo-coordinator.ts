@@ -99,12 +99,18 @@ export class RepoCoordinator extends DurableObject<Env> {
         status TEXT NOT NULL DEFAULT 'pending',
         attempts INTEGER NOT NULL DEFAULT 0,
         available_at TEXT NOT NULL,
-        last_error TEXT
+        last_error TEXT,
+        lease_id TEXT
       );
     `);
     this.sql.exec(`
       CREATE INDEX IF NOT EXISTS events_queue_idx ON events (status, available_at, received_at);
     `);
+    try {
+      this.sql.exec("ALTER TABLE events ADD COLUMN lease_id TEXT;");
+    } catch {
+      // Column already exists
+    }
   }
 
   // ---------------------------------------------------------------- ingestion
@@ -213,6 +219,7 @@ export class RepoCoordinator extends DurableObject<Env> {
   // ---------------------------------------------------------------- queue API
 
   private async claim(payload: unknown): Promise<Response> {
+    await this.requeueExpiredLeases();
     const body = asRecord(payload);
     const limit = clampInt(body?.["limit"], 1, 100, 10);
     const visibilityMs = clampInt(body?.["visibilityMs"], 0, 3_600_000, DEFAULT_VISIBILITY_MS);
@@ -231,15 +238,19 @@ export class RepoCoordinator extends DurableObject<Env> {
     if (due.length === 0) return Response.json({ ok: true, claimed: [] });
 
     const leaseUntil = new Date(Date.now() + visibilityMs).toISOString();
-    const placeholders = due.map(() => "?").join(", ");
-    this.sql.exec(
-      `UPDATE events
-       SET status = 'processing', attempts = attempts + 1, available_at = ?
-       WHERE delivery_id IN (${placeholders})`,
-      leaseUntil,
-      ...due.map((row) => row.delivery_id),
-    );
+    for (const row of due) {
+      const leaseId = crypto.randomUUID();
+      this.sql.exec(
+        `UPDATE events
+         SET status = 'processing', attempts = attempts + 1, available_at = ?, lease_id = ?
+         WHERE delivery_id = ?`,
+        leaseUntil,
+        leaseId,
+        row.delivery_id,
+      );
+    }
 
+    const placeholders = due.map(() => "?").join(", ");
     const claimed = this.sql
       .exec<EventRow>(
         `SELECT ${EVENT_COLUMNS} FROM events WHERE delivery_id IN (${placeholders})
@@ -255,59 +266,140 @@ export class RepoCoordinator extends DurableObject<Env> {
   }
 
   private async ack(payload: unknown): Promise<Response> {
-    const ids = deliveryIdsFrom(payload);
-    if (ids.length === 0) {
+    const claims = claimsFrom(payload);
+    if (claims.length === 0) {
       return Response.json({ ok: false, error: "no deliveryIds" }, { status: 400 });
     }
 
-    const placeholders = ids.map(() => "?").join(", ");
-    // Only a live lease may be acknowledged: an ack for a row that is already
-    // processed, dead-lettered or still pending is a no-op, never a state change.
-    this.sql.exec(
-      `UPDATE events SET status = 'processed', last_error = NULL
-       WHERE status = 'processing' AND delivery_id IN (${placeholders})`,
-      ...ids,
-    );
+    const now = new Date().toISOString();
+    // Pass 1: validate every claim in the batch before mutating any rows (fixes cloud-factory-cf-010)
+    const toAcknowledge: string[] = [];
+    for (const claim of claims) {
+      if (!claim.leaseId) {
+        return Response.json(
+          { ok: false, error: "missing leaseId", deliveryId: claim.deliveryId },
+          { status: 400 },
+        );
+      }
 
-    return Response.json({ ok: true, acknowledged: ids.length });
+      const row = this.sql
+        .exec<{ status: string; lease_id: string | null; available_at: string }>(
+          "SELECT status, lease_id, available_at FROM events WHERE delivery_id = ?",
+          claim.deliveryId,
+        )
+        .toArray()[0];
+
+      if (!row) {
+        return Response.json(
+          { ok: false, error: "not found", deliveryId: claim.deliveryId },
+          { status: 404 },
+        );
+      }
+
+      // If already processed, allow idempotent retry only if lease matches (fixes cloud-factory-cf-wa8)
+      if (row.status === "processed") {
+        if (row.lease_id === claim.leaseId) {
+          continue;
+        }
+        return Response.json(
+          { ok: false, error: "lease conflict", deliveryId: claim.deliveryId },
+          { status: 409 },
+        );
+      }
+
+      // Conflict: status changed, lease mismatch, or lease expired (fixes cloud-factory-cf-xh7)
+      if (row.status !== "processing" || row.lease_id !== claim.leaseId || row.available_at <= now) {
+        return Response.json(
+          { ok: false, error: "lease conflict", deliveryId: claim.deliveryId },
+          { status: 409 },
+        );
+      }
+
+      toAcknowledge.push(claim.deliveryId);
+    }
+
+    // Pass 2: mutate state only after the whole batch passed validation
+    for (const deliveryId of toAcknowledge) {
+      this.sql.exec(
+        `UPDATE events SET status = 'processed', last_error = NULL
+         WHERE delivery_id = ?`,
+        deliveryId,
+      );
+    }
+
+    return Response.json({ ok: true, acknowledged: claims.length });
   }
 
   private async fail(payload: unknown): Promise<Response> {
     const body = asRecord(payload);
-    const ids = deliveryIdsFrom(payload);
-    if (ids.length === 0) {
+    const claims = claimsFrom(payload);
+    if (claims.length === 0) {
       return Response.json({ ok: false, error: "no deliveryIds" }, { status: 400 });
     }
     const reason = typeof body?.["error"] === "string" ? (body["error"] as string) : "unknown error";
 
-    let retried = 0;
-    let deadLettered = 0;
-    for (const id of ids) {
+    const now = new Date().toISOString();
+    // Pass 1: validate every claim in the batch before mutating any rows (fixes cloud-factory-cf-010)
+    interface ValidatedFail {
+      deliveryId: string;
+      attempts: number;
+    }
+    const toFail: ValidatedFail[] = [];
+
+    for (const claim of claims) {
+      if (!claim.leaseId) {
+        return Response.json(
+          { ok: false, error: "missing leaseId", deliveryId: claim.deliveryId },
+          { status: 400 },
+        );
+      }
+
       const row = this.sql
-        .exec<{ attempts: number; status: string }>(
-          "SELECT attempts, status FROM events WHERE delivery_id = ?",
-          id,
+        .exec<{ attempts: number; status: string; lease_id: string | null; available_at: string }>(
+          "SELECT attempts, status, lease_id, available_at FROM events WHERE delivery_id = ?",
+          claim.deliveryId,
         )
         .toArray()[0];
-      if (!row || row.status !== "processing") continue;
 
-      if (row.attempts >= MAX_ATTEMPTS) {
+      if (!row) {
+        return Response.json(
+          { ok: false, error: "not found", deliveryId: claim.deliveryId },
+          { status: 404 },
+        );
+      }
+
+      // Conflict: status changed, lease mismatch, or lease expired (fixes cloud-factory-cf-xh7)
+      if (row.status !== "processing" || row.lease_id !== claim.leaseId || row.available_at <= now) {
+        return Response.json(
+          { ok: false, error: "lease conflict", deliveryId: claim.deliveryId },
+          { status: 409 },
+        );
+      }
+
+      toFail.push({ deliveryId: claim.deliveryId, attempts: row.attempts });
+    }
+
+    // Pass 2: execute state changes only after whole batch is validated
+    let retried = 0;
+    let deadLettered = 0;
+    for (const { deliveryId, attempts } of toFail) {
+      if (attempts >= MAX_ATTEMPTS) {
         this.sql.exec(
-          "UPDATE events SET status = 'failed', last_error = ? WHERE delivery_id = ?",
+          "UPDATE events SET status = 'failed', last_error = ?, lease_id = NULL WHERE delivery_id = ?",
           reason,
-          id,
+          deliveryId,
         );
         deadLettered += 1;
         continue;
       }
 
-      const backoff = Math.min(RETRY_BACKOFF_MS * Math.max(row.attempts, 1), RETRY_BACKOFF_CAP_MS);
+      const backoff = Math.min(RETRY_BACKOFF_MS * Math.max(attempts, 1), RETRY_BACKOFF_CAP_MS);
       this.sql.exec(
-        `UPDATE events SET status = 'pending', last_error = ?, available_at = ?
+        `UPDATE events SET status = 'pending', last_error = ?, available_at = ?, lease_id = NULL
          WHERE delivery_id = ?`,
         reason,
         new Date(Date.now() + backoff).toISOString(),
-        id,
+        deliveryId,
       );
       retried += 1;
     }
@@ -328,7 +420,10 @@ export class RepoCoordinator extends DurableObject<Env> {
       .toArray();
 
     if (due.length > 0) {
-      this.sql.exec("UPDATE events SET status = 'processed' WHERE status = 'pending' AND available_at <= ?", now);
+      this.sql.exec(
+        "UPDATE events SET status = 'processed', lease_id = NULL WHERE status = 'pending' AND available_at <= ?",
+        now,
+      );
     }
 
     return Response.json({ ok: true, drained: due.length });
@@ -387,7 +482,7 @@ export class RepoCoordinator extends DurableObject<Env> {
 
     if (expired > 0) {
       this.sql.exec(
-        "UPDATE events SET status = 'pending' WHERE status = 'processing' AND available_at <= ?",
+        "UPDATE events SET status = 'pending', lease_id = NULL WHERE status = 'processing' AND available_at <= ?",
         now,
       );
     }
@@ -417,7 +512,7 @@ export class RepoCoordinator extends DurableObject<Env> {
 }
 
 const EVENT_COLUMNS =
-  "delivery_id, provider, event, action, repository, actor, received_at, status, attempts, available_at, last_error";
+  "delivery_id, provider, event, action, repository, actor, received_at, status, attempts, available_at, last_error, lease_id";
 
 interface EventRow extends Record<string, SqlStorageValue> {
   delivery_id: string;
@@ -431,6 +526,7 @@ interface EventRow extends Record<string, SqlStorageValue> {
   attempts: number;
   available_at: string;
   last_error: string | null;
+  lease_id: string | null;
 }
 
 function toWireEvent(row: EventRow) {
@@ -446,14 +542,43 @@ function toWireEvent(row: EventRow) {
     attempts: row.attempts,
     availableAt: row.available_at,
     lastError: row.last_error,
+    leaseId: row.lease_id,
   };
 }
 
-function deliveryIdsFrom(payload: unknown): string[] {
+interface ClaimToken {
+  deliveryId: string;
+  leaseId?: string;
+}
+
+function claimsFrom(payload: unknown): ClaimToken[] {
   const body = asRecord(payload);
-  const raw = body?.["deliveryIds"] ?? body?.["deliveryId"];
+  if (!body) return [];
+
+  if (Array.isArray(body["claims"])) {
+    return body["claims"]
+      .map((item) => asRecord(item))
+      .filter((rec): rec is Record<string, unknown> => rec !== null)
+      .map((rec) => ({
+        deliveryId: String(rec["deliveryId"] ?? rec["delivery_id"] ?? ""),
+        leaseId:
+          typeof (rec["leaseId"] ?? rec["lease_id"]) === "string"
+            ? String(rec["leaseId"] ?? rec["lease_id"])
+            : undefined,
+      }))
+      .filter((c) => c.deliveryId.length > 0);
+  }
+
+  const defaultLease =
+    typeof (body["leaseId"] ?? body["lease_id"]) === "string"
+      ? String(body["leaseId"] ?? body["lease_id"])
+      : undefined;
+
+  const raw = body["deliveryIds"] ?? body["deliveryId"] ?? body["delivery_id"];
   const list = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw];
-  return list.filter((id): id is string => typeof id === "string" && id.length > 0);
+  return list
+    .filter((id): id is string => typeof id === "string" && id.length > 0)
+    .map((id) => ({ deliveryId: id, leaseId: defaultLease }));
 }
 
 async function readJson(request: Request): Promise<unknown> {

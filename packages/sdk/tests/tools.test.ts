@@ -151,6 +151,63 @@ test('ToolRegistry: enforces enums, items, nested schemas, and additionalPropert
   assert.equal(validRes.success, true);
 });
 
+test('ToolRegistry: enforces nested additionalProperties:false and schemeless additionalProperties:false (fixes cloud-factory-cf-q1a)', async () => {
+  const registry = new ToolRegistry();
+  const ctx = createAgentContext({
+    repo: { owner: 'PaulKinlan', name: 'cloud-factory-cf' },
+    org: { id: 'test-org' },
+  });
+
+  // Nested additionalProperties: false
+  registry.registerTool({
+    name: 'nested_strict',
+    description: 'Nested additionalProperties test',
+    parameters: {
+      type: 'object',
+      properties: {
+        config: {
+          type: 'object',
+          properties: {
+            retries: { type: 'number' },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    handler: (p) => p,
+  });
+
+  const smuggledRes = await registry.executeTool(
+    'nested_strict',
+    { config: { retries: 3, smuggled: 'yes' } },
+    ctx
+  );
+  assert.equal(smuggledRes.success, false);
+  assert.match(
+    smuggledRes.error ?? '',
+    /Unexpected property "smuggled" in parameter "config" on tool "nested_strict" \(additionalProperties is false\)/
+  );
+
+  // Schemeless additionalProperties: false (no properties map declared)
+  registry.registerTool({
+    name: 'schemeless_empty',
+    description: 'Empty parameters rejecting any argument',
+    parameters: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+    handler: (p) => p,
+  });
+
+  const emptyRes = await registry.executeTool('schemeless_empty', { anything: 1 }, ctx);
+  assert.equal(emptyRes.success, false);
+  assert.match(
+    emptyRes.error ?? '',
+    /Unexpected parameter "anything" for tool "schemeless_empty" \(additionalProperties is false\)/
+  );
+});
+
 test('ToolRegistry: handles handler exceptions gracefully', async () => {
   const registry = new ToolRegistry();
   const ctx = createAgentContext({
