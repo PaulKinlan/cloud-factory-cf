@@ -152,8 +152,11 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
 }
 
-function hexToBytes(hex: string): Uint8Array | null {
-  const bytes = new Uint8Array(hex.length / 2);
+function hexToBytes(hex: string): Uint8Array<ArrayBuffer> | null {
+  // Backed by a real ArrayBuffer (not ArrayBufferLike) so the result is a valid
+  // BufferSource for `crypto.subtle.verify` under both the Workers and DOM libs
+  // (the repo-wide tsconfig gains DOM once packages/sdk lands).
+  const bytes = new Uint8Array(new ArrayBuffer(hex.length / 2));
   for (let i = 0; i < bytes.length; i += 1) {
     const byte = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
     if (Number.isNaN(byte)) return null;
