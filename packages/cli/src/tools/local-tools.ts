@@ -10,7 +10,7 @@ export interface LocalToolsOptions {
   cwd?: string;
   maxFileSize?: number;
   commandTimeoutMs?: number;
-  sandbox?: 'auto' | 'bwrap' | 'containment';
+  sandbox?: 'bwrap' | 'none';
 }
 
 export function createLocalTools(options: LocalToolsOptions = {}): readonly ToolDefinition[] {
@@ -179,15 +179,20 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
       const cmdStr = params.command as string;
       const timeout = typeof params.timeoutMs === 'number' ? params.timeoutMs : commandTimeoutMs;
       const realRoot = await fs.realpath(rootDir).catch(() => rootDir);
+      const sandboxMode = options.sandbox ?? 'bwrap';
 
-      const hasBwrap =
-        options.sandbox !== 'containment' &&
-        (await fs
+      if (sandboxMode === 'bwrap') {
+        const hasBwrap = await fs
           .stat('/usr/bin/bwrap')
           .then(() => true)
-          .catch(() => false));
+          .catch(() => false);
 
-      if (hasBwrap) {
+        if (!hasBwrap) {
+          throw new Error(
+            'Sandbox unavailable: bubblewrap (/usr/bin/bwrap) is required for exec_command isolation but is not installed on this system. Failing closed to prevent unisolated command execution.',
+          );
+        }
+
         const bwrapArgs: string[] = [
           '/usr/bin/bwrap',
           '--ro-bind',
@@ -255,6 +260,7 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
         return { stdout, stderr, exitCode: 0 };
       }
 
+      // Unsandboxed mode (requires explicit sandbox: 'none' opt-out)
       validateCommandContainment(cmdStr);
       const { stdout, stderr } = await execAsync(cmdStr, {
         cwd: realRoot,

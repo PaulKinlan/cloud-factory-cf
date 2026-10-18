@@ -69,34 +69,34 @@ test('createLocalTools: provides file operations and blocks path traversal', asy
     const execRes = (await execTool.handler({ command: 'node -e "console.log(12345)"' })) as any;
     assert.match(execRes.stdout, /12345/);
 
-    // Test containment mode explicitly blocks shell redirection, expansions, and traversal (fixes cloud-factory-cf-2yl and cloud-factory-cf-ad5)
-    const containmentTools = createLocalTools({ cwd: tmpDir, sandbox: 'containment' });
-    const containmentExec = containmentTools.find((t) => t.name === 'exec_command')!;
+    // Test explicit unsandboxed mode (sandbox: 'none') still enforces basic text containment checks
+    const unsandboxedTools = createLocalTools({ cwd: tmpDir, sandbox: 'none' });
+    const unsandboxedExec = unsandboxedTools.find((t) => t.name === 'exec_command')!;
 
     await assert.rejects(
       async () => {
-        await containmentExec.handler({ command: 'printf ESCAPED > $CF_REVIEW_OUT' });
+        await unsandboxedExec.handler({ command: 'printf ESCAPED > $CF_REVIEW_OUT' });
       },
       /Command containment violation/,
     );
 
     await assert.rejects(
       async () => {
-        await containmentExec.handler({ command: 'echo hello > out.txt' });
+        await unsandboxedExec.handler({ command: 'echo hello > out.txt' });
       },
       /Command containment violation: shell redirection/,
     );
 
     await assert.rejects(
       async () => {
-        await containmentExec.handler({ command: 'echo $HOME' });
+        await unsandboxedExec.handler({ command: 'echo $HOME' });
       },
       /Command containment violation: shell variable expansion/,
     );
 
     await assert.rejects(
       async () => {
-        await containmentExec.handler({ command: 'cat ../outside.txt' });
+        await unsandboxedExec.handler({ command: 'cat ../outside.txt' });
       },
       /Command containment violation: traversal '\.\.' is not allowed in command/,
     );
