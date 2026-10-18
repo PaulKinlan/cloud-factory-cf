@@ -21,7 +21,8 @@ export class OrgCoordinator extends DurableObject<Env> {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname.startsWith("/memory/")) {
-      const key = decodeURIComponent(url.pathname.slice("/memory/".length));
+      const key = safeDecode(url.pathname.slice("/memory/".length));
+      if (key === null) return Response.json({ ok: false, error: "malformed key" }, { status: 400 });
       return this.memoryHandler.get(key);
     }
 
@@ -33,7 +34,8 @@ export class OrgCoordinator extends DurableObject<Env> {
     }
 
     if ((request.method === "POST" || request.method === "PUT") && url.pathname.startsWith("/memory/")) {
-      const key = decodeURIComponent(url.pathname.slice("/memory/".length));
+      const key = safeDecode(url.pathname.slice("/memory/".length));
+      if (key === null) return Response.json({ ok: false, error: "malformed key" }, { status: 400 });
       const body = await readJson(request);
       return this.memoryHandler.set(key, body);
     }
@@ -48,7 +50,8 @@ export class OrgCoordinator extends DurableObject<Env> {
     }
 
     if (request.method === "DELETE" && url.pathname.startsWith("/memory/")) {
-      const key = decodeURIComponent(url.pathname.slice("/memory/".length));
+      const key = safeDecode(url.pathname.slice("/memory/".length));
+      if (key === null) return Response.json({ ok: false, error: "malformed key" }, { status: 400 });
       return this.memoryHandler.delete(key);
     }
 
@@ -77,6 +80,14 @@ export class OrgCoordinator extends DurableObject<Env> {
       org: this.ctx.id.name ?? "unknown",
       totalKeys: this.memoryHandler.total(),
     });
+  }
+}
+
+function safeDecode(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
   }
 }
 

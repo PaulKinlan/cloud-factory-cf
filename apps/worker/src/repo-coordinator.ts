@@ -499,7 +499,8 @@ export class RepoCoordinator extends DurableObject<Env> {
 
   private async handleMemory(request: Request, url: URL): Promise<Response> {
     if (request.method === "GET" && url.pathname.startsWith("/memory/")) {
-      const key = decodeURIComponent(url.pathname.slice("/memory/".length));
+      const key = safeDecode(url.pathname.slice("/memory/".length));
+      if (key === null) return Response.json({ ok: false, error: "malformed key" }, { status: 400 });
       return this.memoryHandler.get(key);
     }
     if (request.method === "GET" && url.pathname === "/memory") {
@@ -509,18 +510,20 @@ export class RepoCoordinator extends DurableObject<Env> {
       return this.memoryHandler.list(prefix);
     }
     if ((request.method === "POST" || request.method === "PUT") && url.pathname.startsWith("/memory/")) {
-      const key = decodeURIComponent(url.pathname.slice("/memory/".length));
+      const key = safeDecode(url.pathname.slice("/memory/".length));
+      if (key === null) return Response.json({ ok: false, error: "malformed key" }, { status: 400 });
       const body = await readJson(request);
       return this.memoryHandler.set(key, body as Record<string, unknown> | null);
     }
     if (request.method === "POST" && url.pathname === "/memory") {
-      const body = await readJson(request) as Record<string, unknown> | null;
+      const body = (await readJson(request)) as Record<string, unknown> | null;
       const key = typeof body?.["key"] === "string" ? body["key"] : undefined;
       if (!key) return Response.json({ ok: false, error: "missing key" }, { status: 400 });
       return this.memoryHandler.set(key, body);
     }
     if (request.method === "DELETE" && url.pathname.startsWith("/memory/")) {
-      const key = decodeURIComponent(url.pathname.slice("/memory/".length));
+      const key = safeDecode(url.pathname.slice("/memory/".length));
+      if (key === null) return Response.json({ ok: false, error: "malformed key" }, { status: 400 });
       return this.memoryHandler.delete(key);
     }
     if (request.method === "DELETE" && url.pathname === "/memory") {
@@ -641,6 +644,14 @@ function claimsFrom(payload: unknown): ClaimToken[] {
   return list
     .filter((id): id is string => typeof id === "string" && id.length > 0)
     .map((id) => ({ deliveryId: id, leaseId: defaultLease }));
+}
+
+function safeDecode(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
 }
 
 async function readJson(request: Request): Promise<unknown> {

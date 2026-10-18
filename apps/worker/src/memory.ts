@@ -44,16 +44,21 @@ export class MemoryHandler {
   }
 
   list(prefix: string): Response {
-    const rows = prefix
-      ? this.sql
-          .exec<MemoryRow>(
-            "SELECT * FROM memory WHERE key LIKE ? ORDER BY key ASC",
-            `${prefix}%`,
-          )
-          .toArray()
-      : this.sql
-          .exec<MemoryRow>("SELECT * FROM memory ORDER BY key ASC")
-          .toArray();
+    let rows: MemoryRow[];
+    if (prefix) {
+      // Escape SQL LIKE wildcards '%' and '_' and '\' (fixes cloud-factory-cf-f8d)
+      const escaped = prefix.replace(/([%_\\])/g, "\\$1");
+      rows = this.sql
+        .exec<MemoryRow>(
+          "SELECT * FROM memory WHERE key LIKE ? ESCAPE '\\' ORDER BY key ASC",
+          `${escaped}%`,
+        )
+        .toArray();
+    } else {
+      rows = this.sql
+        .exec<MemoryRow>("SELECT * FROM memory ORDER BY key ASC")
+        .toArray();
+    }
 
     return Response.json({
       ok: true,
@@ -101,6 +106,14 @@ export class MemoryHandler {
 
   delete(key: string): Response {
     if (!key) return Response.json({ ok: false, error: "missing key" }, { status: 400 });
+
+    const existing = this.sql
+      .exec<{ key: string }>("SELECT key FROM memory WHERE key = ?", key)
+      .toArray();
+    if (existing.length === 0) {
+      return Response.json({ ok: false, error: "not found", key, deleted: false }, { status: 404 });
+    }
+
     this.sql.exec("DELETE FROM memory WHERE key = ?", key);
     return Response.json({ ok: true, key, deleted: true });
   }

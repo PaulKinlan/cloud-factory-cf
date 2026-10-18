@@ -140,5 +140,45 @@ describe("Hierarchical Central Memory Store", () => {
     expect(deleted).toBe(true);
     const afterDelete = await store.get("repo", "cache_ttl");
     expect(afterDelete).toBeUndefined();
+
+    // Deleting non-existent key returns false (fixes cloud-factory-cf-cf4)
+    const missingDeleted = await store.delete("repo", "non-existent-key");
+    expect(missingDeleted).toBe(false);
+  });
+
+  it("handles literal wildcards % and _ in prefix queries (fixes cloud-factory-cf-f8d)", async () => {
+    const orgStub = env.ORG_COORDINATOR!.get(env.ORG_COORDINATOR!.idFromName("wildcard-corp"));
+
+    await orgStub.fetch("https://org-coordinator.internal/memory/team_a", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: "alpha" }),
+    });
+    await orgStub.fetch("https://org-coordinator.internal/memory/teamXa", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: "beta" }),
+    });
+    await orgStub.fetch(`https://org-coordinator.internal/memory/${encodeURIComponent("team%1")}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: "gamma" }),
+    });
+
+    // Query prefix 'team_' -> must only return 'team_a', not 'teamXa'
+    const resUnderscore = await orgStub.fetch(
+      `https://org-coordinator.internal/memory?prefix=${encodeURIComponent("team_")}`,
+    );
+    expect(resUnderscore.status).toBe(200);
+    const dataUnderscore = (await resUnderscore.json()) as { keys: string[] };
+    expect(dataUnderscore.keys).toEqual(["team_a"]);
+
+    // Query prefix 'team%' -> must only return 'team%1'
+    const resPercent = await orgStub.fetch(
+      `https://org-coordinator.internal/memory?prefix=${encodeURIComponent("team%")}`,
+    );
+    expect(resPercent.status).toBe(200);
+    const dataPercent = (await resPercent.json()) as { keys: string[] };
+    expect(dataPercent.keys).toEqual(["team%1"]);
   });
 });

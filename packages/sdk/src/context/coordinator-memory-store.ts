@@ -58,7 +58,8 @@ export class CoordinatorMemoryStore implements HierarchicalMemoryStore {
     if (!res.ok) {
       throw new Error(`Memory delete failed with status ${res.status}`);
     }
-    return true;
+    const data = (await res.json().catch(() => ({}))) as { deleted?: boolean };
+    return data.deleted ?? true;
   }
 
   async list(scope: MemoryScope, prefix?: string): Promise<MemoryEntry[]> {
