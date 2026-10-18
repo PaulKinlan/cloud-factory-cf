@@ -55,6 +55,102 @@ test('ToolRegistry: registers tools and validates parameters', async () => {
   assert.match(typeMismatch.error ?? '', /Invalid type for parameter "count".*expected number, got string/);
 });
 
+test('ToolRegistry: does not allow Object.prototype members to satisfy required parameters (fixes cloud-factory-cf-8p4)', async () => {
+  const registry = new ToolRegistry();
+  const ctx = createAgentContext({
+    repo: { owner: 'PaulKinlan', name: 'cloud-factory-cf' },
+    org: { id: 'test-org' },
+  });
+
+  registry.registerTool({
+    name: 'prototype_probe',
+    description: 'Probe prototype presence',
+    parameters: {
+      type: 'object',
+      properties: {
+        constructor: { type: 'string' },
+      },
+      required: ['constructor'],
+    },
+    handler: async (p) => p,
+  });
+
+  // Empty object must not satisfy required 'constructor'
+  const res = await registry.executeTool('prototype_probe', {}, ctx);
+  assert.equal(res.success, false);
+  assert.match(res.error ?? '', /Missing required parameter "constructor"/);
+});
+
+test('ToolRegistry: enforces enums, items, nested schemas, and additionalProperties (fixes cloud-factory-cf-z4f)', async () => {
+  const registry = new ToolRegistry();
+  const ctx = createAgentContext({
+    repo: { owner: 'PaulKinlan', name: 'cloud-factory-cf' },
+    org: { id: 'test-org' },
+  });
+
+  registry.registerTool({
+    name: 'complex_tool',
+    description: 'Tests deep validation',
+    parameters: {
+      type: 'object',
+      properties: {
+        mode: { type: 'string', enum: ['read', 'write'] },
+        tags: { type: 'array', items: { type: 'string' } },
+        config: {
+          type: 'object',
+          properties: {
+            retries: { type: 'number' },
+          },
+          required: ['retries'],
+        },
+      },
+      required: ['mode'],
+      additionalProperties: false,
+    },
+    handler: async (p) => p,
+  });
+
+  // Invalid enum value
+  const badEnum = await registry.executeTool('complex_tool', { mode: 'invalid' }, ctx);
+  assert.equal(badEnum.success, false);
+  assert.match(badEnum.error ?? '', /Invalid value for parameter "mode".*expected one of \[read, write\]/);
+
+  // Invalid array item type
+  const badItems = await registry.executeTool(
+    'complex_tool',
+    { mode: 'read', tags: ['good', 123 as unknown as string] },
+    ctx
+  );
+  assert.equal(badItems.success, false);
+  assert.match(badItems.error ?? '', /Invalid type for parameter "tags\[1\]".*expected string, got number/);
+
+  // Missing nested required property
+  const badNested = await registry.executeTool(
+    'complex_tool',
+    { mode: 'read', config: {} },
+    ctx
+  );
+  assert.equal(badNested.success, false);
+  assert.match(badNested.error ?? '', /Missing required property "retries" in parameter "config"/);
+
+  // Unexpected property when additionalProperties is false
+  const extraProp = await registry.executeTool(
+    'complex_tool',
+    { mode: 'read', unknown_arg: 'boom' },
+    ctx
+  );
+  assert.equal(extraProp.success, false);
+  assert.match(extraProp.error ?? '', /Unexpected parameter "unknown_arg"/);
+
+  // Valid complex payload
+  const validRes = await registry.executeTool(
+    'complex_tool',
+    { mode: 'write', tags: ['alpha', 'beta'], config: { retries: 3 } },
+    ctx
+  );
+  assert.equal(validRes.success, true);
+});
+
 test('ToolRegistry: handles handler exceptions gracefully', async () => {
   const registry = new ToolRegistry();
   const ctx = createAgentContext({

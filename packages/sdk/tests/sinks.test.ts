@@ -136,6 +136,37 @@ test('ActionSinkRegistry: isolates throwing canHandle so sibling sinks still exe
   assert.equal(reliableSink.getEmittedActions().length, 1);
 });
 
+test('ActionSinkRegistry: emit without ctx consistently surfaces errors for all matched sinks (fixes cloud-factory-cf-qp4)', async () => {
+  const registry = new ActionSinkRegistry();
+
+  const predSink: ActionSink = {
+    name: 'pred-sink',
+    supportedActions: ['action.test'],
+    canHandle: () => true,
+    handle: async () => ({
+      sinkName: 'pred-sink',
+      actionId: '1',
+      actionType: 'action.test',
+      success: true,
+      durationMs: 0,
+    }),
+  };
+
+  const plainSink = new MemoryActionSink('plain-sink', ['action.test']);
+
+  registry.registerSink(predSink);
+  registry.registerSink(plainSink);
+
+  // Emit without ctx
+  const results = await registry.emit({ type: 'action.test', payload: {} });
+
+  assert.equal(results.length, 2);
+  for (const res of results) {
+    assert.equal(res.success, false);
+    assert.match(res.error ?? '', /without an AgentContext/);
+  }
+});
+
 test('AgentRuntime: loadExtension with registerSink and dispatch via after_run hook', async () => {
   const runtime = new AgentRuntime();
   const memorySink = new MemoryActionSink('audit-sink', ['*']);

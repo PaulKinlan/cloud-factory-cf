@@ -51,9 +51,12 @@ export class ActionSinkRegistry implements ActionSinkDispatcher {
         sink.supportedActions.includes(action.type);
 
       if (acceptsType) {
-        if (!sink.canHandle) {
+        if (!ctx) {
+          // Without ctx, include all type-matched sinks so they fail consistently (fixes cloud-factory-cf-qp4)
           matchingSinks.push(sink);
-        } else if (ctx) {
+        } else if (!sink.canHandle) {
+          matchingSinks.push(sink);
+        } else {
           try {
             if (sink.canHandle(action, ctx)) {
               matchingSinks.push(sink);
