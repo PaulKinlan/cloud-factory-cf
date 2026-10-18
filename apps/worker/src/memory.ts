@@ -46,12 +46,12 @@ export class MemoryHandler {
   list(prefix: string): Response {
     let rows: MemoryRow[];
     if (prefix) {
-      // Escape SQL LIKE wildcards '%' and '_' and '\' (fixes cloud-factory-cf-f8d)
-      const escaped = prefix.replace(/([%_\\])/g, "\\$1");
+      // Case-sensitive, literal prefix matching without LIKE wildcard side-effects (fixes cloud-factory-cf-6bo)
       rows = this.sql
         .exec<MemoryRow>(
-          "SELECT * FROM memory WHERE key LIKE ? ESCAPE '\\' ORDER BY key ASC",
-          `${escaped}%`,
+          "SELECT * FROM memory WHERE substr(key, 1, length(?)) = ? ORDER BY key ASC",
+          prefix,
+          prefix,
         )
         .toArray();
     } else {

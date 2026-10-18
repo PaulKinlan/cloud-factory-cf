@@ -146,13 +146,18 @@ describe("Hierarchical Central Memory Store", () => {
     expect(missingDeleted).toBe(false);
   });
 
-  it("handles literal wildcards % and _ in prefix queries (fixes cloud-factory-cf-f8d)", async () => {
+  it("handles literal wildcards % and _ in prefix queries with exact case (fixes cloud-factory-cf-f8d, cloud-factory-cf-6bo)", async () => {
     const orgStub = env.ORG_COORDINATOR!.get(env.ORG_COORDINATOR!.idFromName("wildcard-corp"));
 
     await orgStub.fetch("https://org-coordinator.internal/memory/team_a", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ value: "alpha" }),
+    });
+    await orgStub.fetch("https://org-coordinator.internal/memory/Team_a", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: "capital-alpha" }),
     });
     await orgStub.fetch("https://org-coordinator.internal/memory/teamXa", {
       method: "PUT",
@@ -165,13 +170,21 @@ describe("Hierarchical Central Memory Store", () => {
       body: JSON.stringify({ value: "gamma" }),
     });
 
-    // Query prefix 'team_' -> must only return 'team_a', not 'teamXa'
+    // Query prefix 'team_' -> must only return 'team_a', not 'teamXa' and not 'Team_a' (case-sensitive)
     const resUnderscore = await orgStub.fetch(
       `https://org-coordinator.internal/memory?prefix=${encodeURIComponent("team_")}`,
     );
     expect(resUnderscore.status).toBe(200);
     const dataUnderscore = (await resUnderscore.json()) as { keys: string[] };
     expect(dataUnderscore.keys).toEqual(["team_a"]);
+
+    // Query prefix 'Team_' -> must only return 'Team_a'
+    const resCapital = await orgStub.fetch(
+      `https://org-coordinator.internal/memory?prefix=${encodeURIComponent("Team_")}`,
+    );
+    expect(resCapital.status).toBe(200);
+    const dataCapital = (await resCapital.json()) as { keys: string[] };
+    expect(dataCapital.keys).toEqual(["Team_a"]);
 
     // Query prefix 'team%' -> must only return 'team%1'
     const resPercent = await orgStub.fetch(
