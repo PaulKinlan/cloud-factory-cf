@@ -1,0 +1,34 @@
+/**
+ * Wrangler configuration for Cloud Factory CF.
+ *
+ * One worker per deployment; each repository (org/repo) that the cloud is
+ * installed on gets its own `RepoCoordinator` Durable Object, addressed by
+ * `idFromName("<org>/<repo>")`.
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cloud-factory-cf",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "ENVIRONMENT": "development"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REPO_COORDINATOR",
+        "class_name": "RepoCoordinator"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RepoCoordinator"]
+    }
+  ]
+}
