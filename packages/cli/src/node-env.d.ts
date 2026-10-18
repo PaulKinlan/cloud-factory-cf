@@ -12,6 +12,7 @@ interface Process {
 declare var process: Process;
 
 declare module 'node:path' {
+  export const sep: string;
   export function resolve(...paths: string[]): string;
   export function join(...paths: string[]): string;
   export function dirname(p: string): string;
@@ -30,6 +31,7 @@ declare module 'node:fs/promises' {
     isFile(): boolean;
   }
   export function stat(path: string): Promise<Stats>;
+  export function realpath(path: string): Promise<string>;
   export function readFile(path: string, encoding: string): Promise<string>;
   export function writeFile(path: string, data: string, encoding: string): Promise<void>;
   export function mkdir(path: string, options?: { recursive?: boolean }): Promise<string | undefined>;

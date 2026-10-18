@@ -40,6 +40,31 @@ test('createLocalTools: provides file operations and blocks path traversal', asy
       /Path traversal denied/,
     );
 
+    // Block sibling prefix escape (fixes cloud-factory-cf-df5)
+    const siblingDir = tmpDir + '-sibling';
+    await fs.mkdir(siblingDir, { recursive: true });
+    await fs.writeFile(path.join(siblingDir, 'marker'), 'secret');
+    await assert.rejects(
+      async () => {
+        await readTool.handler({ path: `../${path.basename(siblingDir)}/marker` });
+      },
+      /Path traversal denied/,
+    );
+    await fs.rm(siblingDir, { recursive: true, force: true });
+
+    // Block symlink directory escape (fixes cloud-factory-cf-df5)
+    const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-outside-'));
+    await fs.writeFile(path.join(outsideDir, 'secret.txt'), 'top-secret');
+    await fs.symlink(outsideDir, path.join(tmpDir, 'symlink-out'));
+
+    await assert.rejects(
+      async () => {
+        await readTool.handler({ path: 'symlink-out/secret.txt' });
+      },
+      /Path traversal denied/,
+    );
+    await fs.rm(outsideDir, { recursive: true, force: true });
+
     // Exec command
     const execRes = (await execTool.handler({ command: 'node -e "console.log(12345)"' })) as any;
     assert.match(execRes.stdout, /12345/);

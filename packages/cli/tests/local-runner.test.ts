@@ -33,6 +33,12 @@ test('LocalAgentRunner: executes agent runs with local tools and lifecycle exten
     assert.equal(summary.status, 'success');
     assert.equal(hookRan, true);
     assert.equal(summary.output, 'Analyzed');
+
+    // Test runner fails explicitly when no executor is configured (fixes cloud-factory-cf-3s1)
+    const noExecRunner = new LocalAgentRunner({ cwd: tmpDir });
+    const noExecSummary = await noExecRunner.run('No executor run');
+    assert.equal(noExecSummary.status, 'failure');
+    assert.match(noExecSummary.error!, /No agent execution function configured/);
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }

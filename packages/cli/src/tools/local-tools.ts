@@ -17,13 +17,43 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
   const maxFileSize = options.maxFileSize ?? 1024 * 1024; // 1 MB
   const commandTimeoutMs = options.commandTimeoutMs ?? 30000;
 
-  function resolveSafePath(filePath: string): string {
-    const resolved = path.resolve(rootDir, filePath);
-    // Disallow path traversal outside rootDir
-    if (!resolved.startsWith(rootDir)) {
+  async function resolveSafePath(filePath: string, allowMissing = false): Promise<string> {
+    const realRoot = await fs.realpath(rootDir).catch(() => rootDir);
+    const resolved = path.resolve(realRoot, filePath);
+
+    if (resolved !== realRoot && !resolved.startsWith(realRoot + path.sep)) {
       throw new Error(`Path traversal denied: '${filePath}' is outside workspace root`);
     }
-    return resolved;
+
+    try {
+      const realPath = await fs.realpath(resolved);
+      if (realPath !== realRoot && !realPath.startsWith(realRoot + path.sep)) {
+        throw new Error(`Path traversal denied: '${filePath}' resolves outside workspace root via symlink`);
+      }
+      return realPath;
+    } catch (err: any) {
+      if (allowMissing && (err?.code === 'ENOENT' || String(err).includes('ENOENT'))) {
+        // Walk up to find the closest existing ancestor directory
+        let current = path.dirname(resolved);
+        while (current !== realRoot && current.startsWith(realRoot + path.sep)) {
+          try {
+            const realCurrent = await fs.realpath(current);
+            if (realCurrent !== realRoot && !realCurrent.startsWith(realRoot + path.sep)) {
+              throw new Error(`Path traversal denied: '${filePath}' resolves outside workspace root via symlink`);
+            }
+            return resolved;
+          } catch (e: any) {
+            if (e?.code === 'ENOENT' || String(e).includes('ENOENT')) {
+              current = path.dirname(current);
+              continue;
+            }
+            throw e;
+          }
+        }
+        return resolved;
+      }
+      throw err;
+    }
   }
 
   const readFileTool: ToolDefinition = {
@@ -37,7 +67,7 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
       required: ['path'],
     },
     handler: async (params) => {
-      const filePath = resolveSafePath(params.path as string);
+      const filePath = await resolveSafePath(params.path as string);
       const stat = await fs.stat(filePath);
       if (stat.size > maxFileSize) {
         throw new Error(`File size ${stat.size} exceeds maximum limit of ${maxFileSize} bytes`);
@@ -59,7 +89,7 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
       required: ['path', 'content'],
     },
     handler: async (params) => {
-      const filePath = resolveSafePath(params.path as string);
+      const filePath = await resolveSafePath(params.path as string, true);
       await fs.mkdir(path.dirname(filePath), { recursive: true });
       await fs.writeFile(filePath, params.content as string, 'utf8');
       return { path: params.path, written: true };
@@ -77,7 +107,7 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
     },
     handler: async (params) => {
       const subPath = typeof params.path === 'string' ? params.path : '.';
-      const targetDir = resolveSafePath(subPath);
+      const targetDir = await resolveSafePath(subPath);
       const entries = await fs.readdir(targetDir, { withFileTypes: true });
       return {
         path: subPath,

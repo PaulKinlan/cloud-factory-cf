@@ -28,6 +28,7 @@ export interface LocalAgentRunnerOptions {
   sinks?: readonly ActionSink[];
   extensions?: readonly Extension[];
   tools?: readonly ToolDefinition[];
+  defaultExecutionFn?: AgentExecutionFn;
   localToolsOptions?: LocalToolsOptions;
 }
 
@@ -42,6 +43,7 @@ export class LocalAgentRunner {
   private readonly sinks: readonly ActionSink[];
   private readonly extensions: readonly Extension[];
   private readonly additionalTools: readonly ToolDefinition[];
+  private readonly defaultExecutionFn?: AgentExecutionFn;
   private readonly localToolsOptions?: LocalToolsOptions;
 
   constructor(options: LocalAgentRunnerOptions = {}) {
@@ -58,6 +60,7 @@ export class LocalAgentRunner {
     this.sinks = options.sinks ?? [];
     this.extensions = options.extensions ?? [];
     this.additionalTools = options.tools ?? [];
+    this.defaultExecutionFn = options.defaultExecutionFn;
     this.localToolsOptions = options.localToolsOptions;
   }
 
@@ -99,17 +102,14 @@ export class LocalAgentRunner {
       ...contextOverrides,
     });
 
-    // Default executor if none supplied
+    // Fail closed if no execution function is provided
     const execFn: AgentExecutionFn =
       execute ??
+      this.defaultExecutionFn ??
       (async (input) => {
-        input.ctx.log('info', `Local runner executing prompt: ${input.prompt.slice(0, 100)}...`);
-        return {
-          status: 'success',
-          output: `Executed locally in ${this.cwd} with prompt: ${input.prompt}`,
-          toolCallsCount: 0,
-          metadata: { local: true, toolsCount: input.tools.length },
-        };
+        throw new Error(
+          `No agent execution function configured for prompt "${input.prompt}". Provide an executionFn or configure defaultExecutionFn.`,
+        );
       });
 
     return runtime.runAgent(prompt, ctx, execFn);

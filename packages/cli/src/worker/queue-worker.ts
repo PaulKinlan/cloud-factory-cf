@@ -145,10 +145,14 @@ export class QueueWorker {
           // Parse repository owner and name
           const [owner, name] = event.repository.split('/');
           const prompt = `Process event ${event.event}${event.action ? ` (${event.action})` : ''} for ${event.repository} by ${event.actor ?? 'unknown'}`;
-          await this.runner.run(prompt, undefined, {
+          const summary = await this.runner.run(prompt, undefined, {
             repo: { owner: owner ?? 'unknown', name: name ?? event.repository },
             actor: { type: 'system', id: event.actor ?? 'unknown' },
           });
+
+          if (summary.status !== 'success') {
+            throw new Error(summary.error ?? `Agent execution returned status ${summary.status}`);
+          }
         }
 
         const ackRes = await this.ackEvents([claim]);
