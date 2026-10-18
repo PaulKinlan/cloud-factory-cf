@@ -82,12 +82,15 @@ export interface GitHubIssuePayload {
 }
 
 export interface BeadsTaskPayload {
+  readonly id?: string;
+  readonly taskId?: string;
   readonly title: string;
   readonly description: string;
   readonly priority?: 'P0' | 'P1' | 'P2' | 'P3' | 'P4';
   readonly labels?: readonly string[];
   readonly assignee?: string;
   readonly parentId?: string;
+  readonly status?: string;
 }
 
 export interface TelemetryMetricPayload {
