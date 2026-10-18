@@ -125,6 +125,20 @@ test('createLocalTools: provides file operations and blocks path traversal', asy
     } finally {
       await fs.rm(baseDir, { recursive: true, force: true });
     }
+
+    // Test bwrap sandbox does not expose Node parent directory (fixes cloud-factory-cf-buy)
+    const nodeParentMarker = path.join(path.dirname(path.dirname(process.execPath)), `cf-review-marker-${process.pid}`);
+    try {
+      await fs.writeFile(nodeParentMarker, 'PRIVATE_OUTSIDE_WORKSPACE');
+      await assert.rejects(
+        async () => {
+          await execTool.handler({ command: `cat ${nodeParentMarker}` });
+        },
+        /No such file or directory|Command failed/,
+      );
+    } finally {
+      await fs.rm(nodeParentMarker, { force: true });
+    }
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }

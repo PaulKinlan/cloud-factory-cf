@@ -217,10 +217,11 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
           '/home',
         ];
 
-        // Read-only mount node runtime directory if installed outside /usr (e.g. nvm)
-        const nodeDir = path.dirname(path.dirname(process.execPath));
-        if (nodeDir && nodeDir !== '/usr' && nodeDir !== '/') {
-          bwrapArgs.push('--ro-bind', nodeDir, nodeDir);
+        // Read-only mount ONLY the node executable itself rather than its parent directory (fixes cloud-factory-cf-buy)
+        const realExec = await fs.realpath(process.execPath).catch(() => process.execPath);
+        bwrapArgs.push('--ro-bind', realExec, realExec);
+        if (realExec !== process.execPath) {
+          bwrapArgs.push('--ro-bind', process.execPath, process.execPath);
         }
 
         // Mount DNS/SSL configuration read-only if present
