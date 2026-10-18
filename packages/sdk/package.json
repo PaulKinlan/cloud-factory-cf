@@ -1,0 +1,32 @@
+{
+  "name": "@factory-cloud/sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Core SDK, AgentContext, Pi-inspired lifecycle hooks, and pluggable ActionSink for Cloud Factory CF",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --experimental-strip-types tests/**/*.test.ts",
+    "test:changed": "node --test --experimental-strip-types tests/**/*.test.ts",
+    "test:file": "node --test --experimental-strip-types"
+  },
+  "keywords": [
+    "cloud-factory",
+    "sdlc",
+    "agent",
+    "pi",
+    "cloudflare-workers",
+    "durable-objects"
+  ],
+  "author": "Paul Kinlan",
+  "license": "Apache-2.0"
+}
