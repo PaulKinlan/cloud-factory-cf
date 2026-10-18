@@ -182,6 +182,20 @@ test('BeadsTaskSink: validates payload and priority, dispatches task actions', a
   assert.equal(customTargetRes.success, true);
   assert.equal(customReceived.id, 'cf-999');
   assert.equal(customReceived.taskId, 'cf-999');
+
+  // Test conflicting task IDs are rejected (fixes cloud-factory-cf-wiw)
+  const conflictingRes = await sink.handle(
+    {
+      id: '6',
+      type: 'beads:task:update',
+      target: 'cf-999',
+      payload: { id: 'cf-123', taskId: 'cf-456', title: 'changed', description: 'x' },
+      timestamp: Date.now(),
+    },
+    ctx,
+  );
+  assert.equal(conflictingRes.success, false);
+  assert.match(conflictingRes.error!, /Conflicting task IDs/);
 });
 
 test('CloudTelemetrySink: validates metrics and logs, buffers and exports', async () => {
@@ -217,6 +231,16 @@ test('CloudTelemetrySink: validates metrics and logs, buffers and exports', asyn
 
   assert.equal(telemetryEntries.length, 2);
   assert.equal(sink.getBufferedEntries().length, 2);
+
+  // Test buffer disabled fails closed when no exporter or broker permission (fixes cloud-factory-cf-lj1)
+  const unbufferedSink = new CloudTelemetrySink({ bufferInMemory: false });
+  const unbufferedRes = await unbufferedSink.handle(
+    { id: '4', type: 'telemetry:metric', payload: { metric: 'requests', value: 1 }, timestamp: Date.now() },
+    ctx,
+  );
+  assert.equal(unbufferedRes.success, false);
+  assert.match(unbufferedRes.error!, /in-memory buffer is disabled/);
+  assert.equal(unbufferedSink.getBufferedEntries().length, 0);
 });
 
 test('ActionSinkRegistry: routes actions to registered pluggable sinks', async () => {

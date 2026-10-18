@@ -69,7 +69,25 @@ export class BeadsTaskSink implements ActionSink {
     }
 
     const isUpdate = action.type.includes('update');
-    const taskId = payload.id ?? payload.taskId ?? action.target;
+    const candidateIds = [
+      payload.id,
+      payload.taskId,
+      typeof action.target === 'string' && action.target.trim().length > 0 ? action.target.trim() : undefined,
+    ].filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+
+    const uniqueIds = Array.from(new Set(candidateIds));
+    if (uniqueIds.length > 1) {
+      return {
+        sinkName: this.name,
+        actionId: action.id,
+        actionType: action.type,
+        success: false,
+        error: `Conflicting task IDs specified for beads:task:update: ${uniqueIds.join(', ')}`,
+        durationMs: Date.now() - start,
+      };
+    }
+
+    const taskId = uniqueIds[0];
 
     if (isUpdate && (!taskId || taskId.trim().length === 0)) {
       return {
@@ -83,7 +101,7 @@ export class BeadsTaskSink implements ActionSink {
     }
 
     const effectivePayload: BeadsTaskPayload = taskId
-      ? { ...payload, id: payload.id ?? taskId, taskId: payload.taskId ?? taskId }
+      ? { ...payload, id: taskId, taskId }
       : payload;
 
     try {

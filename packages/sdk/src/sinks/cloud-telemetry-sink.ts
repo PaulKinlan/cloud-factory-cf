@@ -109,8 +109,17 @@ export class CloudTelemetrySink implements ActionSink {
             action: 'emit',
             params: { type: 'metric', ...payload },
           });
-        } else {
+        } else if (this.bufferInMemory) {
           result = { buffered: true };
+        } else {
+          return {
+            sinkName: this.name,
+            actionId: action.id,
+            actionType: action.type,
+            success: false,
+            error: 'Telemetry dispatch failed: in-memory buffer is disabled and no telemetry exporter or broker permission is available',
+            durationMs: Date.now() - start,
+          };
         }
 
         return {
@@ -174,8 +183,17 @@ export class CloudTelemetrySink implements ActionSink {
             action: 'emit',
             params: { type: 'log', ...payload },
           });
-        } else {
+        } else if (this.bufferInMemory) {
           result = { buffered: true };
+        } else {
+          return {
+            sinkName: this.name,
+            actionId: action.id,
+            actionType: action.type,
+            success: false,
+            error: 'Telemetry dispatch failed: in-memory buffer is disabled and no telemetry exporter or broker permission is available',
+            durationMs: Date.now() - start,
+          };
         }
 
         return {
