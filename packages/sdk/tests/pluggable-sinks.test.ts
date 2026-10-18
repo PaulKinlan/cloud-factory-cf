@@ -127,6 +127,39 @@ test('BeadsTaskSink: validates payload and priority, dispatches task actions', a
   );
   assert.equal(res.success, true);
   assert.deepEqual(res.result, { beadId: 'cf-abc', title: 'New Task', action: 'beads:task:create' });
+
+  // Test beads:task:update validation (fixes cloud-factory-cf-808)
+  const missingIdUpdate = await sink.handle(
+    { id: '3', type: 'beads:task:update', payload: { title: 'Updated Title', description: 'desc' }, timestamp: Date.now() },
+    ctx,
+  );
+  assert.equal(missingIdUpdate.success, false);
+  assert.match(missingIdUpdate.error!, /requires a task ID/);
+
+  // Test beads:task:update with ID forwards to broker correctly
+  const updateCalls: any[] = [];
+  const broker = new DefaultCredentialBroker(
+    ['beads:update_task'],
+    async (req) => {
+      updateCalls.push(req);
+      return { ok: true };
+    },
+  );
+  const brokerCtx = mockCtx(broker);
+  const validUpdate = await sink.handle(
+    {
+      id: '4',
+      type: 'beads:task:update',
+      target: 'cf-123',
+      payload: { title: 'Updated', description: 'desc', status: 'IN_REVIEW' },
+      timestamp: Date.now(),
+    },
+    brokerCtx,
+  );
+  assert.equal(validUpdate.success, true);
+  assert.equal(updateCalls.length, 1);
+  assert.equal(updateCalls[0].params.id, 'cf-123');
+  assert.equal(updateCalls[0].params.status, 'IN_REVIEW');
 });
 
 test('CloudTelemetrySink: validates metrics and logs, buffers and exports', async () => {

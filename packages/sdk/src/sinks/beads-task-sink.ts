@@ -68,6 +68,20 @@ export class BeadsTaskSink implements ActionSink {
       };
     }
 
+    const isUpdate = action.type.includes('update');
+    const taskId = payload.id ?? payload.taskId ?? action.target;
+
+    if (isUpdate && (!taskId || taskId.trim().length === 0)) {
+      return {
+        sinkName: this.name,
+        actionId: action.id,
+        actionType: action.type,
+        success: false,
+        error: 'Invalid payload: beads:task:update requires a task ID (via payload.id, payload.taskId, or action.target)',
+        durationMs: Date.now() - start,
+      };
+    }
+
     try {
       if (this.customExecutor) {
         const result = await this.customExecutor(payload, action.type, ctx);
@@ -81,17 +95,18 @@ export class BeadsTaskSink implements ActionSink {
         };
       }
 
-      const isUpdate = action.type.includes('update');
       const result = await ctx.credentials.executeSignedRequest({
         service: 'beads',
         action: isUpdate ? 'update_task' : 'create_task',
         params: {
+          id: isUpdate ? taskId : payload.id,
           title: payload.title,
           description: payload.description,
           priority: payload.priority,
           labels: payload.labels,
           assignee: payload.assignee,
           parentId: payload.parentId,
+          status: payload.status,
         },
       });
 
