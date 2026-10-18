@@ -82,9 +82,13 @@ export class BeadsTaskSink implements ActionSink {
       };
     }
 
+    const effectivePayload: BeadsTaskPayload = taskId
+      ? { ...payload, id: payload.id ?? taskId, taskId: payload.taskId ?? taskId }
+      : payload;
+
     try {
       if (this.customExecutor) {
-        const result = await this.customExecutor(payload, action.type, ctx);
+        const result = await this.customExecutor(effectivePayload, action.type, ctx);
         return {
           sinkName: this.name,
           actionId: action.id,
@@ -99,7 +103,8 @@ export class BeadsTaskSink implements ActionSink {
         service: 'beads',
         action: isUpdate ? 'update_task' : 'create_task',
         params: {
-          id: isUpdate ? taskId : payload.id,
+          id: isUpdate ? taskId : (payload.id ?? payload.taskId),
+          taskId: isUpdate ? taskId : (payload.taskId ?? payload.id),
           title: payload.title,
           description: payload.description,
           priority: payload.priority,

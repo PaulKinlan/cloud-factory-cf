@@ -160,6 +160,28 @@ test('BeadsTaskSink: validates payload and priority, dispatches task actions', a
   assert.equal(updateCalls.length, 1);
   assert.equal(updateCalls[0].params.id, 'cf-123');
   assert.equal(updateCalls[0].params.status, 'IN_REVIEW');
+
+  // Test custom executor receives resolved task ID from action.target (fixes cloud-factory-cf-44v)
+  let customReceived: any;
+  const targetCustomSink = new BeadsTaskSink({
+    executor: async (p) => {
+      customReceived = p;
+      return { ok: true };
+    },
+  });
+  const customTargetRes = await targetCustomSink.handle(
+    {
+      id: '5',
+      type: 'beads:task:update',
+      target: 'cf-999',
+      payload: { title: 'Target Title', description: 'desc' },
+      timestamp: Date.now(),
+    },
+    ctx,
+  );
+  assert.equal(customTargetRes.success, true);
+  assert.equal(customReceived.id, 'cf-999');
+  assert.equal(customReceived.taskId, 'cf-999');
 });
 
 test('CloudTelemetrySink: validates metrics and logs, buffers and exports', async () => {
