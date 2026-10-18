@@ -22,6 +22,10 @@
       {
         "name": "REPO_COORDINATOR",
         "class_name": "RepoCoordinator"
+      },
+      {
+        "name": "ORG_COORDINATOR",
+        "class_name": "OrgCoordinator"
       }
     ]
   },
@@ -29,6 +33,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["RepoCoordinator"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["OrgCoordinator"]
     }
   ]
 }

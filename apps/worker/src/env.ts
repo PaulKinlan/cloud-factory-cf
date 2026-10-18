@@ -1,8 +1,11 @@
+import type { OrgCoordinator } from "./org-coordinator";
 import type { RepoCoordinator } from "./repo-coordinator";
 
 export interface FactoryEnv {
   /** One Durable Object per repository, addressed by `idFromName("<owner>/<repo>")`. */
   REPO_COORDINATOR: DurableObjectNamespace<RepoCoordinator>;
+  /** One Durable Object per organization, addressed by `idFromName("<owner>")`. */
+  ORG_COORDINATOR?: DurableObjectNamespace<OrgCoordinator>;
   /** Shared secret used to validate inbound GitHub webhook signatures. Never committed. */
   WEBHOOK_SECRET?: string;
   /** Shared token GitLab sends verbatim in `X-Gitlab-Token`. Never committed. */
