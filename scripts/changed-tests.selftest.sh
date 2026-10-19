@@ -60,6 +60,10 @@ SH
       printf 'export const entry = 1;\n' > "$ws/src/main.ts"
       printf 'import { test } from "vitest";\ntest("x", () => {});\n' > "$ws/test/a.test.ts"
     done
+    # the smoke set names these two worker files explicitly
+    for f in worker assets; do
+      printf 'export {};\n' > "apps/worker/test/$f.test.ts"
+    done
     mkdir -p packages/nodep/tests packages/nodep/src packages/plain/src
     printf '{ "name": "nodep", "scripts": { "test": "node --test tests/**/*.test.ts" } }\n' > packages/nodep/package.json
     printf 'export const n = 1;\n' > packages/nodep/src/n.ts
@@ -157,6 +161,14 @@ reset_tree
 mkdir -p "$FIX/apps/ghost/test" && printf 'export {};\n' > "$FIX/apps/ghost/test/ghost.test.ts"
 run_gate
 check "unowned test file is named and does not hard-FAIL" 'test "$RC" -eq 0 && out_has "not part of the gate" && out_has "ghost.test.ts" && out_has "FAKE vitest run in web"'
+reset_tree
+
+# 9b. Deleting every test file of a workspace is a named no-op, never a red: vitest
+#     exits 1 on 'No test files found', which is a mapping artifact, not a broken change
+#     (bead cloud-factory-cf-u8k).
+rm -rf "$FIX/apps/web/test"
+run_gate
+check "deleting a workspace's only tests is a named no-op, not a red" 'test "$RC" -eq 0 && out_has "apps/web: no test files remain" && out_has "skipped in the smoke set"'
 reset_tree
 
 # 10. --list on an affected-source delta reports the selection and stays green (it runs

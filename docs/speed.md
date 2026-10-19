@@ -66,6 +66,11 @@ contract:
   asking for the delta would run nothing), and test files no workspace runs are
   named as "not part of the gate"; it never hard-FAILs on a test-only delta —
   that red means the *mapping* is wrong, not the change (bead `cloud-factory-cf-8f1`);
+- a test-file delta that removes **every** test file of a workspace is named as a no-op
+  ("no test files remain") instead of running a suite that can only answer
+  `No test files found` — vitest exits 1 for that, which would be a red for a mapping
+  reason, not a broken change (bead `cloud-factory-cf-u8k`). The smoke set skips such a
+  workspace and still runs the others; a genuinely failing test stays red;
 - a delta with no source changes runs a fixed **smoke set** (`apps/web`'s node
   suite, `apps/worker`'s `worker`/`assets` tests) instead of nothing: a gate that
   executes no suite at all cannot be distinguished from one whose selection broke,

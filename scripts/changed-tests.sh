@@ -152,6 +152,10 @@ while IFS= read -r path; do
   fi
 done <<< "$changed"
 
+has_test_files() { # <workspace> — is there anything for its runner to pick up?
+  [ -n "$(find "$1" -type f -name '*.test.*' -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ]
+}
+
 run_smoke() { # <reason>
   echo "changed-tests: $1 — running the smoke set"
   if [ "$LIST" -eq 1 ]; then
@@ -159,8 +163,18 @@ run_smoke() { # <reason>
     return 0
   fi
   local smoke_status=0
-  (cd apps/web && npx vitest run) || smoke_status=1
-  (cd apps/worker && npx vitest run test/worker.test.ts test/assets.test.ts) || smoke_status=1
+  # A workspace whose tests were just deleted has nothing for vitest to find, and
+  # vitest exits 1 on that: name it as a no-op instead of a false red.
+  if has_test_files apps/web; then
+    (cd apps/web && npx vitest run) || smoke_status=1
+  else
+    echo "changed-tests: apps/web: no test files remain — skipped in the smoke set"
+  fi
+  if [ -f apps/worker/test/worker.test.ts ] || [ -f apps/worker/test/assets.test.ts ]; then
+    (cd apps/worker && npx vitest run test/worker.test.ts test/assets.test.ts) || smoke_status=1
+  else
+    echo "changed-tests: apps/worker: smoke tests removed — skipped in the smoke set"
+  fi
   return "$smoke_status"
 }
 
@@ -235,6 +249,10 @@ for ws in "${WS_ORDER[@]}"; do
       continue
     fi
     echo "changed-tests: ${ws}: whole suite (test-file delta: $(echo "$ws_tests" | tr '\n' ' '))"
+    if ! has_test_files "$ws"; then
+      echo "changed-tests: ${ws}: no test files remain — nothing to run (this delta removes the workspace's only coverage; say why on the bead)"
+      continue
+    fi
     ran=$((ran + 1))
     if [ "$kind" = "vitest" ]; then (cd "$ws" && npx vitest run) || status=1
     else (cd "$ws" && npm test --silent) || status=1; fi
@@ -260,6 +278,10 @@ for ws in "${WS_ORDER[@]}"; do
     # so the verdict still has evidence instead of an empty pass.
     echo "changed-tests: ${ws}: whole suite (declared-unverified source)"
     if [ "$LIST" -eq 1 ]; then continue; fi
+    if ! has_test_files "$ws"; then
+      echo "changed-tests: ${ws}: no test files in the workspace — nothing to run"
+      continue
+    fi
     ran=$((ran + 1))
     (cd "$ws" && npx vitest run) || status=1
     continue
