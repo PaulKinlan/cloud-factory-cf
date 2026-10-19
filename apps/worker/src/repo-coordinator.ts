@@ -6,9 +6,11 @@ import {
   EventQueue,
   DeliveryLedger,
   RunAuditStore,
+  RunTraceStore,
   migrateEventQueueTable,
   migrateDeliveryLedgerTable,
   migrateRunAuditTable,
+  migrateRunTraceTable,
   MAX_ATTEMPTS,
   DEFAULT_VISIBILITY_MS,
   safeDecode,
@@ -35,7 +37,8 @@ export { MAX_ATTEMPTS, DEFAULT_VISIBILITY_MS };
  *   2. delegate queue state machine (claim/ack/fail/drain/release/dead-letter) to EventQueue,
  *   3. delegate fan-out idempotent deliveries to DeliveryLedger,
  *   4. delegate run audit logging to RunAuditStore,
- *   5. delegate persistent memory to MemoryHandler and canvas documents to CanvasStore.
+ *   5. delegate the observability trace (ordered run steps + live sockets) to RunTraceStore,
+ *   6. delegate persistent memory to MemoryHandler and canvas documents to CanvasStore.
  */
 export class RepoCoordinator extends DurableObject<Env> {
   private memoryHandler!: MemoryHandler;
@@ -43,6 +46,7 @@ export class RepoCoordinator extends DurableObject<Env> {
   private eventQueue!: EventQueue;
   private deliveryLedger!: DeliveryLedger;
   private runAuditStore!: RunAuditStore;
+  private runTrace!: RunTraceStore;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -53,6 +57,9 @@ export class RepoCoordinator extends DurableObject<Env> {
     this.canvasStore = new CanvasStore(this.ctx.storage.sql, this.ctx.id.name ?? "");
     this.deliveryLedger = new DeliveryLedger(this.ctx.storage.sql);
     this.runAuditStore = new RunAuditStore(this.ctx.storage.sql);
+    // The trace store broadcasts to this object's open sockets, so a viewer sees a
+    // step as it is recorded rather than on the next poll (cloud-factory-cf-2ng).
+    this.runTrace = new RunTraceStore(this.ctx.storage.sql, (step) => this.broadcastStep(step));
     this.eventQueue = new EventQueue(this.ctx.storage.sql, {
       setAlarm: (ts: number) => this.ctx.storage.setAlarm(ts),
       deleteAlarm: () => this.ctx.storage.deleteAlarm(),
@@ -124,11 +131,81 @@ export class RepoCoordinator extends DurableObject<Env> {
       }
       return this.handleMemory(request, url);
     }
+    if (request.method === "POST" && url.pathname === "/trace") {
+      const recorded = this.runTrace.record(await readJson(request));
+      return Response.json({ ok: recorded !== null, step: recorded }, { status: recorded === null ? 400 : 201 });
+    }
+    if (request.method === "GET" && url.pathname === "/trace") {
+      return this.runTrace.list(url);
+    }
+    if (request.method === "GET" && url.pathname === "/trace/usage") {
+      return this.runTrace.usage();
+    }
+    if (request.method === "GET" && url.pathname === "/trace/socket") {
+      return this.traceSocket(request);
+    }
     if (request.method === "GET" && url.pathname === "/stats") {
       return this.stats();
     }
 
     return new Response("not found", { status: 404 });
+  }
+
+  /**
+   * Live trace socket. Accepted with `ctx.acceptWebSocket` so the object can hibernate
+   * while watchers stay connected: a viewer that opens a tab must not keep the
+   * Durable Object billed for the duration.
+   */
+  private traceSocket(request: Request): Response {
+    if ((request.headers.get("upgrade") ?? "").toLowerCase() !== "websocket") {
+      return Response.json({ ok: false, error: "expected a websocket upgrade" }, { status: 426 });
+    }
+    const pair = new WebSocketPair();
+    const server = pair[1];
+    this.ctx.acceptWebSocket(server);
+    // Give the viewer the recent past immediately, then only new steps.
+    const recent = this.runTrace.recent(20);
+    server.send(JSON.stringify({ type: "hello", repository: this.ctx.id.name ?? "", steps: recent }));
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  /** Push one recorded step to every open socket. */
+  private broadcastStep(step: unknown): void {
+    let payload: string;
+    try {
+      payload = JSON.stringify({ type: "step", step });
+    } catch {
+      return;
+    }
+    for (const socket of this.ctx.getWebSockets()) {
+      try {
+        socket.send(payload);
+      } catch {
+        // A closed socket is dropped by the runtime; nothing to do here.
+      }
+    }
+  }
+
+  /** A viewer that talks to the socket: the stream is read-only, so ignore input. */
+  override async webSocketMessage(_ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (typeof message === "string" && message.trim() === "ping") {
+      // Kept small and explicit: a browser cannot send a protocol-level ping.
+      for (const socket of this.ctx.getWebSockets()) {
+        try {
+          socket.send(JSON.stringify({ type: "pong", at: new Date().toISOString() }));
+        } catch {
+          /* closed */
+        }
+      }
+    }
+  }
+
+  override async webSocketClose(ws: WebSocket): Promise<void> {
+    try {
+      ws.close();
+    } catch {
+      /* already closed */
+    }
   }
 
   /** Alarm entry point: hand expired leases back and re-arm for the next retry. */
@@ -142,6 +219,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     migrateCanvasTable(this.sql);
     migrateEventQueueTable(this.sql);
     migrateRunAuditTable(this.sql);
+    migrateRunTraceTable(this.sql);
     migrateDeliveryLedgerTable(this.sql);
   }
 

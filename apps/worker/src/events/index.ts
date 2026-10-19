@@ -17,6 +17,18 @@ export {
 } from "./run-audit";
 
 export {
+  RunTraceStore,
+  migrateRunTraceTable,
+  estimateTokens,
+  normaliseInput,
+  traceSink,
+  TRACE_CAP,
+  type TraceInput,
+  type TraceStep,
+  type TraceStatus,
+} from "./trace";
+
+export {
   asRecord,
   clampInt,
   safeParseJson,

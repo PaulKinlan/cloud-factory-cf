@@ -28,6 +28,7 @@ import {
   type CredentialCapabilityRequest,
   type MemoryScope,
 } from "@factory-cloud/sdk";
+import { estimateTokens, type TraceInput, type TraceStatus } from "./events/trace";
 
 /** How many events one drain handles, and how long a claim is held. */
 export const DEFAULT_RUN_BATCH = 10;
@@ -123,6 +124,12 @@ export interface PipelineDeps {
   sinks?: readonly ActionSink[];
   /** Where telemetry is exported; absent means the structured log. */
   telemetryEndpoint?: string;
+  /**
+   * Observability seam (cloud-factory-cf-2ng): called for every ordered step of a
+   * run so the trace store can show a live thought stream. Awaited, so the steps
+   * arrive in order; a failure in it must never fail the run.
+   */
+  onStep?: (input: TraceInput) => Promise<unknown> | unknown;
 }
 
 /**
@@ -585,8 +592,72 @@ export async function runEvent(
     durationMs: 0,
   };
 
+  // Observability (cloud-factory-cf-2ng): every step of the run is recorded,
+  // including the ones that end in a failure, so the trace shows what happened
+  // instead of only the final status. A trace must never fail a run.
+  let tokensIn = 0;
+  let tokensOut = 0;
+  const emit = async (
+    name: string,
+    status: TraceStatus,
+    detail: string,
+    artifact?: unknown,
+    ms?: number,
+  ): Promise<void> => {
+    if (!deps.onStep) return;
+    try {
+      await deps.onStep({
+        deliveryId: event.deliveryId,
+        step: name,
+        status,
+        detail,
+        ...(artifact === undefined ? {} : { artifact }),
+        ...(ms === undefined ? {} : { ms }),
+      });
+    } catch {
+      // Swallowed on purpose: an observability sink cannot break the pipeline.
+    }
+  };
+  const finish = async (outcome: RunOutcome): Promise<RunOutcome> => {
+    const durationMs = outcome.durationMs > 0 ? outcome.durationMs : Date.now() - startedAt;
+    await emit(
+      "settled",
+      outcome.status === "succeeded" ? "ok" : outcome.status === "skipped" ? "warn" : "error",
+      `${outcome.status} in ${durationMs}ms`,
+      {
+        status: outcome.status,
+        duplicate: outcome.duplicate === true,
+        actionTypes: outcome.actionTypes,
+        tokensIn,
+        tokensOut,
+        error: outcome.error ?? null,
+      },
+      durationMs,
+    );
+    return outcome;
+  };
+
+  await emit(
+    "claimed",
+    "info",
+    `${event.event}${event.action === null ? "" : `.${event.action}`} on ${event.repository} (attempt ${event.attempts + 1})`,
+    {
+      provider: event.provider,
+      event: event.event,
+      action: event.action,
+      actor: event.actor,
+      attempts: event.attempts,
+    },
+  );
+
   try {
     const facts = await loadFacts(deps.coordinator, event);
+    await emit(
+      "facts",
+      "ok",
+      facts.number === null ? "payload decoded" : `${facts.title ?? "untitled"} (#${facts.number})`,
+      { number: facts.number, title: facts.title },
+    );
     const emitted: string[] = [];
     const runtime = new AgentRuntime();
     const sinks = deps.sinks ?? sinksFor(options.sinks, sinkDeps(deps));
@@ -595,12 +666,9 @@ export async function runEvent(
       // the point: silently doing nothing (or falling back to a provider the
       // layout never asked for) would hide a broken layout
       // (findings cloud-factory-cf-xkg / cloud-factory-cf-n4s).
-      return {
-        ...base,
-        prompt: promptFor(facts),
-        status: "failed",
-        error: `no sink in the wiring is one this worker can serve: ${options.sinks.join(", ")}`,
-      };
+      const reason = `no sink in the wiring is one this worker can serve: ${options.sinks.join(", ")}`;
+      await emit("wiring", "error", reason);
+      return finish({ ...base, prompt: promptFor(facts), status: "failed", error: reason });
     }
     for (const sink of recordingSinks(sinks, emitted)) {
       runtime.registerSink(sink);
@@ -613,22 +681,23 @@ export async function runEvent(
     const agentKey = options.agentId ?? "default";
     const permission = await claimDelivery(deps, event.deliveryId, agentKey, options.agentId === undefined);
     if (permission === "skip") {
-      return {
+      await emit("ledger", "warn", `already delivered ${event.deliveryId} as ${agentKey}`, {
+        deliveryId: event.deliveryId,
+        agent: agentKey,
+      });
+      return finish({
         ...base,
         prompt,
         status: "succeeded",
         duplicate: true,
         actionTypes: [],
         output: `already delivered ${event.deliveryId} as ${agentKey}`,
-      };
+      });
     }
     if (permission === "unavailable") {
-      return {
-        ...base,
-        prompt,
-        status: "failed",
-        error: "delivery ledger unavailable, so the run was not started",
-      };
+      const reason = "delivery ledger unavailable, so the run was not started";
+      await emit("ledger", "error", reason);
+      return finish({ ...base, prompt, status: "failed", error: reason });
     }
 
     const ctx = buildContext(deps, facts, runtime, options);
@@ -641,7 +710,26 @@ export async function runEvent(
       complete: (actionType: string, status: "delivered" | "failed") =>
         completeDelivery(deps, event.deliveryId, `${agentKey}#${actionType}`, status),
     } satisfies ActionLedger;
+    await emit("agent", "info", `running agent ${agentKey}`, { agent: agentKey, prompt });
     const summary = await runtime.runAgent(prompt, ctx, executionFn);
+    tokensIn = estimateTokens(prompt);
+    tokensOut = estimateTokens(summary.output ?? "");
+    await emit(
+      "agent",
+      summary.status === "success" ? "ok" : "error",
+      `${summary.status} in ${summary.durationMs}ms, ${summary.toolCallsCount} tool call(s)`,
+      {
+        agent: agentKey,
+        status: summary.status,
+        promptChars: prompt.length,
+        outputChars: summary.output?.length ?? 0,
+        tokensIn,
+        tokensOut,
+        toolCallsCount: summary.toolCallsCount,
+        ...(summary.error === undefined ? {} : { error: summary.error }),
+      },
+      summary.durationMs,
+    );
 
     const pairDeliveryError = await completeDelivery(
       deps,
@@ -654,30 +742,35 @@ export async function runEvent(
     // stay retryable — recording a gap there acknowledges it and drops the work
     // (findings cloud-factory-cf-uil / -lbi pair level).
     const pairGap = summary.status === "success" ? pairDeliveryError : null;
+    for (const actionType of emitted) {
+      await emit("sink", "ok", `emitted ${actionType}`, { actionType });
+    }
     const actionErrors = (ctx.state["actionDeliveryErrors"] as string[] | undefined) ?? [];
     const deliveryError =
       [pairGap, ...actionErrors].filter((entry): entry is string => typeof entry === "string").join("; ") || null;
     if (summary.status === "failure") {
-      return {
+      return finish({
         ...base,
         prompt,
         status: "failed",
         error: summary.error ?? "run failed",
         actionTypes: emitted,
+        durationMs: Date.now() - startedAt,
         ...(deliveryError === null ? {} : { deliveryError }),
-      };
+      });
     }
     if (summary.status === "cancelled") {
-      return {
+      return finish({
         ...base,
         prompt,
         status: "failed",
         error: sequenceReason(summary.error),
         actionTypes: emitted,
+        durationMs: Date.now() - startedAt,
         ...(deliveryError === null ? {} : { deliveryError }),
-      };
+      });
     }
-    return {
+    return finish({
       ...base,
       prompt,
       // Nothing emitted means the agent decided this event needs no action;
@@ -687,14 +780,14 @@ export async function runEvent(
       actionTypes: emitted,
       durationMs: Date.now() - startedAt,
       ...(deliveryError === null ? {} : { deliveryError }),
-    };
+    });
   } catch (error) {
-    return {
+    return finish({
       ...base,
       status: "failed",
       error: error instanceof Error ? error.message : String(error),
       durationMs: Date.now() - startedAt,
-    };
+    });
   }
 }
 
