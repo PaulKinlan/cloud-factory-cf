@@ -13,6 +13,7 @@ Cloudflare-native autonomous SDLC agent cloud built on Pi, Cloudflare Durable Ob
 ```
 apps/worker/     Cloudflare Worker entry point + per-repo Durable Object
 apps/web/        Agent canvas — Isocan-style infinite canvas that exports agent config
+packages/canvas-model/  @factory-cloud/canvas-model — DOM-free document model (rules, validation, toAgentConfig), shared by the canvas and the worker
 packages/sdk/    @factory-cloud/sdk — Pi-inspired extension hooks (see epic)
 ```
 

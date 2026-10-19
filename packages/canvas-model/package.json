@@ -1,0 +1,27 @@
+{
+  "name": "@factory-cloud/canvas-model",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "DOM-free canvas document model: node/edge rules, validation, and the agent configuration a layout exports",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "keywords": [
+    "cloud-factory",
+    "isocan",
+    "canvas",
+    "agent-configuration"
+  ],
+  "author": "Paul Kinlan",
+  "license": "Apache-2.0"
+}
