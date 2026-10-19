@@ -20,6 +20,18 @@ test('parseArgs: parses commands and flags accurately', () => {
   assert.equal(workerArgs.coordinator, 'http://127.0.0.1:8787');
   assert.equal(workerArgs.limit, 10);
   assert.equal(workerArgs.once, true);
+
+  const studioAuthorArgs = parseArgs(['studio', 'author', 'Review pull requests', '--out', 'manifest.json']);
+  assert.equal(studioAuthorArgs.command, 'studio');
+  assert.equal(studioAuthorArgs.studioAction, 'author');
+  assert.equal(studioAuthorArgs.prompt, 'Review pull requests');
+  assert.equal(studioAuthorArgs.outPath, 'manifest.json');
+
+  const studioTestArgs = parseArgs(['studio', 'test', 'manifest.json', '--event', 'event.json']);
+  assert.equal(studioTestArgs.command, 'studio');
+  assert.equal(studioTestArgs.studioAction, 'test');
+  assert.equal(studioTestArgs.manifestPath, 'manifest.json');
+  assert.equal(studioTestArgs.eventFile, 'event.json');
 });
 
 test('runCli: outputs help and version text', async () => {
@@ -51,4 +63,57 @@ test('runCli: outputs help and version text', async () => {
   // Running against an unreachable coordinator endpoint returns error or empty batch
   // Here we verify runCli worker parses --once cleanly
   assert.equal(typeof runCli, 'function');
+});
+
+test('runCli: studio author and test simulation', async () => {
+  const os = await import('node:os');
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cf-cli-studio-'));
+  try {
+    const manifestPath = path.join(tmpDir, 'test-agent.json');
+    const outputs: string[] = [];
+    const errors: string[] = [];
+    const io = {
+      stdout: (m: string) => outputs.push(m),
+      stderr: (m: string) => errors.push(m),
+    };
+
+    // 1. Author agent manifest via CLI
+    const authorCode = await runCli(
+      [
+        'studio',
+        'author',
+        'Create an agent called pr-triage that reviews pull requests and reads code files',
+        '--cwd',
+        tmpDir,
+        '--out',
+        'test-agent.json',
+      ],
+      io,
+    );
+    assert.equal(authorCode, 0);
+    assert.ok(outputs.some((o) => o.includes('Saved manifest to')));
+
+    const savedRaw = await fs.readFile(manifestPath, 'utf8');
+    const saved = JSON.parse(savedRaw);
+    assert.equal(saved.name, 'pr-triage');
+
+    // 2. Test simulate agent manifest via CLI
+    const testOutputs: string[] = [];
+    const testIo = {
+      stdout: (m: string) => testOutputs.push(m),
+      stderr: (m: string) => {},
+    };
+
+    const testCode = await runCli(
+      ['studio', 'test', manifestPath, '--cwd', tmpDir],
+      testIo,
+    );
+    assert.equal(testCode, 0);
+    assert.ok(testOutputs.some((o) => o.includes('Simulation completed')));
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
 });

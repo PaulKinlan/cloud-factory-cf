@@ -1,9 +1,13 @@
 import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
+import { AgentStudio, type AgentManifest } from '@factory-cloud/sdk';
 import { LocalAgentRunner } from './runner/local-runner.ts';
 import { QueueWorker } from './worker/queue-worker.ts';
+import { createLocalTools } from './tools/local-tools.ts';
 
 export interface CliParsedArgs {
-  command: 'run' | 'worker' | 'help' | 'version';
+  command: 'run' | 'worker' | 'studio' | 'help' | 'version';
+  studioAction?: 'author' | 'test' | 'list';
   prompt?: string;
   cwd?: string;
   repo?: string;
@@ -12,6 +16,9 @@ export interface CliParsedArgs {
   interval?: number;
   extensions?: string[];
   once?: boolean;
+  manifestPath?: string;
+  eventFile?: string;
+  outPath?: string;
 }
 
 export function parseArgs(args: readonly string[]): CliParsedArgs {
@@ -28,13 +35,23 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
     return { command: 'help' };
   }
   const rest = args.slice(1);
-  let command: 'run' | 'worker' | 'help' = 'run';
+  let command: 'run' | 'worker' | 'studio' | 'help' | 'version' = 'run';
+  let studioAction: 'author' | 'test' | 'list' | undefined;
   let remaining = rest;
 
   if (first === 'run') {
     command = 'run';
   } else if (first === 'worker' || first === 'poll') {
     command = 'worker';
+  } else if (first === 'studio') {
+    command = 'studio';
+    if (rest.length > 0 && !rest[0]!.startsWith('-')) {
+      const sub = rest[0]!.toLowerCase();
+      if (sub === 'author' || sub === 'test' || sub === 'list') {
+        studioAction = sub;
+        remaining = rest.slice(1);
+      }
+    }
   } else if (first === 'help') {
     return { command: 'help' };
   } else if (first === 'version') {
@@ -52,6 +69,9 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
   let limit: number | undefined;
   let interval: number | undefined;
   let once: boolean | undefined;
+  let manifestPath: string | undefined;
+  let eventFile: string | undefined;
+  let outPath: string | undefined;
   const extensions: string[] = [];
 
   for (let i = 0; i < remaining.length; i++) {
@@ -72,13 +92,24 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
       extensions.push(remaining[++i]!);
     } else if (arg === '--once') {
       once = true;
-    } else if (!arg.startsWith('-') && !prompt) {
-      prompt = arg;
+    } else if (arg === '--manifest' && i + 1 < remaining.length) {
+      manifestPath = remaining[++i];
+    } else if (arg === '--event' && i + 1 < remaining.length) {
+      eventFile = remaining[++i];
+    } else if (arg === '--out' && i + 1 < remaining.length) {
+      outPath = remaining[++i];
+    } else if (!arg.startsWith('-')) {
+      if (command === 'studio' && studioAction === 'test' && !manifestPath) {
+        manifestPath = arg;
+      } else if (!prompt) {
+        prompt = arg;
+      }
     }
   }
 
   return {
     command,
+    studioAction,
     prompt,
     cwd,
     repo,
@@ -87,6 +118,9 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
     interval,
     extensions,
     once,
+    manifestPath,
+    eventFile,
+    outPath,
   };
 }
 
@@ -96,6 +130,9 @@ export function printHelp(): string {
 USAGE:
   factory-cloud run [prompt] [options]       Execute an agent run locally
   factory-cloud worker [options]             Run a local queue worker polling RepoCoordinator
+  factory-cloud studio author <prompt>       Synthesize agent manifest from natural language
+  factory-cloud studio test <manifest.json>  Simulate agent execution in test harness
+  factory-cloud studio list [options]        List installed agents
   factory-cloud --help                       Show this help message
   factory-cloud --version                    Show version
 
@@ -107,6 +144,9 @@ OPTIONS:
   --interval <ms>        Poll interval in milliseconds when idle (default: 1000)
   --once                 Process a single batch and exit (worker command)
   --extension <path>     Path to extension module to load
+  --manifest <path>      Path to agent manifest file (studio test)
+  --event <path>         Path to event payload JSON file (studio test)
+  --out <path>           Output file path for authored manifest (studio author)
 `;
 }
 
@@ -227,6 +267,93 @@ export async function runCli(
         process.off('SIGINT', handleSignal);
         process.off('SIGTERM', handleSignal);
       }
+    }
+  }
+
+  if (parsed.command === 'studio') {
+    const studio = new AgentStudio();
+    const action = parsed.studioAction ?? 'author';
+
+    if (action === 'author') {
+      if (!parsed.prompt) {
+        io.stderr(
+          'Error: missing prompt for studio author. Usage: factory-cloud studio author "<prompt>"',
+        );
+        return 1;
+      }
+      const localTools = createLocalTools({ cwd });
+      io.stdout('[factory-cloud studio] Grounding prompt against control plane...');
+      const manifest = await studio.author(parsed.prompt, {
+        availableTools: localTools,
+        availableSinks: ['github-pr-review', 'github-issue', 'beads-task', 'cloud-telemetry'],
+        repoContext: { owner: owner ?? 'local', repo: name ?? 'local-repo' },
+      });
+
+      const jsonStr = JSON.stringify(manifest, null, 2);
+      if (parsed.outPath) {
+        const outResolved = path.resolve(cwd, parsed.outPath);
+        await fs.writeFile(outResolved, jsonStr, 'utf8');
+        io.stdout(`[factory-cloud studio] Saved manifest to ${outResolved}`);
+      } else {
+        io.stdout(`[factory-cloud studio] Authored Agent Manifest:\n${jsonStr}`);
+      }
+      return 0;
+    }
+
+    if (action === 'test') {
+      if (!parsed.manifestPath) {
+        io.stderr(
+          'Error: missing manifest path for studio test. Usage: factory-cloud studio test <manifest.json>',
+        );
+        return 1;
+      }
+      const manifestResolved = path.resolve(cwd, parsed.manifestPath);
+      let manifest: AgentManifest;
+      try {
+        const raw = await fs.readFile(manifestResolved, 'utf8');
+        manifest = JSON.parse(raw) as AgentManifest;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        io.stderr(`[factory-cloud studio] Failed to read manifest: ${msg}`);
+        return 1;
+      }
+
+      let event: Record<string, unknown> | undefined;
+      if (parsed.eventFile) {
+        try {
+          const rawEvent = await fs.readFile(path.resolve(cwd, parsed.eventFile), 'utf8');
+          event = JSON.parse(rawEvent) as Record<string, unknown>;
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          io.stderr(`[factory-cloud studio] Failed to read event file: ${msg}`);
+          return 1;
+        }
+      }
+
+      const localTools = createLocalTools({ cwd });
+      io.stdout(`[factory-cloud studio] Running test simulation for agent "${manifest.name}"...`);
+      const result = await studio.simulate(
+        {
+          manifest,
+          event: event ?? { type: 'test.simulated' },
+          promptInput: parsed.prompt,
+        },
+        { tools: localTools },
+      );
+
+      io.stdout(
+        `[factory-cloud studio] Simulation ${result.status} in ${result.durationMs}ms (tool calls: ${result.toolCalls.length}, sink actions: ${result.sinkActions.length})`,
+      );
+      if (result.error) {
+        io.stderr(`[factory-cloud studio] Error: ${result.error}`);
+      }
+      return result.status === 'completed' ? 0 : 1;
+    }
+
+    if (action === 'list') {
+      io.stdout('[factory-cloud studio] Installed agents:');
+      io.stdout('  (none installed in local scope)');
+      return 0;
     }
   }
 

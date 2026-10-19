@@ -62,6 +62,20 @@ export type {
   RegisteredExtension,
 } from './types/extension.ts';
 
+export type {
+  AgentManifest,
+  AgentTrigger,
+  AgentCapabilityRequest,
+  AgentSinkConfig,
+  StudioContext,
+  AgentSynthesisFn,
+  SimulationRequest,
+  SimulatedToolCall,
+  SimulatedMemoryMutation,
+  SimulatedPermissionCheck,
+  SimulationResult,
+} from './types/studio.ts';
+
 // Implementations
 export {
   createAgentContext,
@@ -121,3 +135,11 @@ export {
   type AgentExecutionFn,
   type AgentRunSummary,
 } from './runtime/agent-runtime.ts';
+
+export {
+  PromptToAgentCompiler,
+} from './studio/prompt-compiler.ts';
+
+export {
+  AgentStudio,
+} from './studio/agent-studio.ts';
