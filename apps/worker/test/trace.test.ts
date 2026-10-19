@@ -184,6 +184,30 @@ describe("trace store", () => {
     socket.close();
   });
 
+  it("answers a ping with a pong on the socket that pinged", async () => {
+    // The panel's heartbeat is only meaningful if the round trip works: an open
+    // socket with no pong is how a dead connection gets noticed (2ng.6).
+    const stub = coordinator("trace/heartbeat");
+    const response = await stub.fetch(`${BASE}/trace/socket`, { headers: { upgrade: "websocket" } });
+    expect(response.status).toBe(101);
+    const socket = response.webSocket!;
+    socket.accept();
+    const types: string[] = [];
+    const pong = new Promise<Record<string, unknown>>((resolve) => {
+      socket.addEventListener("message", (event) => {
+        const message = JSON.parse(String((event as MessageEvent).data)) as Record<string, unknown>;
+        types.push(String(message["type"]));
+        if (message["type"] === "pong") resolve(message);
+      });
+    });
+    socket.send("ping");
+    const reply = await pong;
+    expect(reply["type"]).toBe("pong");
+    expect(typeof reply["at"]).toBe("string");
+    expect(types[0]).toBe("hello");
+    socket.close();
+  });
+
   it("rejects a socket handshake that is not an upgrade", async () => {
     const stub = coordinator("trace/noop");
     const response = await stub.fetch(`${BASE}/trace/socket`);

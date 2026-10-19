@@ -11,9 +11,14 @@ import {
   artifactPreview,
   clockTime,
   formatStep,
+  heartbeatAge,
   mergeStep,
+  reconnectDelay,
+  statusText,
+  statusTone,
   traceUrls,
   usageRows,
+  type SessionState,
   type SocketLike,
   type TraceStep,
 } from "../src/observability";
@@ -53,6 +58,46 @@ function fakeSocket(): SocketLike & { emit: (type: string, payload?: unknown) =>
     },
   };
 }
+
+/**
+ * A socket the session can ping, recording what was sent. It behaves like a
+ * browser WebSocket where it matters: it starts CONNECTING (readyState 0), only
+ * becomes OPEN on `open`, and `send` throws before that (review cb3: a fake that
+ * accepted sends while unopened hid a hanging-handshake bug).
+ */
+function pingableSocket(): SocketLike & {
+  emit: (type: string, payload?: unknown) => void;
+  closed: boolean;
+  sent: string[];
+  readyState: number;
+} {
+  const socket = fakeSocket() as SocketLike & {
+    emit: (type: string, payload?: unknown) => void;
+    closed: boolean;
+    sent: string[];
+    readyState: number;
+  };
+  const emit = socket.emit.bind(socket);
+  const close = socket.close.bind(socket);
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (data: string) => {
+    if (socket.readyState !== 1) throw new Error("InvalidStateError");
+    socket.sent.push(data);
+  };
+  socket.emit = (type: string, payload?: unknown) => {
+    if (type === "open") socket.readyState = 1;
+    if (type === "close") socket.readyState = 3;
+    emit(type, payload);
+  };
+  socket.close = () => {
+    close();
+    socket.readyState = 3;
+  };
+  return socket;
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -229,6 +274,7 @@ describe("session", () => {
     expect(session.state.steps[0]?.id).toBe("live-1");
     socket.emit("message", "not json");
     expect(session.state.steps).toHaveLength(2);
+    session.disconnect();
   });
 
   it("refreshes the HUD when a run settles on the stream", async () => {
@@ -273,7 +319,7 @@ describe("session", () => {
     expect(session.polling).toBe(false);
   });
 
-  it("falls back to polling when the socket fails, and disconnect clears the timer", async () => {
+  it("polling covers a failed socket, and disconnect clears every timer", async () => {
     const socket = fakeSocket();
     const session = new ObservabilitySession({
       base: "https://factory.example",
@@ -283,16 +329,23 @@ describe("session", () => {
       fetchImpl: (async () => jsonResponse({ ok: true, usage: null, steps: [] })) as unknown as typeof fetch,
       socketFactory: () => socket,
       pollMs: 100000,
+      reconnectBaseMs: 100000,
     });
     await session.connect();
     socket.emit("open");
     expect(session.state.status).toBe("live");
     socket.emit("error");
-    expect(session.state.status).toBe("polling");
+    // The socket is the thing the panel wants back, so the status says so even
+    // though polling is already filling in the rows underneath.
+    expect(session.state.status).toBe("reconnecting");
     expect(session.polling).toBe(true);
+    expect(session.retrying).toBe(true);
+    expect(session.state.reconnectAttempts).toBe(1);
+    expect(session.state.error).toBe("socket error");
+    expect(socket.closed).toBe(true);
     session.disconnect();
     expect(session.polling).toBe(false);
-    expect(socket.closed).toBe(true);
+    expect(session.retrying).toBe(false);
     expect(session.state.status).toBe("idle");
   });
 
@@ -394,5 +447,275 @@ describe("session", () => {
     expect(session.selected()?.artifact).toEqual({ a: 1 });
     session.select(null);
     expect(session.selected()).toBeNull();
+  });
+});
+
+function sessionState(overrides: Partial<SessionState> = {}): SessionState {
+  return {
+    status: "idle",
+    steps: [],
+    usage: null,
+    selectedId: null,
+    error: null,
+    lastMessageAt: null,
+    lastPongAt: null,
+    reconnectAttempts: 0,
+    nextRetryAt: null,
+    ...overrides,
+  };
+}
+
+describe("heartbeat", () => {
+  it("pings the open socket and stays live while pongs come back", async () => {
+    const socket = pingableSocket();
+    const session = new ObservabilitySession({
+      base: "https://factory.example",
+      owner: "acme",
+      repo: "widget",
+      key: "k",
+      fetchImpl: (async () => jsonResponse({ ok: true, usage: null, steps: [] })) as unknown as typeof fetch,
+      socketFactory: () => socket,
+      heartbeatMs: 10,
+      pongTimeoutMs: 500,
+      pollMs: 100000,
+    });
+    await session.connect();
+    socket.emit("open");
+    expect(session.heartbeating).toBe(true);
+    await sleep(40);
+    // A heartbeat is an explicit `ping`, which is exactly what the Worker answers.
+    expect(socket.sent).toContain("ping");
+    expect(session.state.status).toBe("live");
+    socket.emit("message", JSON.stringify({ type: "pong", at: "2026-10-19T13:23:08.383Z" }));
+    expect(session.state.status).toBe("live");
+    expect(session.state.lastPongAt).not.toBeNull();
+    expect(session.state.lastMessageAt).not.toBeNull();
+    session.disconnect();
+    expect(session.heartbeating).toBe(false);
+  });
+
+  it("reconnects instead of claiming to be live when a ping goes unanswered", async () => {
+    const sockets: Array<ReturnType<typeof pingableSocket>> = [];
+    const session = new ObservabilitySession({
+      base: "https://factory.example",
+      owner: "acme",
+      repo: "widget",
+      key: "k",
+      fetchImpl: (async () => jsonResponse({ ok: true, usage: null, steps: [] })) as unknown as typeof fetch,
+      socketFactory: () => {
+        const socket = pingableSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      heartbeatMs: 10,
+      pongTimeoutMs: 25,
+      reconnectBaseMs: 100000,
+      pollMs: 100000,
+    });
+    await session.connect();
+    sockets[0]?.emit("open");
+    expect(session.state.status).toBe("live");
+    await sleep(90);
+    // The socket still looked open; only the missing pong revealed it was dead.
+    expect(session.state.status).toBe("reconnecting");
+    expect(session.state.error).toContain("heartbeat lost");
+    expect(session.state.reconnectAttempts).toBe(1);
+    expect(session.state.nextRetryAt).not.toBeNull();
+    expect(session.retrying).toBe(true);
+    expect(session.polling).toBe(true);
+    expect(sockets[0]?.closed).toBe(true);
+    session.disconnect();
+    expect(session.polling).toBe(false);
+    expect(session.retrying).toBe(false);
+    expect(session.heartbeating).toBe(false);
+  });
+
+  it("times out a handshake that never completes (review cb3)", async () => {
+    const sockets: Array<ReturnType<typeof pingableSocket>> = [];
+    const session = new ObservabilitySession({
+      base: "https://factory.example",
+      owner: "acme",
+      repo: "widget",
+      key: "k",
+      fetchImpl: (async () => jsonResponse({ ok: true, usage: null, steps: [] })) as unknown as typeof fetch,
+      socketFactory: () => {
+        const socket = pingableSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      heartbeatMs: 10,
+      pongTimeoutMs: 25,
+      reconnectBaseMs: 100000,
+      pollMs: 100000,
+    });
+    await session.connect();
+    // The socket stays CONNECTING and `send` throws, exactly like a browser whose
+    // handshake is being swallowed: no `open` event will ever arrive.
+    expect(session.state.status).toBe("connecting");
+    expect(sockets[0]?.readyState).toBe(0);
+    await sleep(90);
+    expect(session.state.status).toBe("reconnecting");
+    expect(session.state.error).toContain("handshake timed out");
+    expect(session.state.reconnectAttempts).toBe(1);
+    expect(sockets[0]?.closed).toBe(true);
+    expect(session.polling).toBe(true);
+    session.disconnect();
+  });
+
+  it("keeps backing off while a socket keeps dying before it proves itself", async () => {
+    const sockets: Array<ReturnType<typeof pingableSocket>> = [];
+    const session = new ObservabilitySession({
+      base: "https://factory.example",
+      owner: "acme",
+      repo: "widget",
+      key: "k",
+      fetchImpl: (async () => jsonResponse({ ok: true, usage: null, steps: [] })) as unknown as typeof fetch,
+      socketFactory: () => {
+        const socket = pingableSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      heartbeatMs: 10,
+      pongTimeoutMs: 20,
+      reconnectBaseMs: 5,
+      reconnectMaxMs: 20,
+      pollMs: 100000,
+    });
+    await session.connect();
+    sockets[0]?.emit("open");
+    await sleep(160);
+    // A socket that opens and then never answers must not reset the backoff,
+    // otherwise a flapping Worker is retried every second forever.
+    expect(session.state.reconnectAttempts).toBeGreaterThanOrEqual(2);
+    expect(sockets.length).toBeGreaterThanOrEqual(2);
+    session.disconnect();
+  });
+
+  it("resets the backoff once a reconnected socket answers a ping", async () => {
+    const sockets: Array<ReturnType<typeof pingableSocket>> = [];
+    let created = 0;
+    const session = new ObservabilitySession({
+      base: "https://factory.example",
+      owner: "acme",
+      repo: "widget",
+      key: "k",
+      fetchImpl: (async () => jsonResponse({ ok: true, usage: null, steps: [] })) as unknown as typeof fetch,
+      socketFactory: () => {
+        created += 1;
+        const socket = pingableSocket();
+        sockets.push(socket);
+        if (created > 1) {
+          // The retry worked: the new socket opens and then answers every ping,
+          // so the backoff has proof of life rather than one lucky pong.
+          const send = socket.send?.bind(socket);
+          socket.send = (data: string) => {
+            send?.(data);
+            if (data === "ping") {
+              setTimeout(() => {
+                socket.emit("message", JSON.stringify({ type: "pong", at: "2026-10-19T13:23:08.383Z" }));
+              }, 0);
+            }
+          };
+          setTimeout(() => socket.emit("open"), 5);
+        }
+        return socket;
+      },
+      heartbeatMs: 10,
+      pongTimeoutMs: 20,
+      reconnectBaseMs: 5,
+      reconnectMaxMs: 20,
+      pollMs: 100000,
+    });
+    await session.connect();
+    sockets[0]?.emit("open");
+    await sleep(120);
+    expect(created).toBeGreaterThanOrEqual(2);
+    expect(session.state.reconnectAttempts).toBe(0);
+    expect(session.state.status).toBe("live");
+    session.disconnect();
+  });
+
+  it("retries immediately when the operator asks, cancelling the scheduled wait", async () => {
+    const sockets: Array<ReturnType<typeof pingableSocket>> = [];
+    const session = new ObservabilitySession({
+      base: "https://factory.example",
+      owner: "acme",
+      repo: "widget",
+      key: "k",
+      fetchImpl: (async () => jsonResponse({ ok: true, usage: null, steps: [] })) as unknown as typeof fetch,
+      socketFactory: () => {
+        const socket = pingableSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      reconnectBaseMs: 100000,
+      pollMs: 100000,
+    });
+    await session.connect();
+    sockets[0]?.emit("open");
+    sockets[0]?.emit("error");
+    expect(session.state.status).toBe("reconnecting");
+    expect(session.retrying).toBe(true);
+    await session.reconnect();
+    expect(sockets).toHaveLength(2);
+    expect(sockets[0]?.closed).toBe(true);
+    expect(session.retrying).toBe(false);
+    expect(session.state.reconnectAttempts).toBe(0);
+    session.disconnect();
+  });
+});
+
+describe("connection health", () => {
+  it("reports how long ago the socket last answered", () => {
+    const state = sessionState({ status: "live", lastPongAt: 1000, lastMessageAt: 1000 });
+    expect(statusText(state, 13000)).toBe("live · 0 step(s) · heartbeat 12s ago");
+    expect(statusTone(state)).toBe("ok");
+  });
+
+  it("says a live socket has no heartbeat yet rather than inventing one", () => {
+    expect(statusText(sessionState({ status: "live" }), 5000)).toContain("no heartbeat yet");
+  });
+
+  it("counts down to the next reconnect and then says it is retrying", () => {
+    const state = sessionState({ status: "reconnecting", reconnectAttempts: 2, nextRetryAt: 4000, error: "socket error" });
+    expect(statusText(state, 1000)).toBe("reconnecting (attempt 2, retry in 3s) · socket error");
+    expect(statusText(state, 4000)).toBe("reconnecting (attempt 2, retrying now) · socket error");
+    expect(statusTone(state)).toBe("warn");
+  });
+
+  it("names the failure when the connection gave up", () => {
+    const state = sessionState({ status: "error", error: "control key rejected (401)" });
+    expect(statusText(state, 0)).toBe("control key rejected (401)");
+    expect(statusTone(state)).toBe("error");
+    expect(statusText(sessionState({ status: "idle" }), 0)).toBe("Disconnected");
+    expect(statusText(sessionState({ status: "polling" }), 0)).toBe("polling (socket unavailable)");
+    expect(statusText(sessionState({ status: "connecting" }), 0)).toBe("connecting…");
+  });
+
+  it("formats a heartbeat age without waiting on real time", () => {
+    expect(heartbeatAge(0, null)).toBe("no heartbeat yet");
+    expect(heartbeatAge(5000, 4000)).toBe("just now");
+    expect(heartbeatAge(17000, 5000)).toBe("12s ago");
+    expect(heartbeatAge(125000, 5000)).toBe("2m ago");
+  });
+
+  it("backs off exponentially with a ceiling, so a down Worker is not hammered", () => {
+    expect(reconnectDelay(1)).toBe(1000);
+    expect(reconnectDelay(2)).toBe(2000);
+    expect(reconnectDelay(3, 1000, 5000)).toBe(4000);
+    expect(reconnectDelay(4, 1000, 5000)).toBe(5000);
+    expect(reconnectDelay(99, 1000, 30000)).toBe(30000);
+    expect(reconnectDelay(0)).toBe(1000);
+    expect(reconnectDelay(Number.NaN)).toBe(1000);
+  });
+});
+
+describe("reconnect control", () => {
+  it("offers a Reconnect button that an idle panel does not enable", () => {
+    const tag = /<button[^>]*obs-btn-reconnect[^>]*>/.exec(indexHtml)?.[0] ?? "";
+    expect(tag).not.toBe("");
+    expect(tag).toContain("disabled");
+    expect(indexHtml).toContain("obs-status");
+    expect(indexHtml).toContain('aria-live="polite"');
   });
 });
