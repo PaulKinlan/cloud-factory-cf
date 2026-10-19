@@ -149,8 +149,14 @@ credentials):
 
 Rules:
 
-- A binding name must look like an env binding (`^[A-Z][A-Z0-9_]{0,63}$`), so an
-  override can never name an arbitrary property of the environment.
+- A binding name must look like an env binding (`^[A-Z][A-Z0-9_]{0,63}$`) **and be
+  that service's own credential binding or a sibling of it**
+  (`GITHUB_TOKEN`, `GITHUB_TOKEN_INSTALL_2`; see
+  `isApprovedCredentialBinding()` in `src/credentials/policy.ts`). Broker keys
+  (`BROKER_SIGNING_KEY`, `BROKER_CONTROL_KEY`), `WEBHOOK_*` and another service's
+  token are refused with a 400, and the value is re-checked when the credential is
+  resolved, so a row written by an older build cannot attach a broker secret to an
+  upstream request (finding `cloud-factory-cf-ccj`).
 - The allowlist can only **narrow** the policy: an action the policy does not
   permit is a `400`, including as part of an otherwise valid list. An empty list
   is allowed and disables the service for that repository.

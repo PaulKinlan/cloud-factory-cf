@@ -1,3 +1,4 @@
+import { isApprovedCredentialBinding } from "../src/credentials/policy";
 import { describe, expect, it } from "vitest";
 import {
   credentialEnvFor,
@@ -101,5 +102,24 @@ describe("credential broker policy", () => {
 
     const unknownService = resolveRequest({ service: "unknown", action: "read", repository: "acme/widgets" });
     expect(unknownService).toMatchObject({ ok: false, status: 403 });
+  });
+});
+
+describe("approved credential bindings", () => {
+  it("accepts only the service's own credential binding and its siblings", () => {
+    expect(isApprovedCredentialBinding("github", "GITHUB_TOKEN")).toBe(true);
+    expect(isApprovedCredentialBinding("github", "GITHUB_TOKEN_INSTALL_2")).toBe(true);
+    // A binding the deployment declares under the service's credential prefix
+    // is a credential for that service, so it is selectable.
+    expect(isApprovedCredentialBinding("github", "GITHUB_TOKEN_SECRET")).toBe(true);
+    expect(isApprovedCredentialBinding("gitlab", "GITLAB_TOKEN")).toBe(true);
+
+    expect(isApprovedCredentialBinding("github", "BROKER_SIGNING_KEY")).toBe(false);
+    expect(isApprovedCredentialBinding("github", "BROKER_CONTROL_KEY")).toBe(false);
+    expect(isApprovedCredentialBinding("github", "WEBHOOK_SECRET")).toBe(false);
+    expect(isApprovedCredentialBinding("github", "GITLAB_TOKEN")).toBe(false);
+    expect(isApprovedCredentialBinding("github", "github_token")).toBe(false);
+    expect(isApprovedCredentialBinding("github", "GITHUB_TOKEN_")).toBe(false);
+    expect(isApprovedCredentialBinding("unknown", "GITHUB_TOKEN")).toBe(false);
   });
 });

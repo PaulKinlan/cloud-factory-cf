@@ -7,7 +7,7 @@ import {
   type CapabilityClaims,
 } from "./credentials/capability";
 import { executeSignedRequest, type BrokerExecution } from "./credentials/broker";
-import { hasPermission } from "./credentials/policy";
+import { credentialEnvFor, hasPermission, isApprovedCredentialBinding } from "./credentials/policy";
 
 /**
  * Per-repository credential broker.
@@ -501,10 +501,10 @@ export class CredentialBroker extends DurableObject<Env> {
     return rows[0]?.value ?? null;
   }
 
-  /** Env binding the repository uses for a service, or null for the policy default. */
+  /** Env binding the repository uses for a service, or undefined for the policy default. */
   private credentialBinding(service: string): string | undefined {
     const value = this.overrideValue(service, "credential_binding");
-    return value !== null && isBindingName(value) ? value : undefined;
+    return value !== null && isApprovedCredentialBinding(service, value) ? value : undefined;
   }
 
   /** `null` means "not narrowed"; an array means only those actions are allowed. */
@@ -583,9 +583,15 @@ export class CredentialBroker extends DurableObject<Env> {
 
     if (request.method === "POST") {
       if (kind === "credential_binding") {
-        if (typeof body.value !== "string" || !isBindingName(body.value)) {
+        // Only this service's own credential binding (or a sibling of it) may be
+        // selected: a broker key or another service's token must never be
+        // attachable to an upstream request.
+        if (typeof body.value !== "string" || !isApprovedCredentialBinding(service, body.value)) {
           return Response.json(
-            { ok: false, error: "value must be an env binding name like GITHUB_TOKEN_INSTALL_2" },
+            {
+              ok: false,
+              error: `value must be the ${service} credential binding or a sibling of it (e.g. ${credentialEnvFor(service) ?? "SERVICE_TOKEN"}_INSTALL_2)`,
+            },
             { status: 400 },
           );
         }
@@ -755,11 +761,6 @@ type OverrideKind = "credential_binding" | "allowed_actions";
 
 function isOverrideKind(value: string): value is OverrideKind {
   return value === "credential_binding" || value === "allowed_actions";
-}
-
-/** Env binding names are uppercase identifiers, so an override can never name an arbitrary property. */
-function isBindingName(value: string): boolean {
-  return /^[A-Z][A-Z0-9_]{0,63}$/.test(value);
 }
 
 interface AuditRow extends Record<string, SqlStorageValue> {

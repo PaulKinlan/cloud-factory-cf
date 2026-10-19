@@ -115,6 +115,34 @@ describe("credential broker object: per-repository overrides", () => {
     expect(permissions).toMatchObject({ permitted: false, narrowedByRepository: true });
   });
 
+  it("only accepts this service's own credential binding", async () => {
+    await clearOverrides();
+
+    // Broker secrets and other services' tokens must never be selectable, even
+    // though they are valid env bindings (finding cloud-factory-cf-ccj).
+    for (const binding of [
+      "BROKER_SIGNING_KEY",
+      "BROKER_CONTROL_KEY",
+      "WEBHOOK_SECRET",
+      "GITLAB_TOKEN",
+      "GITHUB_TOKEN_",
+      "broker_signing_key",
+    ]) {
+      const refused = await setOverride("credential_binding", binding);
+      expect(refused.status, `binding ${binding} must be refused`).toBe(400);
+    }
+
+    // The service's own binding and its installation siblings are allowed.
+    expect((await setOverride("credential_binding", "GITHUB_TOKEN")).status).toBe(200);
+    expect((await setOverride("credential_binding", "GITHUB_TOKEN_INSTALL_2")).status).toBe(200);
+
+    // A refused write leaves the previous value in place rather than clearing it.
+    const listed = (await (await brokerFetch("overrides", { method: "GET" })).json()) as {
+      entries: Array<{ kind: string; value: unknown }>;
+    };
+    expect(listed.entries).toEqual([expect.objectContaining({ kind: "credential_binding", value: "GITHUB_TOKEN_INSTALL_2" })]);
+  });
+
   it("refuses to widen the policy and refuses a malformed binding", async () => {
     await clearOverrides();
 
