@@ -21,7 +21,17 @@ export {
   parseArgs,
   printHelp,
   type CliParsedArgs,
+  type CliIo,
+  type CommandContext,
 } from './cli.ts';
+
+export {
+  handleRunCommand,
+  handleWorkerCommand,
+  handleStudioCommand,
+  handleReviewCommand,
+  handleWebhookCommand,
+} from './commands/index.ts';
 
 export {
   runPrReview,
