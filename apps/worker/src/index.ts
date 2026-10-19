@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { drainRepository } from "./pipeline";
 import { sameSecret } from "./secrets";
 import { MAX_WEBHOOK_BYTES } from "./webhooks";
 import { AgentStudio, type AgentManifest } from "@factory-cloud/sdk";
@@ -12,6 +13,7 @@ export { RepoCoordinator } from "./repo-coordinator";
 
 const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
 const CANVAS_PATH = /^\/canvas\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/documents(?:\/(?<id>[^/]+))?$/;
+const RUN_PATH = /^\/runs\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
 const BROKER_PATH =
   /^\/broker\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>capabilities|permissions|provisioning|overrides|proxy|audit)$/;
 const STUDIO_PATH =
@@ -71,6 +73,13 @@ export default {
       return routeCanvas(request, env, owner, repo, id);
     }
 
+
+    const run = RUN_PATH.exec(url.pathname);
+    if (run?.groups) {
+      const { owner, repo } = run.groups as { owner: string; repo: string };
+      return routeRun(request, env, owner, repo);
+    }
+
     const match = WEBHOOK_PATH.exec(url.pathname);
     if (!match?.groups) {
       return serveAsset(request, env);
@@ -111,9 +120,39 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 /**
- * Routes to the per-repository credential broker. The agent's request carries a
- * capability, never a credential; the object in front of the secrets decides.
+ * Drains the repository's event queue through one agent run per event. This is
+ * control-plane work: it issues the capabilities the run uses, so it needs the
+ * control key. A scheduled handler can call the same function later.
  */
+async function routeRun(request: Request, env: Env, owner: string, repo: string): Promise<Response> {
+  const controlKey = env.BROKER_CONTROL_KEY;
+  if (!controlKey) {
+    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
+  }
+  if (!(await sameSecret(controlKey, request.headers.get("x-factory-control-key")))) {
+    return Response.json({ ok: false, error: "not authorised to run agents" }, { status: 401 });
+  }
+  if (request.method !== "POST") {
+    return new Response("method not allowed", { status: 405 });
+  }
+
+  const repository = `${owner}/${repo}`;
+  const body = (await request.json().catch(() => ({}))) as { limit?: unknown };
+  const limit = typeof body.limit === "number" && Number.isFinite(body.limit) ? Math.trunc(body.limit) : undefined;
+
+  const report = await drainRepository(
+    {
+      repository,
+      controlKey,
+      coordinator: env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository)),
+      broker: env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository)),
+    },
+    ...(limit === undefined ? [] : [{ limit }]),
+  );
+
+  return Response.json({ ok: true, ...report });
+}
+
 /**
  * Canvas documents live in the repository's coordinator object. They are
  * control-plane data (a layout names agents and actions), so every method needs
