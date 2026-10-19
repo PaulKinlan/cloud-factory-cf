@@ -4,7 +4,7 @@
  * serving it from the main Worker is a follow-up once the control plane exists.
  */
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
+  "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "cloud-factory-canvas",
   "compatibility_date": "2026-10-17",
   "assets": {

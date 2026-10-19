@@ -214,20 +214,22 @@ body {
   opacity: 0.85;
 }
 
+/* Edges are pointer-transparent, so their remove handle stays faintly visible
+   to be discoverable, and comes forward on hover/focus. */
 .edge-remove {
   fill: var(--panel);
   stroke: currentColor;
   stroke-width: 1.5;
   cursor: pointer;
   pointer-events: all;
-  opacity: 0;
-  transition: opacity 120ms ease;
+  opacity: 0.3;
+  transition: opacity 120ms ease, fill 120ms ease;
 }
 
-.edge:hover ~ .edge-remove,
 .edge-remove:hover,
 .edge-remove:focus-visible {
   opacity: 1;
+  fill: color-mix(in srgb, var(--danger) 30%, var(--panel));
 }
 
 .edge-remove:focus-visible {

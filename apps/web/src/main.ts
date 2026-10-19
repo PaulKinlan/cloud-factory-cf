@@ -83,16 +83,21 @@ function loadDoc(): CanvasDoc | null {
   }
 }
 
+function saveNow(): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, serialize(doc));
+  } catch {
+    announce("Could not save: browser storage is unavailable");
+  }
+}
+
 function persist(): void {
   if (saveTimer !== undefined) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, serialize(doc));
-    } catch {
-      announce("Could not save: browser storage is unavailable");
-    }
-  }, 120);
+  saveTimer = setTimeout(saveNow, 120);
 }
+
+// The debounce must not lose the last edit when the tab goes away.
+window.addEventListener("pagehide", saveNow);
 
 function announce(message: string): void {
   status.textContent = message;
@@ -207,6 +212,7 @@ function renderEdges(): void {
       `M ${start.x} ${start.y} C ${control1.x} ${control1.y}, ${control2.x} ${control2.y}, ${end.x} ${end.y}`,
     );
     path.setAttribute("class", "edge");
+    path.setAttribute("aria-hidden", "true");
     path.dataset["id"] = edge.id;
     edgeLayer.append(path);
 
@@ -319,7 +325,6 @@ function addNode(kind: NodeKind): void {
   // Nudge each new node so a burst of clicks does not stack them.
   const offset = doc.nodes.length * 24;
   const node = createNode(doc, kind, { x: center.x + offset, y: center.y + offset });
-  if (kind === "agent") node.config["label" as string] = node.label;
   selectedId = node.id;
   persist();
   render();
