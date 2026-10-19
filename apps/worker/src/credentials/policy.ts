@@ -169,6 +169,25 @@ export function credentialEnvFor(service: string): string | null {
   return SERVICES[service]?.credentialEnv ?? null;
 }
 
+/**
+ * Whether a per-repository override may name this binding as the credential for
+ * `service`. Defaults to the service's own `credentialEnv` or a sibling of it
+ * (`GITHUB_TOKEN_INSTALL_2`), which covers multiple installations while keeping
+ * every non-credential secret — `BROKER_SIGNING_KEY`, `BROKER_CONTROL_KEY`,
+ * `WEBHOOK_SECRET`, another service's token — unselectable (finding
+ * cloud-factory-cf-ccj).
+ */
+export function isApprovedCredentialBinding(service: string, binding: string): boolean {
+  const definition = SERVICES[service];
+  if (!definition) return false;
+  if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(binding)) return false;
+  if (binding.startsWith("BROKER_") || binding.startsWith("WEBHOOK_")) return false;
+  if (binding === definition.credentialEnv) return true;
+  // A sibling binding under the service's credential prefix, e.g.
+  // GITHUB_TOKEN_INSTALL_2. The suffix must be non-empty.
+  return new RegExp(`^${definition.credentialEnv}_[A-Z0-9_]+$`).test(binding);
+}
+
 export function credentialHeadersFor(service: string, credential: string): Record<string, string> {
   return SERVICES[service]?.headers(credential) ?? {};
 }

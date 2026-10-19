@@ -41,12 +41,17 @@ export type BrokerOutcome =
 
 export async function executeSignedRequest(
   request: BrokerRequest,
-  options: { fetchImpl: typeof fetch; readCredential: (envName: string) => string | undefined },
+  options: {
+    fetchImpl: typeof fetch;
+    readCredential: (envName: string) => string | undefined;
+    /** Per-repository override of which env binding holds the credential. */
+    credentialBindingFor?: (service: string) => string | undefined;
+  },
 ): Promise<BrokerOutcome> {
   const resolved = resolveRequest(request);
   if (!resolved.ok) return { ok: false, status: resolved.status, reason: resolved.reason };
 
-  const envName = credentialEnvFor(request.service);
+  const envName = options.credentialBindingFor?.(request.service) ?? credentialEnvFor(request.service);
   const credential = envName ? options.readCredential(envName) : undefined;
   if (!envName || !credential) {
     return { ok: false, status: 503, reason: "credential not configured for this service" };
