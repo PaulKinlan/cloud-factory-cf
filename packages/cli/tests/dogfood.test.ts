@@ -419,6 +419,46 @@ test('runPrReview: inspects uncommitted untracked directories and quoted paths (
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
+test('runPrReview: inspects renamed files and subdirectory cwd (fixes cloud-factory-cf-8lf)', async () => {
+  const { exec } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execAsync = promisify(exec);
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-rename-test-'));
+  await execAsync('git init -q -b main . && git config user.email "test@example.com" && git config user.name "Test"', { cwd: tmpDir });
+  await fs.mkdir(path.join(tmpDir, 'src'), { recursive: true });
+  await fs.writeFile(
+    path.join(tmpDir, 'src', 'config.ts'),
+    'export const cfg = 1;\nexport const other = 2;\nexport const more = 3;\n',
+    'utf8',
+  );
+  await execAsync('git add -A && git commit -qm "init"', { cwd: tmpDir });
+  await execAsync('git update-ref refs/remotes/origin/main HEAD', { cwd: tmpDir });
+
+  // Staged rename + token in renamed file
+  await execAsync('git mv src/config.ts src/app-config.ts', { cwd: tmpDir });
+  await fs.appendFile(
+    path.join(tmpDir, 'src', 'app-config.ts'),
+    'export const token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";\n',
+    'utf8',
+  );
+  await execAsync('git add -A', { cwd: tmpDir });
+
+  // Also test subdirectory cwd invocation
+  const subDir = path.join(tmpDir, 'src');
+  const result = await runPrReview({
+    cwd: subDir,
+    dryRun: true,
+    io: { stdout: () => {}, stderr: () => {} },
+  });
+
+  assert.ok(result.changedFiles.some((f) => f.includes('app-config.ts')));
+  assert.equal(result.verdict, 'REQUEST_CHANGES');
+  assert.ok(result.findings.some((f) => f.includes('Potential credential detected in `src/app-config.ts`')));
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
 test('runPrReview: degrades to step summary with notice without network calls (fixes cloud-factory-cf-e2c, isp, 156)', async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-readonly-token-'));
   await fs.writeFile(path.join(tmpDir, 'README.md'), '# hi\n', 'utf8');

@@ -117,47 +117,63 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
 
   // 3. Inspect changed files via git or options or directory walk fallback
   let changedFiles: string[] = options.changedFiles ? [...options.changedFiles] : [];
+  let rootDir = cwd;
 
   if (changedFiles.length === 0 && !options.changedFiles) {
     let gitSucceeded = false;
     try {
-      // Gather committed diff against base branch (or HEAD~1)
+      const { stdout: toplevelOut } = await execAsync('git rev-parse --show-toplevel', { cwd });
+      if (toplevelOut.trim()) {
+        rootDir = toplevelOut.trim();
+      }
+      await execAsync('git rev-parse --is-inside-work-tree', { cwd });
+      gitSucceeded = true;
+
+      // Gather committed diff against base branch (or HEAD~1) running from rootDir
       const diffCmd = `git -c core.quotepath=false diff --name-only origin/${baseRef}...HEAD 2>/dev/null || git -c core.quotepath=false diff --name-only HEAD~1 2>/dev/null || true`;
       // Also gather uncommitted/staged/untracked working tree modifications without collapsing untracked dirs
       const statusCmd = `git -c core.quotepath=false status --porcelain -uall 2>/dev/null || true`;
 
       const [diffRes, statusRes] = await Promise.all([
-        execAsync(diffCmd, { cwd }),
-        execAsync(statusCmd, { cwd }),
+        execAsync(diffCmd, { cwd: rootDir }),
+        execAsync(statusCmd, { cwd: rootDir }),
       ]);
 
-      // Check if git is actually functional in this directory
-      await execAsync('git rev-parse --is-inside-work-tree', { cwd });
-      gitSucceeded = true;
-
-      const unquote = (p: string) => {
+      const parseEntry = (p: string): string[] => {
         let clean = p.trim().replace(/^[MADRCU?! ]{1,2}\s+/, '');
+        if (!clean) return [];
+
+        // Handle rename records: 'src/config.ts -> src/app-config.ts' or '"old name" -> "new name"'
+        if (clean.includes(' -> ')) {
+          const parts = clean.split(' -> ').map((s) => {
+            let part = s.trim();
+            if (part.startsWith('"') && part.endsWith('"')) {
+              part = part.slice(1, -1);
+            }
+            return part;
+          });
+          return parts.filter((x) => x.length > 0);
+        }
+
         if (clean.startsWith('"') && clean.endsWith('"')) {
           clean = clean.slice(1, -1);
         }
-        return clean;
+        return [clean];
       };
 
       const diffFiles = diffRes.stdout
         .split('\n')
-        .map(unquote)
-        .filter((l) => l.length > 0);
+        .flatMap(parseEntry);
 
       const statusFiles = statusRes.stdout
         .split('\n')
-        .map(unquote)
-        .filter((l) => l.length > 0);
+        .flatMap(parseEntry);
 
       const rawCandidateFiles = [...diffFiles, ...statusFiles];
 
       const resolvedFiles: string[] = [];
       for (const entry of rawCandidateFiles) {
-        const fullPath = path.resolve(cwd, entry);
+        const fullPath = path.resolve(rootDir, entry);
         try {
           const stat = await fs.stat(fullPath);
           if (stat.isDirectory()) {
@@ -185,6 +201,7 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
       changedFiles = resolvedFiles;
     } catch {
       gitSucceeded = false;
+      rootDir = cwd;
     }
 
     // If git failed (e.g. non-git directory in test fixtures), fallback to workspace files
@@ -212,7 +229,7 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
   changedFiles = Array.from(new Set(changedFiles));
 
   // 4. Run automated checks
-  const checks = await evaluateChangedFiles(cwd, changedFiles);
+  const checks = await evaluateChangedFiles(rootDir, changedFiles);
 
   // 5. Determine review verdict and findings
   const findings: string[] = [];
@@ -303,7 +320,7 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
   });
 
   const runner = new LocalAgentRunner({
-    cwd,
+    cwd: rootDir,
     repo: { owner, name: repoName, defaultBranch: baseRef },
     sinks: [reviewSink],
   });
