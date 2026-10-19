@@ -12,9 +12,13 @@
  * both runtimes dispatch to the same sinks and credential interface.
  */
 import {
+  SINK_TYPES,
+  allSinks,
+  type SinkDeps,
+} from "./action-sinks";
+import {
   AgentRuntime,
   CoordinatorMemoryStore,
-  GitHubPRReviewSink,
   createAgentContext,
   type ActionSink,
   type AgentContext,
@@ -94,8 +98,10 @@ export interface PipelineDeps {
   controlKey: string;
   /** Seam for a model / `@cloudflare/computer` runtime. */
   executionFn?: AgentExecutionFn;
-  /** Sinks for a run; defaults to the PR-review sink over the broker. */
+  /** Sinks for a run; defaults to the sinks the layout wired. */
   sinks?: readonly ActionSink[];
+  /** Where telemetry is exported; absent means the structured log. */
+  telemetryEndpoint?: string;
 }
 
 /**
@@ -197,6 +203,55 @@ export interface Decision {
 }
 
 /**
+ * Everything the deterministic agent does for an event, given the sink types the
+ * layout wired. A wired provider sink produces its action; with no wiring (the
+ * queue route) the base decision is the whole answer.
+ */
+export function actionsFor(facts: EventFacts, wired: readonly string[] | undefined, reviewCount = 0): Decision[] {
+  const actions: Decision[] = [];
+  const base = decideAction(facts);
+  const wiredTypes = wired === undefined ? ["github-pr-review", "github-issue-comment"] : wired;
+  const wants = (type: string) => wiredTypes.includes(type) || wiredTypes.includes("*");
+
+  if (base !== null && wants(base.type === "github:pr:review" ? "github-pr-review" : "github-issue-comment")) {
+    if (facts.event === "pull_request") base.payload["body"] = reviewBody(facts, reviewCount);
+    actions.push(base);
+  }
+  const summary = `#${facts.number ?? "?"} in ${facts.repository}`;
+  const detail = facts.title === null ? summary : `${summary}: ${facts.title}`;
+  if (wants("github-issue-create")) {
+    actions.push({
+      type: "github:issue:create",
+      payload: {
+        title: `Follow up on ${detail}`,
+        body: `Raised by cloud-factory from ${facts.event}.${facts.action ?? ""}`.trim(),
+      },
+    });
+  }
+  if (wants("beads-task")) {
+    actions.push({
+      type: "beads:task:create",
+      payload: {
+        title: `Act on ${detail}`,
+        description: `cloud-factory task for ${facts.event}.${facts.action ?? "-"} (${facts.deliveryId})`,
+        priority: "P2",
+      },
+    });
+  }
+  if (wants("telemetry") || wants("cloud-telemetry")) {
+    actions.push({
+      type: "telemetry:log",
+      payload: {
+        level: "info",
+        message: `handled ${facts.event}.${facts.action ?? "-"} for ${facts.repository}`,
+        attributes: { deliveryId: facts.deliveryId, repository: facts.repository },
+      },
+    });
+  }
+  return actions;
+}
+
+/**
  * The default agent policy, kept pure so it is unit-testable:
  * - `pull_request.opened|reopened|synchronize` → a COMMENT review;
  * - `issues.opened` → an issue comment;
@@ -262,11 +317,6 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
   const agentPrompt = ctx.state["agentPrompt"];
   const instruction = typeof agentPrompt === "string" && agentPrompt.trim().length > 0 ? agentPrompt.trim() : null;
 
-  const decision = decideAction(facts);
-  if (!decision) {
-    return { status: "success", output: `no action for ${facts.event}.${facts.action ?? "-"}`, toolCallsCount: 0 };
-  }
-
   // The counter is the number of reviews that actually reached the provider; it
   // is read before the emit and written only after it succeeds, so a failed run
   // that is retried reports the same number instead of skipping one.
@@ -275,12 +325,30 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
   if (facts.event === "pull_request") {
     const previous = await ctx.memory.get(memoryScope, "review-count");
     reviewCount = typeof previous === "number" ? previous + 1 : 1;
-    decision.payload["body"] = reviewBody(facts, reviewCount);
   }
 
-  const results = await ctx.sinks.emit(decision, ctx);
+  // The layout decides what the agent does: a wired sink contributes its action,
+  // and nothing else is emitted (cloud-factory-cf-n4s).
+  const wired = Array.isArray(ctx.state["wiredSinks"]) ? (ctx.state["wiredSinks"] as string[]) : undefined;
+  const decisions = actionsFor(facts, wired, reviewCount);
+  if (decisions.length === 0) {
+    const output =
+      decideAction(facts) === null
+        ? `no action for ${facts.event}.${facts.action ?? "-"}`
+        : "nothing to do: the wiring has no sink this event can use";
+    return { status: "success", output, toolCallsCount: 0 };
+  }
+
+  const results = [];
+  for (const decision of decisions) {
+    results.push(...(await ctx.sinks.emit(decision, ctx)));
+  }
   if (results.length === 0) {
-    return { status: "failure", error: `no sink accepted ${decision.type}`, toolCallsCount: 0 };
+    return {
+      status: "failure",
+      error: `no sink accepted ${decisions.map((decision) => decision.type).join(", ")}`,
+      toolCallsCount: 0,
+    };
   }
   const failures = results.filter((result) => !result.success);
   if (failures.length > 0) {
@@ -302,71 +370,13 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
 
 // ------------------------------------------------------------------- pipeline
 
-export function defaultSinks(): ActionSink[] {
-  return [
-    new GitHubPRReviewSink({
-      executor: async (payload, ctx) => {
-        const result = await ctx.credentials.executeSignedRequest<{ status?: number }>({
-          service: "github",
-          action: "pr.review",
-          params: {
-            number: payload.prNumber,
-            event: payload.event,
-            body: payload.body,
-          },
-        });
-        return { status: result?.status ?? 200 };
-      },
-    }),
-    issueCommentSink(),
-  ];
+export function defaultSinks(deps: SinkDeps = {}): ActionSink[] {
+  const catalogue = allSinks(deps);
+  return ["github-pr-review-sink", "github-issue-comment-sink"].map((name) => catalogue[name] as ActionSink);
 }
 
-/** `issues.opened` → a comment on the issue (the policy's `issue.comment`). */
-function issueCommentSink(): ActionSink {
-  return {
-    name: "github-issue-comment-sink",
-    supportedActions: ["github:issue:comment"],
-    canHandle: (action) => action.type === "github:issue:comment",
-    async handle(action, ctx: AgentContext) {
-      const start = Date.now();
-      const payload = action.payload as { issueNumber?: unknown; body?: unknown };
-      if (typeof payload.issueNumber !== "number" || typeof payload.body !== "string" || payload.body.length === 0) {
-        return {
-          sinkName: "github-issue-comment-sink",
-          actionId: action.id,
-          actionType: action.type,
-          success: false,
-          error: "invalid payload: issueNumber and body are required",
-          durationMs: Date.now() - start,
-        };
-      }
-      try {
-        const result = await ctx.credentials.executeSignedRequest<{ status?: number }>({
-          service: "github",
-          action: "issue.comment",
-          params: { number: payload.issueNumber, body: payload.body },
-        });
-        return {
-          sinkName: "github-issue-comment-sink",
-          actionId: action.id,
-          actionType: action.type,
-          success: true,
-          result: { status: result?.status ?? 200 },
-          durationMs: Date.now() - start,
-        };
-      } catch (error) {
-        return {
-          sinkName: "github-issue-comment-sink",
-          actionId: action.id,
-          actionType: action.type,
-          success: false,
-          error: error instanceof Error ? error.message : String(error),
-          durationMs: Date.now() - start,
-        };
-      }
-    },
-  };
+function sinkDeps(deps: PipelineDeps): SinkDeps {
+  return deps.telemetryEndpoint === undefined ? {} : { telemetryEndpoint: deps.telemetryEndpoint };
 }
 
 export function buildContext(
@@ -389,6 +399,7 @@ export function buildContext(
       ...(options.agentId === undefined ? {} : { agentId: options.agentId }),
       ...(options.agentPrompt === undefined ? {} : { agentPrompt: options.agentPrompt }),
       ...(options.memoryScope === undefined ? {} : { memoryScope: options.memoryScope }),
+      ...(options.sinks === undefined ? {} : { wiredSinks: [...options.sinks] }),
     },
   });
   return ctx;
@@ -404,26 +415,22 @@ export interface RunEventOptions {
   memoryScope?: string;
 }
 
-/**
- * Maps a canvas sink type to the sink that implements it. Unknown types are
- * ignored rather than invented, so a layout cannot name a sink the worker does
- * not have.
- */
-const SINK_TYPES: Record<string, string> = {
-  "github-pr-review": "github-pr-review-sink",
-  "github-issue-comment": "github-issue-comment-sink",
-};
-
-export function sinksFor(types: readonly string[] | undefined): ActionSink[] {
-  const all = defaultSinks();
+export function sinksFor(types: readonly string[] | undefined, deps: SinkDeps = {}): ActionSink[] {
+  const catalogue = allSinks(deps);
   // No wiring at all means "the default agent" (the queue route), which uses the
   // standard sinks. Wiring that names sinks means only those: if none of the
   // names is one we implement, the agent gets no sink and the run fails loudly
   // instead of quietly posting to a provider the layout never asked for
   // (finding cloud-factory-cf-xkg).
-  if (types === undefined) return all;
-  const names = new Set(types.map((type) => SINK_TYPES[type]).filter((name): name is string => name !== undefined));
-  return all.filter((sink) => names.has(sink.name));
+  const names =
+    types === undefined
+      ? new Set(["github-pr-review-sink", "github-issue-comment-sink"])
+      : new Set(types.map((type) => SINK_TYPES[type]).filter((name): name is string => name !== undefined));
+  // Match on the catalogue key, not the sink's own `name`: an SDK sink carries
+  // its own default name.
+  return Object.entries(catalogue)
+    .filter(([key]) => names.has(key))
+    .map(([, sink]) => sink);
 }
 
 /** Runs one agent invocation for a claimed event; never throws. */
@@ -515,7 +522,20 @@ export async function runEvent(
     const facts = await loadFacts(deps.coordinator, event);
     const emitted: string[] = [];
     const runtime = new AgentRuntime();
-    for (const sink of recordingSinks(deps.sinks ?? sinksFor(options.sinks), emitted)) {
+    const sinks = deps.sinks ?? sinksFor(options.sinks, sinkDeps(deps));
+    if (sinks.length === 0 && deps.sinks === undefined && options.sinks !== undefined) {
+      // The layout named sinks and this worker serves none of them. Saying so is
+      // the point: silently doing nothing (or falling back to a provider the
+      // layout never asked for) would hide a broken layout
+      // (findings cloud-factory-cf-xkg / cloud-factory-cf-n4s).
+      return {
+        ...base,
+        prompt: promptFor(facts),
+        status: "failed",
+        error: `no sink in the wiring is one this worker can serve: ${options.sinks.join(", ")}`,
+      };
+    }
+    for (const sink of recordingSinks(sinks, emitted)) {
       runtime.registerSink(sink);
     }
     const prompt = promptFor(facts);

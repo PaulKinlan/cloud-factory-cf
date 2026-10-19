@@ -328,6 +328,10 @@ export class CredentialBroker extends DurableObject<Env> {
           return typeof value === "string" ? value : undefined;
         },
         credentialBindingFor: (service) => this.credentialBinding(service),
+        readEnv: (name) => {
+          const value = (this.env as unknown as Record<string, unknown>)[name];
+          return typeof value === "string" ? value : undefined;
+        },
       },
     );
 

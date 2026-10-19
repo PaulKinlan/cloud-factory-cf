@@ -1,4 +1,5 @@
 import {
+  SERVICES,
   credentialHeadersFor,
   credentialEnvFor,
   resolveRequest,
@@ -46,9 +47,16 @@ export async function executeSignedRequest(
     readCredential: (envName: string) => string | undefined;
     /** Per-repository override of which env binding holds the credential. */
     credentialBindingFor?: (service: string) => string | undefined;
+    /** Deployment configuration, for services whose host comes from an env binding. */
+    readEnv?: (name: string) => string | undefined;
   },
 ): Promise<BrokerOutcome> {
-  const resolved = resolveRequest(request);
+  const resolved = resolveRequest({
+    ...request,
+    ...(options.readEnv === undefined
+      ? {}
+      : { env: { ...hostEnvFor(request.service, options.readEnv) } }),
+  });
   if (!resolved.ok) return { ok: false, status: resolved.status, reason: resolved.reason };
 
   const envName = options.credentialBindingFor?.(request.service) ?? credentialEnvFor(request.service);
@@ -96,6 +104,13 @@ export async function executeSignedRequest(
       url: resolved.url,
     },
   };
+}
+
+/** The single env value a `hostEnv` service needs, read at most once. */
+function hostEnvFor(service: string, readEnv: (name: string) => string | undefined): Record<string, unknown> {
+  const definition = SERVICES[service];
+  if (definition?.hostEnv === undefined) return {};
+  return { [definition.hostEnv]: readEnv(definition.hostEnv) };
 }
 
 export function redact(

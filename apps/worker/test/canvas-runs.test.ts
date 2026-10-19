@@ -337,7 +337,7 @@ describe("canvas findings (xkg, mj7, olu)", () => {
     const repository = "acme/canvas-no-sink";
     await provision(repository, "pr.review");
     // Wiring names a sink type the worker does not implement.
-    const documentId = await storeDocument(repository, wiredLayout({ sink: "beads-task" }), "Unsupported sink");
+    const documentId = await storeDocument(repository, wiredLayout({ sink: "slack-message" }), "Unsupported sink");
     await enqueue(repository, "nosink-1", pullRequest(repository, 31));
     const { calls } = stubUpstream();
 
@@ -346,12 +346,17 @@ describe("canvas findings (xkg, mj7, olu)", () => {
       agents: Array<{ status: string; error?: string; runs: Array<{ error?: string }> }>;
     };
     expect(report.failed).toBe(1);
-    expect(report.agents[0]?.error ?? "").toContain("no sink accepted");
+    // Loud and specific: the layout named a sink type this worker cannot serve.
+    expect(report.agents[0]?.error ?? "").toContain("no sink in the wiring is one this worker can serve: slack-message");
     // Nothing reached the provider: the layout never wired a provider sink.
     expect(calls).toHaveLength(0);
     expect(sinksFor([])).toHaveLength(0);
-    expect(sinksFor(["beads-task"])).toHaveLength(0);
+    expect(sinksFor(["slack-message"])).toHaveLength(0);
     expect(sinksFor(undefined).map((sink) => sink.name)).toEqual(["github-pr-review-sink", "github-issue-comment-sink"]);
+    // Types the worker does serve are selected by name.
+    expect(sinksFor(["beads-task"]).map((sink) => sink.name)).toEqual(["beads-task-sink"]);
+    expect(sinksFor(["telemetry"]).map((sink) => sink.name)).toEqual(["cloud-telemetry-sink"]);
+    expect(sinksFor(["github-issue-create"]).map((sink) => sink.name)).toEqual(["github-issue-create-sink"]);
   });
 
   it("claims only what the run will process, so nothing sits on a lease", async () => {
