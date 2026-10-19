@@ -17,6 +17,9 @@ export default defineConfig({
           BROKER_QUOTA_PER_MINUTE: "4",
           GITHUB_TOKEN: "ghp_test_github_credential",
           GITLAB_TOKEN: "glpat_test_gitlab_credential",
+          // Alternate installation credential used by the per-repository
+          // override tests.
+          GITHUB_TOKEN_INSTALL_2: "ghp_test_github_install_2",
         },
       },
     }),

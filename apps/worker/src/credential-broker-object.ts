@@ -72,10 +72,19 @@ export class CredentialBroker extends DurableObject<Env> {
     if (request.method === "GET" && url.pathname === "/permissions") {
       const service = url.searchParams.get("service") ?? "";
       const action = url.searchParams.get("action") ?? "";
-      return Response.json({ ok: true, service, action, permitted: hasPermission(service, action) });
+      return Response.json({
+        ok: true,
+        service,
+        action,
+        permitted: this.isActionAllowed(service, action),
+        narrowedByRepository: this.narrowedActions(service) !== null,
+      });
     }
     if (url.pathname === "/provisioning") {
       return this.provisioning(request, url);
+    }
+    if (url.pathname === "/overrides") {
+      return this.overrides(request);
     }
     if (request.method === "POST" && url.pathname === "/proxy") {
       return this.proxy(request);
@@ -128,6 +137,17 @@ export class CredentialBroker extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS credential_quota_key_idx
         ON credential_quota (agent, service, action, at_ms);
     `);
+    // Per-repository overrides: which env binding holds the credential for a
+    // service, and an optional narrower action allowlist for the repository.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS repo_overrides (
+        service TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (service, kind)
+      );
+    `);
     // Agents the control plane has allowed to receive capabilities. `action` may
     // be "*" to allow every action the policy table permits for that service.
     this.sql.exec(`
@@ -177,9 +197,12 @@ export class CredentialBroker extends DurableObject<Env> {
         { status: 400 },
       );
     }
-    if (!hasPermission(service, action)) {
-      await this.record({ agent, service, action, outcome: "denied", detail: "action not permitted" });
-      return Response.json({ ok: false, error: "action not permitted" }, { status: 403 });
+    if (!this.isActionAllowed(service, action)) {
+      const detail = hasPermission(service, action)
+        ? "action not allowed in this repository"
+        : "action not permitted";
+      await this.record({ agent, service, action, outcome: "denied", detail });
+      return Response.json({ ok: false, error: detail }, { status: 403 });
     }
     if (this.requiresProvisioning && !this.isProvisioned(agent, service, action)) {
       await this.record({
@@ -256,9 +279,14 @@ export class CredentialBroker extends DurableObject<Env> {
       await this.record({ agent: claims.sub, jti: claims.jti, service, action, outcome: "denied", detail: "capability is for a different action" });
       return Response.json({ ok: false, error: "capability is for a different action" }, { status: 403 });
     }
-    if (!hasPermission(service, action)) {
-      await this.record({ agent: claims.sub, jti: claims.jti, service, action, outcome: "denied", detail: "action not permitted" });
-      return Response.json({ ok: false, error: "action not permitted" }, { status: 403 });
+    if (!this.isActionAllowed(service, action)) {
+      // A capability minted before the repository was narrowed is refused here,
+      // not only at issuance.
+      const detail = hasPermission(service, action)
+        ? "action not allowed in this repository"
+        : "action not permitted";
+      await this.record({ agent: claims.sub, jti: claims.jti, service, action, outcome: "denied", detail });
+      return Response.json({ ok: false, error: detail }, { status: 403 });
     }
 
     const quota = this.consumeQuota(claims.sub, service, action);
@@ -298,6 +326,7 @@ export class CredentialBroker extends DurableObject<Env> {
           const value = (this.env as unknown as Record<string, unknown>)[envName];
           return typeof value === "string" ? value : undefined;
         },
+        credentialBindingFor: (service) => this.credentialBinding(service),
       },
     );
 
@@ -459,6 +488,157 @@ export class CredentialBroker extends DurableObject<Env> {
     return new Response("method not allowed", { status: 405 });
   }
 
+  // ------------------------------------------------------------ overrides
+
+  private overrideValue(service: string, kind: OverrideKind): string | null {
+    const rows = this.sql
+      .exec<{ value: string }>(
+        `SELECT value FROM repo_overrides WHERE service = ? AND kind = ?`,
+        service,
+        kind,
+      )
+      .toArray();
+    return rows[0]?.value ?? null;
+  }
+
+  /** Env binding the repository uses for a service, or null for the policy default. */
+  private credentialBinding(service: string): string | undefined {
+    const value = this.overrideValue(service, "credential_binding");
+    return value !== null && isBindingName(value) ? value : undefined;
+  }
+
+  /** `null` means "not narrowed"; an array means only those actions are allowed. */
+  private narrowedActions(service: string): string[] | null {
+    const value = this.overrideValue(service, "allowed_actions");
+    if (value === null) return null;
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((entry): entry is string => typeof entry === "string");
+    } catch {
+      // A corrupt row fails closed rather than opening the service back up.
+      return [];
+    }
+  }
+
+  /** Policy allowlist, then the repository's narrower allowlist when it has one. */
+  private isActionAllowed(service: string, action: string): boolean {
+    if (!hasPermission(service, action)) return false;
+    const narrowed = this.narrowedActions(service);
+    return narrowed === null || narrowed.includes(action);
+  }
+
+  /**
+   * Control-plane surface for per-repository overrides:
+   *   POST   { service, kind: "credential_binding", value: "GITHUB_TOKEN_X" }
+   *   POST   { service, kind: "allowed_actions", value: ["repo.read", ...] }
+   *   DELETE { service, kind }
+   *   GET    (list)
+   * Overrides can only narrow the policy: an action outside it is a 400.
+   */
+  private async overrides(request: Request): Promise<Response> {
+    const provisioningKey = this.env.BROKER_CONTROL_KEY;
+    if (!provisioningKey) {
+      return Response.json({ ok: false, error: "broker control key not configured" }, { status: 503 });
+    }
+    const authorised = await sameSecret(provisioningKey, request.headers.get("x-factory-control-key"));
+    if (!authorised) {
+      await this.record({
+        agent: DEFAULT_CLIENT,
+        service: "-",
+        action: "-",
+        outcome: "denied",
+        detail: "bad control key on overrides",
+      });
+      return Response.json({ ok: false, error: "not authorised to change overrides" }, { status: 401 });
+    }
+
+    if (request.method === "GET") {
+      const rows = this.sql
+        .exec<{ service: string; kind: string; value: string; updated_at: string }>(
+          `SELECT service, kind, value, updated_at FROM repo_overrides ORDER BY service, kind`,
+        )
+        .toArray();
+      return Response.json({
+        ok: true,
+        repository: this.repository,
+        entries: rows.map((row) => ({
+          service: row.service,
+          kind: row.kind,
+          value: row.kind === "allowed_actions" ? this.narrowedActions(row.service) : row.value,
+          updatedAt: row.updated_at,
+        })),
+      });
+    }
+
+    const body = (await readJson(request)) as { service?: unknown; kind?: unknown; value?: unknown };
+    const service = typeof body.service === "string" ? body.service.trim() : "";
+    const kind = typeof body.kind === "string" ? body.kind.trim() : "";
+    if (!service || !isOverrideKind(kind)) {
+      return Response.json(
+        { ok: false, error: 'service and kind ("credential_binding" | "allowed_actions") are required' },
+        { status: 400 },
+      );
+    }
+
+    if (request.method === "POST") {
+      if (kind === "credential_binding") {
+        if (typeof body.value !== "string" || !isBindingName(body.value)) {
+          return Response.json(
+            { ok: false, error: "value must be an env binding name like GITHUB_TOKEN_INSTALL_2" },
+            { status: 400 },
+          );
+        }
+        this.writeOverride(service, kind, body.value);
+        await this.record({ agent: DEFAULT_CLIENT, service, action: kind, outcome: "override_set", detail: body.value });
+        return Response.json({ ok: true, service, kind, value: body.value });
+      }
+
+      const requested = Array.isArray(body.value) ? body.value : [];
+      const actions: string[] = [];
+      for (const entry of requested) {
+        if (typeof entry !== "string" || entry.trim().length === 0) {
+          return Response.json({ ok: false, error: "value must be an array of action names" }, { status: 400 });
+        }
+        const action = entry.trim();
+        if (!hasPermission(service, action)) {
+          // Widening (or a typo) is a 400, never a silent extra allowance.
+          return Response.json(
+            { ok: false, error: `action ${action} is not permitted by policy for ${service}` },
+            { status: 400 },
+          );
+        }
+        if (!actions.includes(action)) actions.push(action);
+      }
+      this.writeOverride(service, kind, JSON.stringify(actions));
+      await this.record({ agent: DEFAULT_CLIENT, service, action: kind, outcome: "override_set", detail: actions.join(",") });
+      return Response.json({ ok: true, service, kind, value: actions });
+    }
+
+    if (request.method === "DELETE") {
+      const before = this.overrideValue(service, kind);
+      this.sql.exec(`DELETE FROM repo_overrides WHERE service = ? AND kind = ?`, service, kind);
+      if (before === null) {
+        return Response.json({ ok: false, error: "no such override" }, { status: 404 });
+      }
+      await this.record({ agent: DEFAULT_CLIENT, service, action: kind, outcome: "override_cleared", detail: null });
+      return Response.json({ ok: true, service, kind });
+    }
+
+    return new Response("method not allowed", { status: 405 });
+  }
+
+  private writeOverride(service: string, kind: OverrideKind, value: string): void {
+    this.sql.exec(
+      `INSERT INTO repo_overrides (service, kind, value, updated_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT (service, kind) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      service,
+      kind,
+      value,
+      new Date().toISOString(),
+    );
+  }
+
   // --------------------------------------------------------------- quota
 
   /** `BROKER_QUOTA_PER_MINUTE`; only an explicit "0" disables the quota. */
@@ -569,6 +749,17 @@ export class CredentialBroker extends DurableObject<Env> {
     );
     return cursor.one().id;
   }
+}
+
+type OverrideKind = "credential_binding" | "allowed_actions";
+
+function isOverrideKind(value: string): value is OverrideKind {
+  return value === "credential_binding" || value === "allowed_actions";
+}
+
+/** Env binding names are uppercase identifiers, so an override can never name an arbitrary property. */
+function isBindingName(value: string): boolean {
+  return /^[A-Z][A-Z0-9_]{0,63}$/.test(value);
 }
 
 interface AuditRow extends Record<string, SqlStorageValue> {

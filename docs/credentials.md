@@ -77,15 +77,16 @@ control key because the metadata names agents and actions.
 
 ## Known limits (follow-ups, not hidden)
 
-- Per-agent quota is enforced (see below); nothing yet stops a *holder of the
-  control key* from issuing many capabilities, which is the next hardening bead
-  (`cloud-factory-cf-2j3`, provisioning records).
+- Per-agent quota is enforced (see below), as is a provisioning record per
+  (agent, service, action). The remaining gap is that one shared control key is
+  both the provisioning authority and the issuance authority.
 - Capability issuance requires a provisioning record per (agent, service,
   action) — see below — but the control key can still create one for any agent:
   the next step is tying provisioning to an authenticated control-plane caller
   rather than a single shared key.
-- The policy table is static; per-repo overrides would need a config surface.
-- One upstream credential per service, not per installation.
+- Per-repository credential bindings and action narrowing exist (see
+  "Per-repository overrides"); the policy *table* itself is still static, so a
+  new route is a code change.
 
 ## Quota (per agent, service and action)
 
@@ -131,3 +132,33 @@ a wildcard record still leaves policy-denied actions denied at issuance.
   for this action"` and writes an audit row (outcome `denied`) so a probing agent
   leaves a trace.
 - Provisioning writes are audited too (`provisioned` / `deprovisioned`).
+
+## Per-repository overrides
+
+The broker object is already per repository, but a deployment can serve several
+installations of the same service. Two overrides, both control-key only, cover
+that without new secrets in storage (values are *binding names*, never
+credentials):
+
+| Route | Body | Effect |
+| --- | --- | --- |
+| `POST /overrides` | `{service, kind: "credential_binding", value: "GITHUB_TOKEN_INSTALL_2"}` | attach that env binding's credential for this service |
+| `POST /overrides` | `{service, kind: "allowed_actions", value: ["repo.read"]}` | only those policy-permitted actions are issueable/usable here |
+| `DELETE /overrides` | `{service, kind}` | back to the default (404 if there was nothing) |
+| `GET /overrides` | — | list the repository's overrides |
+
+Rules:
+
+- A binding name must look like an env binding (`^[A-Z][A-Z0-9_]{0,63}$`), so an
+  override can never name an arbitrary property of the environment.
+- The allowlist can only **narrow** the policy: an action the policy does not
+  permit is a `400`, including as part of an otherwise valid list. An empty list
+  is allowed and disables the service for that repository.
+- Narrowing applies at issuance **and** at use: a capability minted before the
+  repository was narrowed is refused by `/proxy` with `403 "action not allowed in
+  this repository"` instead of being honoured until it expires.
+- `GET /permissions` reports the narrowed view (`permitted` plus
+  `narrowedByRepository`).
+- A corrupt allowlist row fails closed (every action denied) rather than falling
+  back to the wider policy.
+- Override writes are audited as `override_set` / `override_cleared`.
