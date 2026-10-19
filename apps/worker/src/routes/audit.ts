@@ -49,6 +49,9 @@ export async function handleAudit(
   const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
 
   if (domain === "runs") {
+    if (id !== undefined) {
+      return new Response("not found", { status: 404 });
+    }
     const query = url.searchParams.toString();
     const target = `https://repo-coordinator.internal/runs/audit${query ? `?${query}` : ""}`;
     const res = await coordinator.fetch(target);
