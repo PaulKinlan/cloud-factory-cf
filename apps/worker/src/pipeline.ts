@@ -48,6 +48,12 @@ function parseJsonOrString(value: string): unknown {
   }
 }
 
+/** What the decision loop uses to make each action idempotent (cloud-factory-cf-j1y). */
+export interface ActionLedger {
+  claim(actionType: string): Promise<"run" | "skip" | "unavailable">;
+  complete(actionType: string, status: "delivered" | "failed"): Promise<string | null>;
+}
+
 export interface ClaimedEvent {
   deliveryId: string;
   provider: string;
@@ -364,14 +370,35 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
     return { status: "success", output, toolCallsCount: 0 };
   }
 
+  const ledger = ctx.state["actionLedger"] as ActionLedger | undefined;
   const results = [];
   for (const decision of decisions) {
-    results.push(...(await ctx.sinks.emit(decision, ctx)));
+    // Skip an action this pair already delivered; refuse to start one when the
+    // ledger cannot answer, because repeating a provider call is worse than
+    // reporting the gap (cloud-factory-cf-j1y).
+    const permission = ledger === undefined ? "run" : await ledger.claim(decision.type);
+    if (permission === "skip") continue;
+    if (permission === "unavailable") {
+      results.push({
+        sinkName: "delivery-ledger",
+        actionId: decision.type,
+        actionType: decision.type,
+        success: false,
+        error: "delivery ledger unavailable, so the action was not started",
+        durationMs: 0,
+      });
+      continue;
+    }
+    const emitted = await ctx.sinks.emit(decision, ctx);
+    const failed = emitted.some((result) => !result.success) || emitted.length === 0;
+    await ledger?.complete(decision.type, failed ? "failed" : "delivered");
+    results.push(...emitted);
   }
   if (results.length === 0) {
+    // Every action was already delivered by an earlier attempt.
     return {
-      status: "failure",
-      error: `no sink accepted ${decisions.map((decision) => decision.type).join(", ")}`,
+      status: "success",
+      output: `all actions for ${facts.deliveryId} were already delivered`,
       toolCallsCount: 0,
     };
   }
@@ -590,6 +617,15 @@ export async function runEvent(
     }
 
     const ctx = buildContext(deps, facts, runtime, options);
+    // Per-action idempotency: one agent can emit several actions (an issue and a
+    // beads task, say), so a partial failure must retry only the actions that
+    // failed. The pair-level claim above cannot express that
+    // (cloud-factory-cf-j1y).
+    ctx.state["actionLedger"] = {
+      claim: (actionType: string) => claimDelivery(deps, event.deliveryId, `${agentKey}#${actionType}`),
+      complete: (actionType: string, status: "delivered" | "failed") =>
+        completeDelivery(deps, event.deliveryId, `${agentKey}#${actionType}`, status),
+    } satisfies ActionLedger;
     const summary = await runtime.runAgent(prompt, ctx, executionFn);
 
     const deliveryError = await completeDelivery(

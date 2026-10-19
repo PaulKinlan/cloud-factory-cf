@@ -567,10 +567,17 @@ describe("idempotent delivery across fan-out retries (cloud-factory-cf-eu3)", ()
     expect(firstReport.agents.find((agent) => agent.agentId === "n-reviewer")?.status).toBe("ran");
     expect(firstReport.agents.find((agent) => agent.agentId === "n-docs")?.status).toBe("failed");
     expect(first.calls).toHaveLength(1);
-    expect(await ledger(repository, "retry-1")).toEqual([
+    // Pair-level rows (no `#`) say what each agent did; `agent#action` rows record
+    // each action so a partial failure retries only what failed (j1y).
+    const retryRows = await ledger(repository, "retry-1");
+    expect(retryRows.filter((row) => !row.agentId.includes("#"))).toEqual([
       { agentId: "n-docs", status: "failed", attempts: 1, updatedAt: expect.any(String) },
       { agentId: "n-reviewer", status: "delivered", attempts: 1, updatedAt: expect.any(String) },
     ]);
+    expect(retryRows.find((row) => row.agentId === "n-reviewer#github:pr:review")).toMatchObject({
+      status: "delivered",
+      attempts: 1,
+    });
 
     // The failed event comes back after its backoff; the reviewer must not post
     // a second review, and the docs agent retries.
@@ -658,7 +665,8 @@ describe("one ledger for every runner (cloud-factory-cf-7wj, cloud-factory-cf-lb
     // acknowledging the docs agent's failure.
     expect(second.calls).toHaveLength(0);
     expect(drained.skipped).toBe(1);
-    expect(await ledger(repository, "drain-1")).toEqual([
+    const drainRows = await ledger(repository, "drain-1");
+    expect(drainRows.filter((row) => !row.agentId.includes("#"))).toEqual([
       { agentId: "n-docs", status: "failed", attempts: 1, updatedAt: expect.any(String) },
       { agentId: "n-reviewer", status: "delivered", attempts: 1, updatedAt: expect.any(String) },
     ]);

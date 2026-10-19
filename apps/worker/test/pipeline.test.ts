@@ -520,3 +520,82 @@ describe("delivery ledger completion failures (cloud-factory-cf-lbi)", () => {
     expect(coordinator.paths.filter((path) => path === "/deliveries/complete")).toHaveLength(1);
   });
 });
+
+describe("per-action idempotency for a multi-sink agent (cloud-factory-cf-j1y)", () => {
+  const facts = {
+    deliveryId: "evt-multi",
+    provider: "github",
+    event: "issues",
+    action: "opened",
+    repository: "acme/multi-sink",
+    actor: "octocat",
+    attempts: 1,
+    leaseId: "lease-1",
+    number: 9,
+    title: "One issue, two sinks",
+    prNumber: null,
+  } as never;
+
+  it("retries only the action that failed, so the issue is created once", async () => {
+    const emitted: string[] = [];
+    const delivered = new Set<string>();
+    let telemetryFails = true;
+
+    const ledger = {
+      claim: async (actionType: string) => (delivered.has(actionType) ? "skip" : "run"),
+      complete: async (actionType: string, status: "delivered" | "failed") => {
+        if (status === "delivered") delivered.add(actionType);
+        return null;
+      },
+    };
+    const makeContext = () =>
+      ({
+        state: { event: facts, wiredSinks: ["github-issue-create", "telemetry"], actionLedger: ledger },
+        memory: { get: async () => undefined, set: async () => {} },
+        sinks: {
+          emit: async (action: { type: string }) => {
+            if (action.type === "telemetry:log" && telemetryFails) {
+              return [{ sinkName: "cloud-telemetry-sink", actionId: "a", actionType: action.type, success: false, error: "endpoint 500", durationMs: 0 }];
+            }
+            emitted.push(action.type);
+            return [{ sinkName: "s", actionId: "a", actionType: action.type, success: true, durationMs: 0 }];
+          },
+        },
+      }) as never;
+
+    const first = await ruleBasedReview({ runId: "r1", prompt: "p", tools: [], ctx: makeContext() });
+    expect(first.status).toBe("failure");
+    expect(emitted).toEqual(["github:issue:create"]);
+
+    // The retry re-runs the agent, but only the telemetry action is attempted:
+    // the issue is not created a second time.
+    telemetryFails = false;
+    const second = await ruleBasedReview({ runId: "r2", prompt: "p", tools: [], ctx: makeContext() });
+    expect(second.status).toBe("success");
+    expect(emitted).toEqual(["github:issue:create", "telemetry:log"]);
+  });
+
+  it("does not start an action when the ledger cannot answer", async () => {
+    const emitted: string[] = [];
+    const makeContext = () =>
+      ({
+        state: {
+          event: facts,
+          wiredSinks: ["github-issue-create"],
+          actionLedger: { claim: async () => "unavailable", complete: async () => null },
+        },
+        memory: { get: async () => undefined, set: async () => {} },
+        sinks: {
+          emit: async (action: { type: string }) => {
+            emitted.push(action.type);
+            return [{ sinkName: "s", actionId: "a", actionType: action.type, success: true, durationMs: 0 }];
+          },
+        },
+      }) as never;
+
+    const result = await ruleBasedReview({ runId: "r3", prompt: "p", tools: [], ctx: makeContext() });
+    expect(result.status).toBe("failure");
+    expect(result.error ?? "").toContain("delivery ledger unavailable");
+    expect(emitted).toEqual([]);
+  });
+});

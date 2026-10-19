@@ -84,6 +84,12 @@ Response: `{ ok, documentId, name, ran, events, failed, agents: [{ agentId, name
 `events` counts the events claimed and settled, and `deduped` counts agent
 executions skipped because that pair had already delivered.
 
+Delivery is idempotent **per action**, not only per agent: an agent wired to two
+sinks (an issue and a beads task, say) records `delivered` for the action that
+succeeded, so a retry caused by the other sink failing re-runs only that one
+(`agentId#actionType` rows in the same ledger). Without that, a partially failed
+multi-sink run created the issue twice (finding `cloud-factory-cf-j1y`).
+
 The delivery ledger is `event_deliveries` in the repository's coordinator
 (`POST /deliveries/claim`, `POST /deliveries/complete`, `GET /deliveries?deliveryId=`).
 A pair is `started` while a run is in flight, then `delivered`, `failed` (which
