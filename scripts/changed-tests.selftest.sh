@@ -159,7 +159,16 @@ run_gate
 check "unowned test file is named and does not hard-FAIL" 'test "$RC" -eq 0 && out_has "not part of the gate" && out_has "ghost.test.ts" && out_has "FAKE vitest run in web"'
 reset_tree
 
-# 10. --list never runs anything, but still reports a FAIL verdict.
+# 10. --list on an affected-source delta reports the selection and stays green (it runs
+#     nothing, so "ran nothing" must not be read as "nothing covers this").
+printf '\n// touch\n' >> "$FIX/apps/web/src/m.ts"
+export FAKE_SELECT="apps/web/test/a.test.ts"
+run_gate --list
+unset FAKE_SELECT
+check "--list on an affected delta reports the selection and exits 0" 'test "$RC" -eq 0 && out_has "1 affected test file(s)" && out_has "apps/web/test/a.test.ts" && out_lacks "FAKE"'
+reset_tree
+
+# 11. --list never runs anything, but still reports a FAIL verdict.
 printf 'export const y = 2;\n' > "$FIX/packages/plain/src/probe.ts"
 run_gate --list
 check "--list reports the FAIL verdict without running suites" 'test "$RC" -ne 0 && err_has "no test script" && out_lacks "FAKE"'

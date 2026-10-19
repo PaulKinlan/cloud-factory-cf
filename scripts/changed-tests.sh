@@ -292,7 +292,8 @@ if [ "$selftest_wanted" -eq 1 ]; then
   fi
 fi
 
-if [ "$ran" -eq 0 ] && [ "$status" -eq 0 ]; then
+# --list only reports; it never runs a suite, so "ran nothing" is not a failure there.
+if [ "$ran" -eq 0 ] && [ "$status" -eq 0 ] && [ "$LIST" -eq 0 ]; then
   if [ "$sources_n" -eq 0 ]; then
     # Only test files, and none of them belong to a runnable workspace: name them and
     # run the smoke set rather than hard-failing on a mapping detail.
