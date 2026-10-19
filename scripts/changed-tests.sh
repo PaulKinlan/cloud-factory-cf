@@ -152,6 +152,22 @@ while IFS= read -r path; do
   fi
 done <<< "$changed"
 
+# Does anything in the workspace reference this source module? `vitest list --changed`
+# cannot answer it when the workspace also has a changed test file (that file is selected
+# for its own change), so look for the module path in the workspace's imports: a source
+# nothing references has no suite, and running the whole suite cannot invent one
+# (cloud-factory-cf-9ef).
+source_is_referenced() { # <workspace> <source path>
+  local ws="$1" src="$2" stem
+  stem="${src#*/src/}"
+  stem="${stem%.*}"
+  [ -n "$stem" ] || return 1
+  grep -rqE "(^|[/'\"])${stem//./\\.}(\\.(m|c)?(t|j)s)?['\"]" "$ws" \
+    --include='*.ts' --include='*.tsx' --include='*.js' --include='*.mjs' \
+    --include='*.mts' --include='*.cts' \
+    --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=coverage 2>/dev/null
+}
+
 has_test_files() { # <workspace> — is there anything for its runner to pick up?
   [ -n "$(find "$1" -type f -name '*.test.*' -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ]
 }
@@ -249,6 +265,24 @@ for ws in "${WS_ORDER[@]}"; do
       continue
     fi
     echo "changed-tests: ${ws}: whole suite (test-file delta: $(echo "$ws_tests" | tr '\n' ' '))"
+    # A test edit in this workspace does not license an unreferenced source edit in it:
+    # the whole-suite run cannot establish that the source had any test.
+    if [ -n "$ws_sources" ] && [ "$kind" = "vitest" ]; then
+      unreferenced=""
+      while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        if is_declared "$path"; then
+          echo "changed-tests: DECLARED UNVERIFIED $path (no suite yet — cloud-factory-cf-5e8, cloud-factory-cf-d8s)"
+        elif ! source_is_referenced "$ws" "$path"; then
+          unreferenced+="$path"$'\n'
+        fi
+      done <<< "$ws_sources"
+      if [ -n "$unreferenced" ]; then
+        echo "changed-tests: FAIL ${ws} — nothing in this workspace references these changed source files, so its test-file delta cannot cover them:" >&2
+        echo "$unreferenced" | grep -v '^$' | sed 's/^/  /' >&2
+        status=1
+      fi
+    fi
     if ! has_test_files "$ws"; then
       echo "changed-tests: ${ws}: no test files remain — nothing to run (this delta removes the workspace's only coverage; say why on the bead)"
       continue

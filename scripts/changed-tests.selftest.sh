@@ -58,7 +58,7 @@ SH
       printf '{ "name": "%s", "scripts": { "test": "vitest run" } }\n' "$ws" > "$ws/package.json"
       printf 'export const a = 1;\n' > "$ws/src/m.ts"
       printf 'export const entry = 1;\n' > "$ws/src/main.ts"
-      printf 'import { test } from "vitest";\ntest("x", () => {});\n' > "$ws/test/a.test.ts"
+      printf 'import { a } from "../src/m";\nimport { test } from "vitest";\ntest("x", () => { void a; });\n' > "$ws/test/a.test.ts"
     done
     # the smoke set names these two worker files explicitly
     for f in worker assets; do
@@ -129,6 +129,26 @@ export FAKE_SELECT="apps/web/test/a.test.ts" FAKE_NPM_RC=1
 run_gate
 unset FAKE_SELECT FAKE_NPM_RC
 check "test change is not skipped by another workspace's source change" 'test "$RC" -ne 0 && out_has "FAKE vitest run in web" && out_has "FAKE npm test in nodep"'
+reset_tree
+
+# 4b. THE 9ef FINDING: a test edit in the same workspace must not vouch for an
+#     unreferenced source edit. m.ts is imported by a.test.ts (covered); probe.ts is
+#     referenced by nothing, so the same delta has to stay red.
+printf '\n// touch\n' >> "$FIX/apps/web/test/a.test.ts"
+printf 'export const probe = 1;\n' > "$FIX/apps/web/src/probe.ts"
+export FAKE_SELECT="apps/web/test/a.test.ts"
+run_gate
+unset FAKE_SELECT
+check "a same-workspace test edit cannot mask an unreferenced source" 'test "$RC" -ne 0 && err_has "nothing in this workspace references" && err_has "apps/web/src/probe.ts"'
+reset_tree
+
+# 4c. ... while a source that its tests do import stays green in the same shape.
+printf '\n// touch\n' >> "$FIX/apps/web/test/a.test.ts"
+printf '\n// touch\n' >> "$FIX/apps/web/src/m.ts"
+export FAKE_SELECT="apps/web/test/a.test.ts"
+run_gate
+unset FAKE_SELECT
+check "a referenced source plus a test edit in the same workspace stays green" 'test "$RC" -eq 0 && out_lacks "references these changed source files"'
 reset_tree
 
 # 5. A source delta selects the affected vitest files.

@@ -71,6 +71,9 @@ contract:
   `No test files found` — vitest exits 1 for that, which would be a red for a mapping
   reason, not a broken change (bead `cloud-factory-cf-u8k`). The smoke set skips such a
   workspace and still runs the others; a genuinely failing test stays red;
+- a test-file delta does **not** vouch for a source change in the same workspace: if the
+  workspace's tests and sources reference that module nowhere, the source still fails by
+  name, because a whole-suite run cannot invent a test for it (bead `cloud-factory-cf-9ef`);
 - a delta with no source changes runs a fixed **smoke set** (`apps/web`'s node
   suite, `apps/worker`'s `worker`/`assets` tests) instead of nothing: a gate that
   executes no suite at all cannot be distinguished from one whose selection broke,
