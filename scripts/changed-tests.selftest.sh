@@ -171,6 +171,28 @@ run_gate
 check "a referenced source plus a test edit in a node:test workspace stays green" 'test "$RC" -eq 0 && out_has "FAKE npm test in nodep"'
 reset_tree
 
+# 4f. The same rule must not fire on things that cannot be imported: a stylesheet has no
+#     module graph, so a CSS delta beside a test edit is covered by the suite it runs
+#     (found by the 2ng fast gate with apps/web/src/styles.css).
+printf '\n/* touch */\n' >> "$FIX/apps/web/styles.css"
+printf '\n// touch\n' >> "$FIX/apps/web/test/a.test.ts"
+export FAKE_SELECT="apps/web/test/a.test.ts"
+run_gate
+unset FAKE_SELECT
+check "an asset delta is covered by the suite instead of failing the reference rule" 'test "$RC" -eq 0 && out_has "FAKE vitest run in web" && out_lacks "references these changed source files"'
+reset_tree
+
+# 4g. A barrel (src/dir/index.ts) is imported by its directory, so the reference rule
+#     has to resolve the directory form too — apps/worker/src/events/index.ts failed it.
+mkdir -p "$FIX/apps/web/src/dir"
+printf 'export const inner = 1;\n' > "$FIX/apps/web/src/dir/index.ts"
+printf 'import { inner } from "../src/dir";\n// touch\n' >> "$FIX/apps/web/test/a.test.ts"
+export FAKE_SELECT="apps/web/test/a.test.ts"
+run_gate
+unset FAKE_SELECT
+check "a barrel file counts as referenced through its directory import" 'test "$RC" -eq 0 && out_lacks "references these changed source files"'
+reset_tree
+
 # 5. A source delta selects the affected vitest files.
 printf '\n// touch\n' >> "$FIX/apps/web/src/m.ts"
 export FAKE_SELECT="apps/web/test/a.test.ts"
