@@ -1,7 +1,7 @@
 import type { Env } from "./env";
 import { sameSecret } from "./secrets";
 import { MAX_WEBHOOK_BYTES } from "./webhooks";
-import { AgentStudio, type AgentManifest } from "@factory-cloud/sdk";
+import { AgentStudio, type AgentManifest, STANDARD_SINK_TYPES } from "@factory-cloud/sdk";
 import { SERVICES } from "./credentials/policy";
 
 // Durable Object classes are resolved from the Worker's main module, so they
@@ -299,12 +299,7 @@ async function routeStudio(
       }
 
       // Validate manifest sinks against registered sinks (fail-closed)
-      const registeredSinks = new Set([
-        "github-pr-review",
-        "github-issue",
-        "beads-task",
-        "cloud-telemetry",
-      ]);
+      const registeredSinks = new Set<string>(STANDARD_SINK_TYPES);
       for (const sink of manifest.sinks ?? []) {
         if (!registeredSinks.has(sink.type)) {
           return Response.json(

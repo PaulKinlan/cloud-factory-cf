@@ -357,21 +357,78 @@ export async function runCli(
         io.stderr('[factory-cloud studio] Error: manifest field "tools" must be an array');
         return 1;
       }
+      if (Array.isArray(manifest.tools)) {
+        for (const tool of manifest.tools) {
+          if (typeof tool !== 'string' || !tool) {
+            io.stderr(
+              '[factory-cloud studio] Error: manifest field "tools" must contain string tool names',
+            );
+            return 1;
+          }
+        }
+      }
       if (manifest.capabilities !== undefined && !Array.isArray(manifest.capabilities)) {
         io.stderr(
           '[factory-cloud studio] Error: manifest field "capabilities" must be an array',
         );
         return 1;
       }
+      if (Array.isArray(manifest.capabilities)) {
+        for (const cap of manifest.capabilities) {
+          if (
+            !cap ||
+            typeof cap !== 'object' ||
+            typeof (cap as any).service !== 'string' ||
+            !(cap as any).service ||
+            typeof (cap as any).action !== 'string' ||
+            !(cap as any).action
+          ) {
+            io.stderr(
+              '[factory-cloud studio] Error: manifest field "capabilities" must contain objects with string service and action',
+            );
+            return 1;
+          }
+        }
+      }
       if (manifest.sinks !== undefined && !Array.isArray(manifest.sinks)) {
         io.stderr('[factory-cloud studio] Error: manifest field "sinks" must be an array');
         return 1;
+      }
+      if (Array.isArray(manifest.sinks)) {
+        for (const sink of manifest.sinks) {
+          if (
+            !sink ||
+            typeof sink !== 'object' ||
+            typeof (sink as any).type !== 'string' ||
+            !(sink as any).type
+          ) {
+            io.stderr(
+              '[factory-cloud studio] Error: manifest field "sinks" must contain objects with string type',
+            );
+            return 1;
+          }
+        }
       }
       if (manifest.triggers !== undefined && !Array.isArray(manifest.triggers)) {
         io.stderr(
           '[factory-cloud studio] Error: manifest field "triggers" must be an array',
         );
         return 1;
+      }
+      if (Array.isArray(manifest.triggers)) {
+        for (const trigger of manifest.triggers) {
+          if (
+            !trigger ||
+            typeof trigger !== 'object' ||
+            typeof (trigger as any).event !== 'string' ||
+            !(trigger as any).event
+          ) {
+            io.stderr(
+              '[factory-cloud studio] Error: manifest field "triggers" must contain objects with string event',
+            );
+            return 1;
+          }
+        }
       }
 
       let event: Record<string, unknown> | undefined;

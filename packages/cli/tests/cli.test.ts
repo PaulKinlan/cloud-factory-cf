@@ -238,6 +238,26 @@ test('runCli: studio author and test simulation', async () => {
     );
     assert.equal(wrongTypeCode, 1);
     assert.ok(wrongTypeErrors.some((e) => e.includes('manifest field "tools" must be an array')));
+
+    // 8. Test studio test rejects invalid array elements (fixes cloud-factory-cf-d7g)
+    const badElemPath = path.join(tmpDir, 'bad-elem.json');
+    await fs.writeFile(
+      badElemPath,
+      JSON.stringify({
+        name: 'bad-elem',
+        version: '0.1.0',
+        prompt: 'test',
+        capabilities: [null],
+      }),
+      'utf8',
+    );
+    const badElemErrors: string[] = [];
+    const badElemCode = await runCli(
+      ['studio', 'test', badElemPath, '--cwd', tmpDir],
+      { stdout: () => {}, stderr: (m) => badElemErrors.push(m) },
+    );
+    assert.equal(badElemCode, 1);
+    assert.ok(badElemErrors.some((e) => e.includes('must contain objects with string service and action')));
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }

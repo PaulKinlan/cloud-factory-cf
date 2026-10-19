@@ -143,3 +143,7 @@ export {
 export {
   AgentStudio,
 } from './studio/agent-studio.ts';
+
+export {
+  STANDARD_SINK_TYPES,
+} from './types/studio.ts';

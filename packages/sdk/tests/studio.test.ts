@@ -401,4 +401,37 @@ test('AgentStudio: author, simulate, install, load, and list', async () => {
   });
   assert.equal(wrongTypeSim.status, 'failed');
   assert.ok(wrongTypeSim.error?.includes('field "capabilities" must be an array'));
+
+  // 11. Test simulation rejection when array elements have wrong shape or null (fixes cloud-factory-cf-d7g)
+  const nullCapSim = await studio.simulate({
+    manifest: {
+      name: 'null-cap-agent',
+      version: '0.1.0',
+      description: 'test',
+      prompt: 'p',
+      capabilities: [null] as any,
+    } as any,
+  });
+  assert.equal(nullCapSim.status, 'failed');
+  assert.ok(nullCapSim.error?.includes('must contain objects with string service and action'));
+
+  const nullSinkSim = await studio.simulate({
+    manifest: {
+      name: 'null-sink-agent',
+      version: '0.1.0',
+      description: 'test',
+      prompt: 'p',
+      sinks: [null] as any,
+    } as any,
+  });
+  assert.equal(nullSinkSim.status, 'failed');
+  assert.ok(nullSinkSim.error?.includes('must contain objects with string type'));
+
+  // 12. Test STANDARD_SINK_TYPES export and completeness (fixes cloud-factory-cf-xt3)
+  const { STANDARD_SINK_TYPES } = await import('../src/index.ts');
+  assert.ok(Array.isArray(STANDARD_SINK_TYPES));
+  assert.ok(STANDARD_SINK_TYPES.includes('github-pr-review'));
+  assert.ok(STANDARD_SINK_TYPES.includes('github-issue'));
+  assert.ok(STANDARD_SINK_TYPES.includes('beads-task'));
+  assert.ok(STANDARD_SINK_TYPES.includes('cloud-telemetry'));
 });
