@@ -61,6 +61,8 @@ export interface CanvasRunReport {
   ran: number;
   /** Events claimed and settled in this run. */
   events: number;
+  /** Agent executions skipped because that (event, agent) pair had already delivered. */
+  deduped: number;
   failed: number;
 }
 
@@ -172,6 +174,7 @@ export async function runCanvasDocument(
     })),
     ran: 0,
     events: 0,
+    deduped: 0,
     failed: 0,
   };
 
@@ -192,6 +195,52 @@ export async function runCanvasDocument(
     report.events += 1;
     const outcomes: RunOutcome[] = [];
     for (const agent of agents) {
+      // Idempotency: a redelivered event (partial failure, expired lease, a
+      // provider retry) must not post the same agent's side effects twice, so the
+      // coordinator's delivery ledger decides whether this pair still has work.
+      const permission = await claimDelivery(deps, event.deliveryId, agent.id);
+      if (permission === "skip") {
+        const duplicate: RunOutcome = {
+          deliveryId: event.deliveryId,
+          status: "succeeded",
+          duplicate: true,
+          settled: true,
+          prompt: agent.prompt,
+          actionTypes: [],
+          durationMs: 0,
+        };
+        outcomes.push(duplicate);
+        report.deduped += 1;
+        const summary = report.agents.find((entry) => entry.agentId === agent.id);
+        if (summary) {
+          summary.runs.push(duplicate);
+          if (summary.status !== "failed") summary.status = "ran";
+        }
+        continue;
+      }
+      if (permission === "unavailable") {
+        // Without the ledger we cannot promise idempotency; better to say so than
+        // to risk a duplicate side effect.
+        const blocked: RunOutcome = {
+          deliveryId: event.deliveryId,
+          status: "failed",
+          settled: true,
+          prompt: agent.prompt,
+          error: "delivery ledger unavailable, so the run was not started",
+          actionTypes: [],
+          durationMs: 0,
+        };
+        outcomes.push(blocked);
+        report.failed += 1;
+        const summary = report.agents.find((entry) => entry.agentId === agent.id);
+        if (summary) {
+          summary.runs.push(blocked);
+          summary.status = "failed";
+          summary.error = blocked.error;
+        }
+        continue;
+      }
+
       const outcome = await runEvent(deps, event, {
         agentPrompt: agent.prompt,
         agentId: agent.id,
@@ -200,6 +249,7 @@ export async function runCanvasDocument(
       });
       outcomes.push(outcome);
       report.ran += 1;
+      await completeDelivery(deps, event.deliveryId, agent.id, outcome.status === "failed" ? "failed" : "delivered");
 
       const summary = report.agents.find((entry) => entry.agentId === agent.id);
       if (summary) {
@@ -247,6 +297,35 @@ export async function runCanvasDocument(
   });
 
   return { ok: true, report };
+}
+
+/** `run` when this (event, agent) pair still has work, `skip` when it already delivered. */
+async function claimDelivery(
+  deps: PipelineDeps,
+  deliveryId: string,
+  agentId: string,
+): Promise<"run" | "skip" | "unavailable"> {
+  const response = await deps.coordinator.fetch("https://repo-coordinator.internal/deliveries/claim", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ deliveryId, agentId }),
+  });
+  if (!response.ok) return "unavailable";
+  const payload = (await response.json().catch(() => ({}))) as { run?: unknown };
+  return payload.run === false ? "skip" : "run";
+}
+
+async function completeDelivery(
+  deps: PipelineDeps,
+  deliveryId: string,
+  agentId: string,
+  status: "delivered" | "failed",
+): Promise<void> {
+  await deps.coordinator.fetch("https://repo-coordinator.internal/deliveries/complete", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ deliveryId, agentId, status }),
+  });
 }
 
 async function claim(deps: PipelineDeps, limit: number): Promise<ClaimedEvent[]> {

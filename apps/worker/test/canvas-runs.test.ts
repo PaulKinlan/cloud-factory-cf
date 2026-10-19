@@ -485,3 +485,103 @@ describe("fan-out: one event, several agents (cloud-factory-cf-sdq)", () => {
     expect(counts["pending"]).toBe(1);
   });
 });
+
+describe("idempotent delivery across fan-out retries (cloud-factory-cf-eu3)", () => {
+  function mixedLayout(): Record<string, unknown> {
+    // Reviewer delivers; the "docs" agent is wired to a sink type this worker
+    // does not implement, so it always fails. That makes the event fail after the
+    // reviewer already delivered — the exact partial-failure case.
+    return layout(
+      [
+        { id: "n-source", kind: "source", label: "Pull requests", config: { provider: "github", event: "pull_request" } },
+        { id: "n-reviewer", kind: "agent", label: "Reviewer", config: { prompt: "Review.", model: "m" } },
+        { id: "n-docs", kind: "agent", label: "Docs", config: { prompt: "Check docs.", model: "m" } },
+        { id: "n-review-sink", kind: "sink", label: "Review", config: { type: "github-pr-review" } },
+        { id: "n-unknown-sink", kind: "sink", label: "Beads", config: { type: "beads-task" } },
+      ],
+      [
+        ["n-source", "n-reviewer"],
+        ["n-source", "n-docs"],
+        ["n-reviewer", "n-review-sink"],
+        ["n-docs", "n-unknown-sink"],
+      ],
+    );
+  }
+
+  async function ledger(repository: string, deliveryId: string): Promise<Array<{ agentId: string; status: string; attempts: number }>> {
+    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+    const response = await coordinator.fetch(
+      `https://repo-coordinator.internal/deliveries?deliveryId=${encodeURIComponent(deliveryId)}`,
+    );
+    const payload = (await response.json()) as { deliveries?: Array<{ agentId: string; status: string; attempts: number }> };
+    return payload.deliveries ?? [];
+  }
+
+  it("claim/complete decides whether a pair still has work", async () => {
+    const repository = "acme/idempotency-ledger";
+    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+    const post = async (path: string, body: unknown) =>
+      (await (
+        await coordinator.fetch(`https://repo-coordinator.internal${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        })
+      ).json()) as { ok: boolean; run?: boolean; status?: string; error?: string };
+
+    expect(await post("/deliveries/claim", { deliveryId: "ev-1", agentId: "a" })).toMatchObject({ ok: true, run: true });
+    expect(await post("/deliveries/complete", { deliveryId: "ev-1", agentId: "a", status: "delivered" })).toMatchObject({ ok: true });
+    // The second claim for the same pair does not run again.
+    expect(await post("/deliveries/claim", { deliveryId: "ev-1", agentId: "a" })).toMatchObject({ ok: true, run: false });
+    // A failed pair is retried.
+    expect(await post("/deliveries/complete", { deliveryId: "ev-1", agentId: "a", status: "failed" })).toMatchObject({ ok: true });
+    expect(await post("/deliveries/claim", { deliveryId: "ev-1", agentId: "a" })).toMatchObject({ ok: true, run: true });
+    // Validation and the listing.
+    expect((await post("/deliveries/claim", {})).ok).toBe(false);
+    expect((await post("/deliveries/complete", { deliveryId: "ev-1", agentId: "a", status: "nonsense" })).ok).toBe(false);
+    // Two runs claimed the pair (the skipped claim does not count); it is
+    // currently started again, so a crash mid-flight is retried.
+    expect(await ledger(repository, "ev-1")).toEqual([{ agentId: "a", status: "started", attempts: 2, updatedAt: expect.any(String) }]);
+  });
+
+  it("does not post a review twice when a partially failed event is retried", async () => {
+    const repository = "acme/idempotency-retry";
+    await provision(repository, "pr.review");
+    const documentId = await storeDocument(repository, mixedLayout(), "Mixed");
+    await enqueue(repository, "retry-1", pullRequest(repository, 51));
+    const first = stubUpstream();
+
+    const firstReport = (await (await runDocument(repository, documentId)).json()) as {
+      ran: number;
+      failed: number;
+      agents: Array<{ agentId: string; status: string; error?: string }>;
+    };
+    expect(firstReport.ran).toBe(2);
+    expect(firstReport.failed).toBe(1);
+    expect(firstReport.agents.find((agent) => agent.agentId === "n-reviewer")?.status).toBe("ran");
+    expect(firstReport.agents.find((agent) => agent.agentId === "n-docs")?.status).toBe("failed");
+    expect(first.calls).toHaveLength(1);
+    expect(await ledger(repository, "retry-1")).toEqual([
+      { agentId: "n-docs", status: "failed", attempts: 1, updatedAt: expect.any(String) },
+      { agentId: "n-reviewer", status: "delivered", attempts: 1, updatedAt: expect.any(String) },
+    ]);
+
+    // The failed event comes back after its backoff; the reviewer must not post
+    // a second review, and the docs agent retries.
+    vi.unstubAllGlobals();
+    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    const second = stubUpstream();
+    const secondReport = (await (await runDocument(repository, documentId)).json()) as {
+      ran: number;
+      deduped: number;
+      failed: number;
+      agents: Array<{ agentId: string; status: string; runs: Array<{ duplicate?: boolean }> }>;
+    };
+    expect(secondReport.deduped).toBe(1);
+    expect(secondReport.ran).toBe(1);
+    expect(secondReport.failed).toBe(1);
+    expect(secondReport.agents.find((agent) => agent.agentId === "n-reviewer")?.runs[0]?.duplicate).toBe(true);
+    // No second provider call: the review was delivered once.
+    expect(second.calls).toHaveLength(0);
+  });
+});

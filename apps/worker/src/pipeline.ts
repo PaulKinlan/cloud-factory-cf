@@ -52,6 +52,8 @@ export interface EventFacts extends ClaimedEvent {
 export interface RunOutcome {
   deliveryId: string;
   status: "succeeded" | "failed" | "skipped";
+  /** True when the (event, agent) pair had already delivered, so this is not a second side effect. */
+  duplicate?: boolean;
   /** `false` when the queue rejected the ack/fail, so the event will be redelivered. */
   settled: boolean;
   settlementError?: string;
