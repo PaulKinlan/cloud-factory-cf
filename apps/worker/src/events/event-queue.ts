@@ -1,4 +1,5 @@
 import type { Provider } from "../webhooks";
+import { asRecord, clampInt, safeParseJson } from "./helpers";
 
 /** An event that keeps failing is dead-lettered instead of retried forever. */
 export const MAX_ATTEMPTS = 5;
@@ -505,22 +506,4 @@ function claimsFrom(payload: unknown): ClaimToken[] {
   return list
     .filter((id): id is string => typeof id === "string" && id.length > 0)
     .map((id) => ({ deliveryId: id, leaseId: defaultLease }));
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
-}
-
-function clampInt(value: unknown, min: number, max: number, fallback: number): number {
-  const parsed = typeof value === "string" ? Number.parseInt(value, 10) : value;
-  if (typeof parsed !== "number" || !Number.isFinite(parsed)) return fallback;
-  return Math.min(Math.max(Math.trunc(parsed), min), max);
-}
-
-function safeParseJson(value: string): unknown {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
 }

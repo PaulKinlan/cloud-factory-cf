@@ -1,20 +1,4 @@
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
-}
-
-function clampInt(value: unknown, min: number, max: number, fallback: number): number {
-  const parsed = typeof value === "string" ? Number.parseInt(value, 10) : value;
-  if (typeof parsed !== "number" || !Number.isFinite(parsed)) return fallback;
-  return Math.min(Math.max(Math.trunc(parsed), min), max);
-}
-
-function safeParseJson(value: string): unknown {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
+import { asRecord, clampInt, safeParseJson } from "./helpers";
 
 export function migrateRunAuditTable(sql: SqlStorage): void {
   sql.exec(`

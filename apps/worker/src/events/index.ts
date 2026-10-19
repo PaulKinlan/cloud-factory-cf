@@ -15,3 +15,9 @@ export {
   RunAuditStore,
   migrateRunAuditTable,
 } from "./run-audit";
+
+export {
+  asRecord,
+  clampInt,
+  safeParseJson,
+} from "./helpers";
