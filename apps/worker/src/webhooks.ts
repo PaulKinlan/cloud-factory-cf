@@ -1,21 +1,37 @@
 /**
- * Provider-specific webhook verification and normalisation.
+ * Webhook verification and normalisation for every supported platform (ADR 003).
  *
- * Two providers are in scope for the scaffold:
- *   - GitHub: HMAC-SHA256 over the raw body in `X-Hub-Signature-256`
- *     (`sha256=<hex>`), delivery id in `X-Gitlab-*`/`X-GitHub-Delivery`.
- *   - GitLab: a shared secret token in `X-Gitlab-Token` (no body MAC),
- *     delivery id in `X-Gitlab-Event-UUID`.
+ * Verification stays here, beside the route that receives the request, because it
+ * needs the deployment's secrets and the Workers crypto surface. Normalisation is
+ * NOT reimplemented: it comes from the platform adapters in `@factory-cloud/sdk`,
+ * so this file and the rest of the factory cannot drift apart.
  *
- * Everything here is pure: no storage, no Durable Object state, so the
- * verification rules are unit-testable and reused by the coordinator.
+ * The schemes:
+ *   - GitHub: HMAC-SHA256 over the raw body in `X-Hub-Signature-256` (`sha256=<hex>`),
+ *     delivery id in `X-GitHub-Delivery`.
+ *   - GitLab: a shared secret token in `X-Gitlab-Token` (no body MAC), delivery id in
+ *     `X-Gitlab-Event-UUID`.
+ *   - Gitea/Forgejo: the hook secret as HMAC-SHA256 in `X-Gitea-Signature` (bare hex,
+ *     `sha256=` also accepted), or verbatim in `X-Gitea-Token`; delivery id in
+ *     `X-Gitea-Delivery` / `X-Forgejo-Delivery`.
+ *
+ * Everything here is pure: no storage, no Durable Object state, so the verification
+ * rules are unit-testable and reused by the coordinator.
  */
 
+import {
+  adapterFor,
+  devPlatformAdapters,
+  type DevPlatform,
+  type HeaderReader,
+  type SdlcAction,
+  type SdlcKind,
+} from "@factory-cloud/sdk";
 import { asRecord } from "./events/helpers";
 
-export type Provider = "github" | "gitlab";
+export type Provider = DevPlatform;
 
-export const SUPPORTED_PROVIDERS: readonly Provider[] = ["github", "gitlab"];
+export const SUPPORTED_PROVIDERS: readonly Provider[] = Object.keys(devPlatformAdapters) as Provider[];
 
 /** Largest webhook body the coordinator will accept (GitHub caps payloads at 25 MB). */
 export const MAX_WEBHOOK_BYTES = 1024 * 1024;
@@ -29,6 +45,10 @@ export interface NormalisedEvent {
   repository: string;
   /** Login of whoever triggered the event, when the payload names one. */
   actor: string | null;
+  /** Canonical SDLC kind, from the platform adapter (ADR 003). */
+  kind: SdlcKind;
+  /** The provider action folded onto the portable vocabulary. */
+  canonicalAction: SdlcAction;
 }
 
 export function isProvider(value: string): value is Provider {
@@ -52,10 +72,30 @@ export async function verifyGithubSignature(
   const scheme = signatureHeader.slice(0, separator).trim().toLowerCase();
   const hex = signatureHeader.slice(separator + 1).trim();
   if (scheme !== "sha256" || hex.length !== 64) return false;
+  return verifyHmacHex(secret, body, hex);
+}
 
+/**
+ * Gitea and Forgejo sign the raw body with the hook secret: bare hex in
+ * `X-Gitea-Signature`, and some versions spell it `sha256=<hex>` like GitHub.
+ * The header is optional whitespace-tolerant so a proxy that pads it still works.
+ */
+export async function verifyGiteaSignature(
+  secret: string,
+  body: string,
+  signatureHeader: string | null,
+): Promise<boolean> {
+  if (!signatureHeader) return false;
+  const trimmed = signatureHeader.trim();
+  const hex = trimmed.includes("=") ? trimmed.slice(trimmed.indexOf("=") + 1).trim() : trimmed;
+  if (hex.length !== 64) return false;
+  return verifyHmacHex(secret, body, hex);
+}
+
+/** Shared HMAC-SHA256 verification over the exact bytes received. */
+async function verifyHmacHex(secret: string, body: string, hex: string): Promise<boolean> {
   const signature = hexToBytes(hex);
   if (!signature) return false;
-
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -63,7 +103,6 @@ export async function verifyGithubSignature(
     false,
     ["verify"],
   );
-
   return crypto.subtle.verify("HMAC", key, signature, new TextEncoder().encode(body));
 }
 
@@ -95,59 +134,45 @@ export async function verifyGitlabToken(
   return difference === 0;
 }
 
-/** Extracts the provider delivery id used for idempotency. */
+/** Extracts the provider delivery id used for idempotency (adapter-owned). */
 export function deliveryIdFor(provider: Provider, headers: Headers): string | null {
-  const header =
-    provider === "github" ? headers.get("x-github-delivery") : headers.get("x-gitlab-event-uuid");
-  const trimmed = header?.trim();
+  const trimmed = adapterFor(provider)?.deliveryId(headers)?.trim();
   return trimmed ? trimmed : null;
 }
 
 /** Extracts the provider event name (`pull_request`, `Merge Request Hook`, ...). */
 export function eventNameFor(provider: Provider, headers: Headers): string {
-  const header =
-    provider === "github" ? headers.get("x-github-event") : headers.get("x-gitlab-event");
-  const trimmed = header?.trim();
+  const trimmed = adapterFor(provider)?.rawEvent(headers).trim();
   return trimmed ? trimmed : "unknown";
 }
 
 /**
- * Pulls the fields the coordinator indexes out of a provider payload. Unknown
- * shapes degrade to `unknown`/null rather than throwing: enqueueing a webhook
- * must not depend on how well we parse its body.
+ * Pulls the fields the coordinator indexes out of a provider payload. The work is
+ * the platform adapter's (ADR 003), so GitHub, GitLab and Gitea deliveries produce
+ * the same shape and one normaliser cannot drift from the others. Unknown shapes
+ * degrade to `unknown`/null rather than throwing: enqueueing a webhook must not
+ * depend on how well we parse its body.
  */
-export function normaliseEvent(provider: Provider, payload: unknown): NormalisedEvent {
-  const root = asRecord(payload);
-  if (provider === "github") {
-    const repository = asRecord(root?.["repository"])?.["full_name"];
-    const action = root?.["action"];
+export function normaliseEvent(provider: Provider, payload: unknown, headers: HeaderReader): NormalisedEvent {
+  const event = adapterFor(provider)?.normalise(payload, headers) ?? null;
+  if (event === null) {
     return {
-      payloadEvent: typeof root?.["hook"] === "string" ? (root["hook"] as string) : null,
-      action: typeof action === "string" ? action : null,
-      repository: typeof repository === "string" ? repository : "unknown",
-      actor: loginOf(root),
+      payloadEvent: null,
+      action: null,
+      repository: "unknown",
+      actor: null,
+      kind: "unknown",
+      canonicalAction: null,
     };
   }
-
-  const project = asRecord(root?.["project"])?.["path_with_namespace"];
-  const attributes = asRecord(root?.["object_attributes"]);
-  const kind = root?.["object_kind"];
-  const action = attributes?.["action"];
-  const user = asRecord(root?.["user"])?.["username"];
-
   return {
-    payloadEvent: typeof kind === "string" ? kind : null,
-    action: typeof action === "string" ? action : null,
-    repository: typeof project === "string" ? project : "unknown",
-    actor: typeof user === "string" ? user : null,
+    payloadEvent: event.rawEvent === "unknown" ? null : event.rawEvent,
+    action: event.action,
+    repository: event.repository,
+    actor: event.actor,
+    kind: event.kind,
+    canonicalAction: event.canonicalAction,
   };
-}
-
-function loginOf(root: Record<string, unknown> | null): string | null {
-  const sender = asRecord(root?.["sender"])?.["login"];
-  if (typeof sender === "string") return sender;
-  const user = asRecord(root?.["user"])?.["login"];
-  return typeof user === "string" ? user : null;
 }
 
 function hexToBytes(hex: string): Uint8Array<ArrayBuffer> | null {

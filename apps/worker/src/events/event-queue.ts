@@ -1,3 +1,4 @@
+import type { SdlcAction, SdlcKind } from "@factory-cloud/sdk";
 import type { Provider } from "../webhooks";
 import { asRecord, clampInt, safeParseJson } from "./helpers";
 
@@ -35,10 +36,19 @@ export function migrateEventQueueTable(sql: SqlStorage): void {
   sql.exec(`
     CREATE INDEX IF NOT EXISTS events_queue_idx ON events (status, available_at, received_at);
   `);
-  try {
-    sql.exec("ALTER TABLE events ADD COLUMN lease_id TEXT;");
-  } catch {
-    // Column already exists
+  for (const column of [
+    "ALTER TABLE events ADD COLUMN lease_id TEXT;",
+    // ADR 003 / cloud-factory-cf-06p: the canonical event is carried in the row.
+    // It cannot be derived later from the stored payload, because the adapters read
+    // the delivery id and event name from the request headers, which are not stored.
+    "ALTER TABLE events ADD COLUMN kind TEXT;",
+    "ALTER TABLE events ADD COLUMN canonical_action TEXT;",
+  ]) {
+    try {
+      sql.exec(column);
+    } catch {
+      // Column already exists on an older object.
+    }
   }
 }
 
@@ -60,6 +70,8 @@ export class EventQueue {
     provider: Provider,
     event: string,
     action: string | null,
+    kind: SdlcKind | null,
+    canonicalAction: SdlcAction,
     repository: string,
     actor: string | null,
     body: string,
@@ -77,13 +89,15 @@ export class EventQueue {
 
     this.sql.exec(
       `INSERT INTO events (
-         delivery_id, provider, event, action, repository, actor,
+         delivery_id, provider, event, action, kind, canonical_action, repository, actor,
          received_at, payload, status, attempts, available_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)`,
       deliveryId,
       provider,
       event,
       action,
+      kind,
+      canonicalAction,
       repository,
       actor,
       now,
@@ -464,13 +478,15 @@ export class EventQueue {
 }
 
 const EVENT_COLUMNS =
-  "delivery_id, provider, event, action, repository, actor, received_at, status, attempts, available_at, last_error, lease_id";
+  "delivery_id, provider, event, action, kind, canonical_action, repository, actor, received_at, status, attempts, available_at, last_error, lease_id";
 
 interface EventRow extends Record<string, SqlStorageValue> {
   delivery_id: string;
   provider: string;
   event: string;
   action: string | null;
+  kind: string | null;
+  canonical_action: string | null;
   repository: string;
   actor: string | null;
   received_at: string;
@@ -486,6 +502,10 @@ export interface WireEvent {
   provider: string;
   event: string;
   action: string | null;
+  /** Canonical SDLC kind from the platform adapter (ADR 003); null on pre-6to rows. */
+  kind: string | null;
+  /** The provider action folded onto opened/updated/merged/closed, or null. */
+  canonicalAction: string | null;
   repository: string;
   actor: string | null;
   receivedAt: string;
@@ -502,6 +522,8 @@ export function toWireEvent(row: EventRow): WireEvent {
     provider: row.provider,
     event: row.event,
     action: row.action,
+    kind: row.kind,
+    canonicalAction: row.canonical_action,
     repository: row.repository,
     actor: row.actor,
     receivedAt: row.received_at,

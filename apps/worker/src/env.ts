@@ -17,6 +17,11 @@ export interface FactoryEnv {
   WEBHOOK_SECRET?: string;
   /** Shared token GitLab sends verbatim in `X-Gitlab-Token`. Never committed. */
   GITLAB_WEBHOOK_TOKEN?: string;
+  /**
+   * Gitea/Forgejo hook secret: HMAC-SHA256 of the body (`X-Gitea-Signature`) or the
+   * secret verbatim (`X-Gitea-Token`). Never committed.
+   */
+  GITEA_WEBHOOK_SECRET?: string;
   /** Per-repository credential broker (holds the real credentials, never agents). */
   CREDENTIAL_BROKER: DurableObjectNamespace<CredentialBroker>;
   /** HMAC key for signing capability tokens. Never committed. */

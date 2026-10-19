@@ -23,6 +23,7 @@ import {
   isProvider,
   MAX_WEBHOOK_BYTES,
   normaliseEvent,
+  verifyGiteaSignature,
   verifyGithubSignature,
   verifyGitlabToken,
   type NormalisedEvent,
@@ -290,7 +291,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       return Response.json({ ok: false, error: "invalid json body" }, { status: 400 });
     }
 
-    const normalised: NormalisedEvent = normaliseEvent(provider, payload);
+    const normalised: NormalisedEvent = normaliseEvent(provider, payload, request.headers);
     const routedRepository = request.headers.get("x-factory-repository");
     const repository = normalised.repository !== "unknown"
       ? normalised.repository
@@ -337,6 +338,8 @@ export class RepoCoordinator extends DurableObject<Env> {
       provider,
       eventName,
       normalised.action,
+      normalised.kind,
+      normalised.canonicalAction,
       repository,
       normalised.actor,
       body,
@@ -360,6 +363,23 @@ export class RepoCoordinator extends DurableObject<Env> {
       if (!secret) return { ok: false, status: 503, error: "webhook secret not configured" };
       const valid = await verifyGithubSignature(secret, body, headers.get("x-hub-signature-256"));
       return valid ? { ok: true } : { ok: false, status: 401, error: "invalid signature" };
+    }
+
+    if (provider === "gitea") {
+      // Gitea and Forgejo derive both headers from the hook's "Secret" field, so one
+      // configured secret covers either style: the body MAC when the instance signs,
+      // the verbatim token when it does not.
+      const secret = this.env.GITEA_WEBHOOK_SECRET;
+      if (!secret) return { ok: false, status: 503, error: "gitea webhook secret not configured" };
+      const signature =
+        headers.get("x-gitea-signature") ?? headers.get("x-forgejo-signature");
+      if (signature !== null) {
+        const valid = await verifyGiteaSignature(secret, body, signature);
+        return valid ? { ok: true } : { ok: false, status: 401, error: "invalid signature" };
+      }
+      const token = headers.get("x-gitea-token") ?? headers.get("x-forgejo-token");
+      const valid = await verifyGitlabToken(secret, token);
+      return valid ? { ok: true } : { ok: false, status: 401, error: "invalid token" };
     }
 
     const token = this.env.GITLAB_WEBHOOK_TOKEN;

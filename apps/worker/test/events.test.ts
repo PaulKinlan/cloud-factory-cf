@@ -32,6 +32,24 @@ describe("events domain controllers", () => {
     expect(safeDecode("%E0%A4%A")).toBeNull();
   });
 
+  it("reads a pre-6to row that predates the canonical columns", async () => {
+    // The migration adds kind/canonical_action; a row written before them must still
+    // be listed rather than disappearing or throwing.
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/legacy-events"));
+    const listed = await runInDurableObject(stub, (_instance, state) => {
+      migrateEventQueueTable(state.storage.sql);
+      state.storage.sql.exec(
+        `INSERT INTO events (delivery_id, provider, event, action, repository, actor, received_at, payload, status, attempts, available_at)
+         VALUES ('legacy-1', 'github', 'push', NULL, 'acme/legacy-events', 'octocat', '2026-10-19T00:00:00.000Z', '{}', 'pending', 0, '2026-10-19T00:00:00.000Z')`,
+      );
+      const queue = new EventQueue(state.storage.sql);
+      return state.storage.sql.exec("SELECT kind, canonical_action FROM events WHERE delivery_id = 'legacy-1'").toArray();
+    });
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.["kind"]).toBeNull();
+    expect(listed[0]?.["canonical_action"]).toBeNull();
+  });
+
   it("EventQueue.enqueue returns true for new delivery_id and false for duplicate", async () => {
     const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/test-events-unit"));
     await runInDurableObject(stub, (_instance, state) => {
@@ -45,6 +63,8 @@ describe("events domain controllers", () => {
         "github",
         "push",
         null,
+        "push",
+        null,
         "acme/test-events-unit",
         "octocat",
         '{"ref":"refs/heads/main"}',
@@ -55,6 +75,8 @@ describe("events domain controllers", () => {
       const duplicate = queue.enqueue(
         deliveryId,
         "github",
+        "push",
+        null,
         "push",
         null,
         "acme/test-events-unit",
