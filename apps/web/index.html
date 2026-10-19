@@ -23,6 +23,7 @@
         <button type="button" id="connect-toggle" class="button button--ghost" aria-pressed="false">Connect</button>
         <button type="button" id="export" class="button button--ghost">Export config</button>
         <button type="button" id="share" class="button button--ghost">Share…</button>
+        <button type="button" id="observability-toggle" class="button button--ghost" aria-expanded="false" aria-controls="observability-panel">Observability</button>
         <button type="button" id="clear" class="button button--danger">Clear</button>
       </div>
 
@@ -76,6 +77,84 @@
           </details>
         </form>
       </aside>
+
+      <section id="observability-panel" class="observability-panel" role="region" aria-label="Observability" hidden>
+        <div class="obs-header">
+          <h2>Observability</h2>
+          <button type="button" class="obs-close-btn button button--icon" aria-label="Close observability panel">✕</button>
+        </div>
+
+        <!-- Section 1: Execution trace -->
+        <section class="obs-section" aria-labelledby="obs-trace-heading">
+          <h3 id="obs-trace-heading">Execution trace</h3>
+
+          <form class="obs-form" id="obs-form">
+            <div class="obs-inputs">
+              <label class="field obs-field">
+                <span>Owner</span>
+                <input type="text" class="field__control obs-owner" placeholder="owner" autocomplete="off" />
+              </label>
+              <label class="field obs-field">
+                <span>Repository</span>
+                <input type="text" class="field__control obs-repo" placeholder="repo" autocomplete="off" />
+              </label>
+              <label class="field obs-field obs-field--full">
+                <span>Control key</span>
+                <input type="password" class="field__control obs-key" placeholder="control key (not stored)" autocomplete="off" />
+              </label>
+              <label class="field obs-field obs-field--limit">
+                <span>Limit</span>
+                <input type="number" class="field__control obs-limit" value="50" min="1" max="500" />
+              </label>
+            </div>
+            <div class="obs-form-actions">
+              <button type="submit" class="button obs-btn-connect">Connect</button>
+              <button type="button" class="button button--ghost obs-btn-disconnect" disabled>Disconnect</button>
+            </div>
+          </form>
+
+          <div class="obs-status-bar">
+            <span class="obs-status-label">Status:</span>
+            <span class="obs-status obs-status--muted" role="status" aria-live="polite">Disconnected</span>
+          </div>
+
+          <span class="sr-only obs-announcer" aria-live="polite"></span>
+
+          <div class="obs-stream-container">
+            <ol class="obs-stream" aria-label="Execution steps" aria-live="polite" aria-atomic="false">
+              <li class="obs-empty-notice muted">No steps recorded yet. Click Connect to stream execution trace.</li>
+            </ol>
+          </div>
+        </section>
+
+        <!-- Section 2: Cost & usage HUD -->
+        <section class="obs-section" aria-labelledby="obs-hud-heading">
+          <h3 id="obs-hud-heading">Cost &amp; usage HUD</h3>
+          <div class="obs-hud-grid"></div>
+          <p class="obs-hud-note-explicit muted">Tokens are estimated from character counts (~4 chars/token). No invented per-token prices.</p>
+          <div class="obs-by-action-container">
+            <h4>Actions breakdown</h4>
+            <table class="obs-table">
+              <thead>
+                <tr>
+                  <th scope="col">Action</th>
+                  <th scope="col">Count</th>
+                </tr>
+              </thead>
+              <tbody class="obs-by-action-body">
+                <tr><td colspan="2" class="muted">No actions recorded</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- Section 3: Artifact inspector -->
+        <section class="obs-section" aria-labelledby="obs-inspector-heading">
+          <h3 id="obs-inspector-heading">Artifact inspector</h3>
+          <div class="obs-inspector-step-info muted">Select a step in the trace above to inspect its artifact.</div>
+          <pre class="obs-artifact" tabindex="0">no artifact for this step</pre>
+        </section>
+      </section>
     </main>
 
     <dialog id="share-dialog" class="export-dialog share-dialog" aria-label="Store this canvas with a repository">
