@@ -51,6 +51,9 @@ export interface EventFacts extends ClaimedEvent {
 export interface RunOutcome {
   deliveryId: string;
   status: "succeeded" | "failed" | "skipped";
+  /** `false` when the queue rejected the ack/fail, so the event will be redelivered. */
+  settled: boolean;
+  settlementError?: string;
   prompt: string;
   output?: string;
   error?: string;
@@ -64,6 +67,8 @@ export interface RunReport {
   succeeded: number;
   failed: number;
   skipped: number;
+  /** Events the queue refused to settle (lease conflict/expired) — they will be retried. */
+  unsettled: number;
   runs: RunOutcome[];
 }
 
@@ -249,14 +254,14 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
     return { status: "success", output: `no action for ${facts.event}.${facts.action ?? "-"}`, toolCallsCount: 0 };
   }
 
+  // The counter is the number of reviews that actually reached the provider; it
+  // is read before the emit and written only after it succeeds, so a failed run
+  // that is retried reports the same number instead of skipping one.
   let reviewCount = 0;
   if (facts.event === "pull_request") {
     const previous = await ctx.memory.get("repo", "review-count");
     reviewCount = typeof previous === "number" ? previous + 1 : 1;
-    await ctx.memory.set("repo", "review-count", reviewCount, { event: facts.deliveryId });
-    if (typeof decision.payload["body"] === "string" && facts.event === "pull_request") {
-      decision.payload["body"] = reviewBody(facts, reviewCount);
-    }
+    decision.payload["body"] = reviewBody(facts, reviewCount);
   }
 
   const results = await ctx.sinks.emit(decision, ctx);
@@ -270,6 +275,9 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
       error: failures.map((failure) => `${failure.sinkName}: ${failure.error ?? "unknown error"}`).join("; "),
       toolCallsCount: 0,
     };
+  }
+  if (reviewCount > 0) {
+    await ctx.memory.set("repo", "review-count", reviewCount, { event: facts.deliveryId });
   }
   return { status: "success", output: prompt, toolCallsCount: 0 };
 };
@@ -365,6 +373,7 @@ export async function runEvent(deps: PipelineDeps, event: ClaimedEvent): Promise
   const base: RunOutcome = {
     deliveryId: event.deliveryId,
     status: "failed",
+    settled: true,
     prompt: "",
     actionTypes: [],
     durationMs: 0,
@@ -469,6 +478,42 @@ export function titleFrom(payload: Record<string, unknown>): string | null {
  * Claims and processes one batch. Each event is acked (succeeded/skipped) or
  * failed with its error; one bad event never stops the batch.
  */
+/**
+ * Acks a finished run, or fails it when the run itself failed. A non-2xx answer
+ * is reported, never swallowed (the event is still leased and will come back).
+ */
+async function settle(
+  deps: PipelineDeps,
+  event: ClaimedEvent,
+  outcome: RunOutcome,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const failed = outcome.status === "failed";
+  const path = failed ? "/fail" : "/ack";
+  const body: Record<string, unknown> = {
+    claims: [{ deliveryId: event.deliveryId, leaseId: event.leaseId }],
+  };
+  if (failed) body["error"] = (outcome.error ?? "run failed").slice(0, 500);
+
+  let response: Response;
+  try {
+    response = await deps.coordinator.fetch(`https://repo-coordinator.internal${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    return { ok: false, error: `${path} failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    return {
+      ok: false,
+      error: `${path} was refused (${response.status})${detail.length > 0 ? `: ${detail.slice(0, 200)}` : ""}`,
+    };
+  }
+  return { ok: true };
+}
+
 export async function drainRepository(
   deps: PipelineDeps,
   options: { limit?: number; visibilityMs?: number } = {},
@@ -493,33 +538,27 @@ export async function drainRepository(
     succeeded: 0,
     failed: 0,
     skipped: 0,
+    unsettled: 0,
     runs: [],
   };
 
   for (const event of claimed) {
     const outcome = await runEvent(deps, event);
-    report.runs.push(outcome);
 
-    if (outcome.status === "failed") {
-      report.failed += 1;
-      await deps.coordinator.fetch("https://repo-coordinator.internal/fail", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          claims: [{ deliveryId: event.deliveryId, leaseId: event.leaseId }],
-          error: (outcome.error ?? "run failed").slice(0, 500),
-        }),
-      });
-      continue;
+    // The run's own result and the queue's settlement are separate facts: a
+    // rejected ack/fail means the event will be redelivered, so the report must
+    // not present it as a clean success.
+    const settlement = await settle(deps, event, outcome);
+    if (!settlement.ok) {
+      outcome.settled = false;
+      outcome.settlementError = settlement.error;
     }
 
-    if (outcome.status === "skipped") report.skipped += 1;
+    report.runs.push(outcome);
+    if (outcome.status === "failed") report.failed += 1;
+    else if (outcome.status === "skipped") report.skipped += 1;
     else report.succeeded += 1;
-    await deps.coordinator.fetch("https://repo-coordinator.internal/ack", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ claims: [{ deliveryId: event.deliveryId, leaseId: event.leaseId }] }),
-    });
+    if (!outcome.settled) report.unsettled += 1;
   }
 
   return report;

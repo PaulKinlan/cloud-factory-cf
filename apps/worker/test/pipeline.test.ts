@@ -2,9 +2,11 @@ import { SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   decideAction,
+  drainRepository,
   numberFrom,
   recordingSinks,
   reviewBody,
+  ruleBasedReview,
   titleFrom,
   type EventFacts,
 } from "../src/pipeline";
@@ -321,5 +323,123 @@ describe("pipeline end to end", () => {
     expect(report.failed).toBe(1);
     expect(report.runs[0]?.error ?? "").toContain("not provisioned");
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("settlement and retry semantics (cloud-factory-cf-cyk)", () => {
+  const claimedEvent = {
+    deliveryId: "evt-1",
+    provider: "github",
+    event: "pull_request",
+    action: "opened",
+    repository: "acme/settle",
+    actor: "octocat",
+    attempts: 1,
+    leaseId: "lease-1",
+  };
+
+  /** A coordinator stub: one claim, then whatever the test wants for settlement. */
+  function coordinatorStub(settlement: () => Response | Promise<Response>): {
+    fetch: (input: RequestInfo | URL) => Promise<Response>;
+    calls: string[];
+  } {
+    const calls: string[] = [];
+    return {
+      calls,
+      fetch: async (input) => {
+        const path = new URL(String(input)).pathname;
+        calls.push(path);
+        if (path === "/claim") {
+          return Response.json({ ok: true, claimed: [claimedEvent], leaseUntil: "later" });
+        }
+        if (path === "/events/evt-1/payload") {
+          return Response.json({ ok: true, payload: { number: 3, title: "T", pull_request: { number: 3 } } });
+        }
+        if (path === "/ack" || path === "/fail") return settlement();
+        return Response.json({ ok: false, error: "unexpected" }, { status: 500 });
+      },
+    };
+  }
+
+  it("reports an event as unsettled when the queue rejects the ack", async () => {
+    const coordinator = coordinatorStub(() => Response.json({ ok: false, error: "lease conflict" }, { status: 409 }));
+    const report = await drainRepository({
+      repository: "acme/settle",
+      controlKey: "k",
+      coordinator,
+      broker: { fetch: async () => Response.json({ ok: true }) },
+      executionFn: async () => ({ status: "success", output: "no action", toolCallsCount: 0 }),
+    });
+
+    // The stub execution emits no sink action, so the run itself is a skip; the
+    // queue refusal is what this test is about.
+    expect(report).toMatchObject({ claimed: 1, skipped: 1, failed: 0, unsettled: 1 });
+    expect(report.runs[0]?.settled).toBe(false);
+    expect(report.runs[0]?.settlementError ?? "").toContain("409");
+    expect(report.runs[0]?.settlementError ?? "").toContain("lease conflict");
+  });
+
+  it("reports a rejected fail without pretending the run settled", async () => {
+    const coordinator = coordinatorStub(() => new Response("gone", { status: 410 }));
+    const report = await drainRepository({
+      repository: "acme/settle",
+      controlKey: "k",
+      coordinator,
+      broker: { fetch: async () => Response.json({ ok: true }) },
+      executionFn: async () => ({ status: "failure", error: "sink exploded", toolCallsCount: 0 }),
+    });
+
+    expect(report).toMatchObject({ claimed: 1, failed: 1, succeeded: 0, unsettled: 1 });
+    expect(report.runs[0]?.settlementError ?? "").toContain("410");
+  });
+
+  it("settles cleanly when the queue accepts the ack", async () => {
+    const coordinator = coordinatorStub(() => Response.json({ ok: true }));
+    const report = await drainRepository({
+      repository: "acme/settle",
+      controlKey: "k",
+      coordinator,
+      broker: { fetch: async () => Response.json({ ok: true }) },
+      executionFn: async () => ({ status: "success", output: "done", toolCallsCount: 0 }),
+    });
+    expect(report).toMatchObject({ claimed: 1, skipped: 1, unsettled: 0 });
+    expect(report.runs[0]?.settled).toBe(true);
+  });
+
+  it("does not advance the review counter when the sink fails", async () => {
+    const memory = new Map<string, unknown>();
+    const facts: EventFacts = {
+      ...claimedEvent,
+      payload: { number: 4, title: "T" },
+      number: 4,
+      title: "T",
+    };
+    let sinkFails = true;
+    const makeContext = () =>
+      ({
+        state: { event: facts },
+        memory: {
+          get: async (_scope: string, key: string) => memory.get(key),
+          set: async (_scope: string, key: string, value: unknown) => {
+            memory.set(key, value);
+          },
+        },
+        sinks: {
+          emit: async () =>
+            sinkFails
+              ? [{ sinkName: "s", actionId: "a", actionType: "github:pr:review", success: false, error: "boom", durationMs: 0 }]
+              : [{ sinkName: "s", actionId: "a", actionType: "github:pr:review", success: true, durationMs: 0 }],
+        },
+      }) as never;
+
+    const failed = await ruleBasedReview({ runId: "r1", prompt: "p", tools: [], ctx: makeContext() });
+    expect(failed.status).toBe("failure");
+    expect(memory.get("review-count")).toBeUndefined();
+
+    sinkFails = false;
+    const retried = await ruleBasedReview({ runId: "r2", prompt: "p", tools: [], ctx: makeContext() });
+    expect(retried.status).toBe("success");
+    // A retry counts as the first review, not the second.
+    expect(memory.get("review-count")).toBe(1);
   });
 });
