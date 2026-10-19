@@ -22,7 +22,10 @@ export default {
       return Response.json({
         ok: true,
         service: "cloud-factory-cf",
-        environment: env.ENVIRONMENT ?? "unknown",
+        environment: env.ENVIRONMENT ?? "production",
+        commit: "d448b54491e2d09604e169fb61abcc0207725894",
+        build_timestamp: "2026-10-19T16:58:12Z",
+        version: "0.1.0",
       });
     }
 
