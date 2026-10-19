@@ -26,6 +26,10 @@ export default defineConfig({
           // Alternate installation credential used by the per-repository
           // override tests.
           GITHUB_TOKEN_INSTALL_2: "ghp_test_github_install_2",
+          // Review model credentials (cloud-factory-cf-7or). Test-only values: a real
+          // deployment provisions the key into the broker, never into the repo.
+          ANTHROPIC_API_KEY: "sk-ant-test-review-key",
+          OPENAI_API_KEY: "sk-test-openai-review-key",
         },
       },
     }),

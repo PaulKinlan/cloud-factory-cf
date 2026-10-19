@@ -140,15 +140,20 @@ describe("coordinator queue", () => {
     const ran = await runDurableObjectAlarm(coordinator(repository));
     expect(ran).toBe(true);
 
+    // The alarm releases the lease AND drains what is due (cloud-factory-cf-7or.1),
+    // so this event is picked up, its attempt counted, and handed back because the
+    // sink cannot reach a provider without provisioning. The lease contract is what
+    // this test is about: the row is pending again, not stuck in 'processing'.
     const pending = await call<{ events: Array<{ deliveryId: string; status: string; attempts: number }> }>(
       repository,
       "/events?status=pending",
     );
-    expect(pending.events[0]).toMatchObject({ deliveryId: "lease-1", status: "pending", attempts: 1 });
+    expect(pending.events[0]).toMatchObject({ deliveryId: "lease-1", status: "pending", attempts: 2 });
 
     // It is claimable again, and the attempt counter is preserved.
+    await makeDue(repository, "lease-1");
     const reclaim = await call<ClaimResponse>(repository, "/claim", { limit: 1 });
-    expect(reclaim.claimed[0]).toMatchObject({ deliveryId: "lease-1", attempts: 2 });
+    expect(reclaim.claimed[0]).toMatchObject({ deliveryId: "lease-1", attempts: 3 });
   });
 
   it("does not resurrect an event that is already processed", async () => {
@@ -190,6 +195,10 @@ describe("coordinator queue", () => {
     await makeDue(repository, deliveryId);
     const alarmRan = await runDurableObjectAlarm(coordinator(repository));
     expect(alarmRan).toBe(true);
+
+    // The alarm also drained what it could (cloud-factory-cf-7or.1), so make the
+    // handed-back event due again before measuring the lease conflict.
+    await makeDue(repository, deliveryId);
 
     // Runner 2 claims event and gets a new lease
     const claim2 = await call<ClaimResponse>(repository, "/claim", { limit: 1, visibilityMs: 60_000 });

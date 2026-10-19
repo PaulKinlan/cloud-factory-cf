@@ -77,6 +77,7 @@ Everything else is a secret, read through `FactoryEnv` in
 | `BROKER_SIGNING_KEY` | required to mint capabilities | HMAC key for capability tokens. |
 | `GITHUB_TOKEN` | for GitHub actions | Credential the broker attaches to `repo.read`, `issue.create`, `issue.comment`, `pr.comment`, `pr.review`. |
 | `GITLAB_TOKEN` | for GitLab actions | Credential for `project.read`, `mr.comment`. |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | for the LLM reviewer | Credential the broker attaches to `anthropic:messages.create` / `openai:chat.completions`. Only the service named by `REVIEW_MODEL` needs a key. |
 | `BEADS_API_HOST` / `BEADS_TOKEN` | for the beads sink | Unset ⇒ the beads sink reports the service as unconfigured. |
 | `TELEMETRY_ENDPOINT` | optional | Where the telemetry sink exports; unset ⇒ structured log. |
 

@@ -66,8 +66,8 @@ export async function executeSignedRequest(
   }
 
   const headers: Record<string, string> = {
-    ...resolved.headers,
     ...credentialHeadersFor(request.service, credential),
+    ...resolved.headers,
   };
 
   const startedAt = Date.now();
