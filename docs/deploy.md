@@ -75,8 +75,9 @@ Everything else is a secret, read through `FactoryEnv` in
 | `GITEA_WEBHOOK_SECRET` | required for Gitea/Forgejo webhooks | Verified as `X-Gitea-Signature` (HMAC-SHA256 hex of the body) or compared against `X-Gitea-Token`; unset ⇒ `503 gitea webhook secret not configured`. |
 | `BROKER_CONTROL_KEY` | required to use the broker control plane | Control-plane key for `POST /broker/…/capabilities`, provisioning, overrides, audit. |
 | `BROKER_SIGNING_KEY` | required to mint capabilities | HMAC key for capability tokens. |
-| `GITHUB_TOKEN` | for GitHub actions | Credential the broker attaches to `repo.read`, `issue.create`, `issue.comment`, `pr.comment`, `pr.review`. |
+| `GITHUB_TOKEN` | for GitHub actions | Credential the broker attaches to `repo.read`, `issue.create`, `issue.comment`, `pr.comment`, `pr.review`, `pr.diff`. |
 | `GITLAB_TOKEN` | for GitLab actions | Credential for `project.read`, `mr.comment`. |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | for the LLM reviewer | Credential the broker attaches to `anthropic:messages.create` / `openai:chat.completions`. Only the service named by `REVIEW_MODEL` needs a key. |
 | `BEADS_API_HOST` / `BEADS_TOKEN` | for the beads sink | Unset ⇒ the beads sink reports the service as unconfigured. |
 | `TELEMETRY_ENDPOINT` | optional | Where the telemetry sink exports; unset ⇒ structured log. |
 
@@ -84,6 +85,15 @@ Two further variables are read from the environment and are **not** secrets — 
 them as `vars` if you need them: `BROKER_REQUIRE_PROVISIONING` (`"0"`/`"false"`
 disables the provisioning requirement) and `BROKER_QUOTA_PER_MINUTE` (default 60,
 `"0"` disables the quota).
+
+### The LLM reviewer (`REVIEW_MODEL`)
+
+Set `REVIEW_MODEL` to `service/model` (`anthropic/claude-…` or `openai/gpt-…`) to
+turn the pull-request reviewer on; leave it unset and `POST /runs/:owner/:repo`
+keeps the deterministic reviewer that posts a template comment. The model's key
+lives in the broker, never in the agent. See
+[review-bot.md](review-bot.md) for the flow, the provisioning steps and the
+failure behaviour.
 
 Put secrets with wrangler (**needs your account**). Run it from the repo root with
 the config path, or from `apps/worker` without `-c`:

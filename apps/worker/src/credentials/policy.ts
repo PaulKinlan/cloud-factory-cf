@@ -17,6 +17,18 @@ export interface ServiceActionDefinition {
   pathParams?: readonly string[];
   /** Parameters copied into the JSON request body. */
   bodyParams?: readonly string[];
+  /**
+   * A media type for this action alone. GitHub answers a diff only when asked with
+   * `application/vnd.github.v3.diff`; the service's default accept stays as it is.
+   */
+  accept?: string;
+  /**
+   * Builds the request body for an action whose payload is not a flat set of safe
+   * strings. A review prompt is multi-line and long, so the flat-string rules cannot
+   * describe it; the action still declares every parameter it may read and unknown
+   * parameters are still refused, so the closed-set property holds.
+   */
+  body?: (params: Readonly<Record<string, string | number>>) => Record<string, unknown>;
 }
 
 export interface ServiceDefinition {
@@ -54,12 +66,25 @@ export const SERVICES: Readonly<Record<string, ServiceDefinition>> = {
         route: "/repos/{repository}/issues/{number}/comments",
         pathParams: ["number"],
         bodyParams: ["body"],
+        body: textBody(["body"]),
       },
+      // The diff is what a review model reads. Same route as the pull request
+      // itself, different media type, so no second host or credential.
+      "pr.diff": {
+        method: "GET",
+        route: "/repos/{repository}/pulls/{number}",
+        pathParams: ["number"],
+        accept: "application/vnd.github.v3.diff",
+      },
+      // A review body is free text: a model writes paragraphs, fenced code and
+      // line breaks. It goes into a JSON body and never into a header or a log
+      // line, so the flat-string rule (which forbids newlines) does not apply.
       "pr.review": {
         method: "POST",
         route: "/repos/{repository}/pulls/{number}/reviews",
         pathParams: ["number"],
         bodyParams: ["body", "event"],
+        body: textBody(["body", "event"]),
       },
       "issue.create": {
         method: "POST",
@@ -71,6 +96,7 @@ export const SERVICES: Readonly<Record<string, ServiceDefinition>> = {
         route: "/repos/{repository}/issues/{number}/comments",
         pathParams: ["number"],
         bodyParams: ["body"],
+        body: textBody(["body"]),
       },
     },
   },
@@ -99,6 +125,47 @@ export const SERVICES: Readonly<Record<string, ServiceDefinition>> = {
       },
     },
   },
+  anthropic: {
+    // The review model. The key is the operator's; the agent only ever names the
+    // service, the action and a prompt, and the broker attaches the credential.
+    host: "api.anthropic.com",
+    credentialEnv: "ANTHROPIC_API_KEY",
+    headers: (credential) => ({
+      "x-api-key": credential,
+      "anthropic-version": "2023-06-01",
+    }),
+    repositoryEncoding: "slash",
+    actions: {
+      "messages.create": {
+        method: "POST",
+        route: "/v1/messages",
+        bodyParams: ["model", "max_tokens", "prompt"],
+        body: (params) => ({
+          model: String(params["model"] ?? ""),
+          max_tokens: Number(params["max_tokens"] ?? 0),
+          messages: [{ role: "user", content: String(params["prompt"] ?? "") }],
+        }),
+      },
+    },
+  },
+  openai: {
+    host: "api.openai.com",
+    credentialEnv: "OPENAI_API_KEY",
+    headers: (credential) => ({ authorization: `Bearer ${credential}` }),
+    repositoryEncoding: "slash",
+    actions: {
+      "chat.completions": {
+        method: "POST",
+        route: "/v1/chat/completions",
+        bodyParams: ["model", "max_tokens", "prompt"],
+        body: (params) => ({
+          model: String(params["model"] ?? ""),
+          max_tokens: Number(params["max_tokens"] ?? 0),
+          messages: [{ role: "user", content: String(params["prompt"] ?? "") }],
+        }),
+      },
+    },
+  },
   gitlab: {
     host: "gitlab.com",
     credentialEnv: "GITLAB_TOKEN",
@@ -110,6 +177,7 @@ export const SERVICES: Readonly<Record<string, ServiceDefinition>> = {
         route: "/api/v4/projects/{repository}/merge_requests/{iid}/notes",
         pathParams: ["iid"],
         bodyParams: ["body"],
+        body: textBody(["body"]),
       },
       "project.read": { method: "GET", route: "/api/v4/projects/{repository}" },
     },
@@ -171,21 +239,40 @@ export function resolveRequest(input: ResolveInput): ResolvedRequest {
     pathValues[name] = String(parsed);
   }
 
-  const bodyValues: Record<string, unknown> = {};
-  for (const name of action.bodyParams ?? []) {
-    const value = params[name];
-    if (value === undefined) continue;
-    if (typeof value !== "string" || !isSafeBodyValue(value)) {
-      return { ok: false, status: 400, reason: `parameter ${name} must be a safe string` };
-    }
-    bodyValues[name] = value;
-  }
-
   // Unknown parameters are refused rather than dropped: silently ignoring them
   // hides a prompt trying to smuggle a different target through the broker.
   const allowed = new Set([...(action.pathParams ?? []), ...(action.bodyParams ?? [])]);
   for (const name of Object.keys(params)) {
     if (!allowed.has(name)) return { ok: false, status: 400, reason: `parameter ${name} not permitted` };
+  }
+
+  let bodyValues: Record<string, unknown> = {};
+  if (action.body !== undefined) {
+    // A builder owns its own bounds; only the declared names can reach it.
+    const built: Record<string, string | number> = {};
+    for (const name of action.bodyParams ?? []) {
+      const value = params[name];
+      if (value === undefined) continue;
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        built[name] = value;
+        continue;
+      }
+      if (typeof value === "string" && isSafeTextValue(value)) {
+        built[name] = value;
+        continue;
+      }
+      return { ok: false, status: 400, reason: `parameter ${name} is not a usable value` };
+    }
+    bodyValues = action.body(built);
+  } else {
+    for (const name of action.bodyParams ?? []) {
+      const value = params[name];
+      if (value === undefined) continue;
+      if (typeof value !== "string" || !isSafeBodyValue(value)) {
+        return { ok: false, status: 400, reason: `parameter ${name} must be a safe string` };
+      }
+      bodyValues[name] = value;
+    }
   }
 
   const repository = encodeRepository(input.repository, service.repositoryEncoding);
@@ -201,11 +288,13 @@ export function resolveRequest(input: ResolveInput): ResolvedRequest {
   }
 
   const hasBody = Object.keys(bodyValues).length > 0;
+  const headers: Record<string, string> = hasBody ? { "content-type": "application/json" } : {};
+  if (action.accept !== undefined) headers["accept"] = action.accept;
   return {
     ok: true,
     url: `https://${host}${route}`,
     method: action.method,
-    headers: hasBody ? { "content-type": "application/json" } : {},
+    headers,
     body: hasBody ? JSON.stringify(bodyValues) : undefined,
     service: input.service,
     action: input.action,
@@ -246,6 +335,33 @@ export function encodeRepository(repository: string, encoding: ServiceDefinition
   if (!match) return null;
   const value = `${match[1]}/${match[2]}`;
   return encoding === "url-encoded" ? encodeURIComponent(value) : value;
+}
+
+/** The ceiling for a builder-owned string param (a review prompt can be large). */
+const MAX_BUILT_BODY_CHARS = 400_000;
+
+/**
+ * A value that may contain newlines and tabs (a review, a comment, a prompt) but
+ * still no other control characters, and no more than the builder ceiling. Chosen
+ * because these values only ever reach a JSON request body.
+ */
+function isSafeTextValue(value: string): boolean {
+  if (value.length > MAX_BUILT_BODY_CHARS) return false;
+  return !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
+}
+
+/** Builds a JSON body from named parameters, for actions whose payload is free text. */
+function textBody(
+  keys: readonly string[],
+): (params: Readonly<Record<string, string | number>>) => Record<string, unknown> {
+  return (params) => {
+    const body: Record<string, unknown> = {};
+    for (const key of keys) {
+      const value = params[key];
+      if (value !== undefined) body[key] = value;
+    }
+    return body;
+  };
 }
 
 function isSafeBodyValue(value: string): boolean {

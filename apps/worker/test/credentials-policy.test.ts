@@ -77,22 +77,35 @@ describe("credential broker policy", () => {
     expect(extra).toMatchObject({ ok: false, status: 400, reason: "parameter url not permitted" });
   });
 
-  it("refuses control characters in bodies so logs and headers stay clean", () => {
+  it("allows multi-line comment text but refuses other control characters", () => {
+    // A review or a comment is free text: a model writes paragraphs and fenced
+    // code, and the value only ever reaches a JSON body, never a header or a log
+    // line (cloud-factory-cf-7or). The ban now applies to the control characters
+    // that could still mangle a log or a terminal.
     const multiline = resolveRequest({
       service: "github",
       action: "issue.comment",
       repository: "acme/widgets",
       params: { number: 1, body: "line1\nline2" },
     });
-    expect(multiline).toMatchObject({ ok: false, status: 400 });
+    expect(multiline).toMatchObject({ ok: true });
+    expect(multiline.ok && JSON.parse(multiline.body ?? "{}").body).toBe("line1\nline2");
 
-    const tooLong = resolveRequest({
+    const control = resolveRequest({
       service: "github",
       action: "issue.comment",
       repository: "acme/widgets",
-      params: { number: 1, body: "x".repeat(8_001) },
+      params: { number: 1, body: "bell\u0007" },
     });
-    expect(tooLong).toMatchObject({ ok: false, status: 400 });
+    expect(control).toMatchObject({ ok: false, status: 400 });
+
+    const unbounded = resolveRequest({
+      service: "github",
+      action: "issue.comment",
+      repository: "acme/widgets",
+      params: { number: 1, body: "x".repeat(400_001) },
+    });
+    expect(unbounded).toMatchObject({ ok: false, status: 400 });
   });
 
   it("maps services to their credential bindings and denies unknown services", () => {

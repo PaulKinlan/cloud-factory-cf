@@ -1,4 +1,6 @@
+import type { AgentExecutionFn } from "@factory-cloud/sdk";
 import type { Env } from "../env";
+import { reviewRuntime } from "../review/bot";
 import { drainRepository } from "../pipeline";
 import { traceSink } from "../events";
 import { sameSecret } from "../secrets";
@@ -39,6 +41,9 @@ export async function routeRun(
       coordinator,
       broker: env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository)),
       onStep: traceSink(coordinator),
+      // The deployment decides: with REVIEW_MODEL set the run reviews through
+      // the model, otherwise the pipeline keeps its deterministic default.
+      ...(reviewRuntime(env) === undefined ? {} : { executionFn: reviewRuntime(env) as AgentExecutionFn }),
       ...(env.TELEMETRY_ENDPOINT === undefined ? {} : { telemetryEndpoint: env.TELEMETRY_ENDPOINT }),
     },
     ...(limit === undefined ? [] : [{ limit }]),

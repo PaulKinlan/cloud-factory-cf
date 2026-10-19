@@ -65,9 +65,11 @@ export async function executeSignedRequest(
     return { ok: false, status: 503, reason: "credential not configured for this service" };
   }
 
+  // Order matters: the service's credential headers are defaults, and an action that
+  // names its own media type (a diff) has to win over them.
   const headers: Record<string, string> = {
-    ...resolved.headers,
     ...credentialHeadersFor(request.service, credential),
+    ...resolved.headers,
   };
 
   const startedAt = Date.now();

@@ -2,3 +2,6 @@
 WEBHOOK_SECRET=replace-me          # GitHub: X-Hub-Signature-256 HMAC key
 GITLAB_WEBHOOK_TOKEN=replace-me    # GitLab: X-Gitlab-Token shared secret
 GITEA_WEBHOOK_SECRET=replace-me      # Gitea/Forgejo: X-Gitea-Signature HMAC key (or X-Gitea-Token)
+ANTHROPIC_API_KEY=replace-me        # LLM reviewer: broker credential for anthropic:messages.create
+OPENAI_API_KEY=replace-me           # alternative: openai:chat.completions
+# REVIEW_MODEL=anthropic/claude-sonnet-4-5   # set in wrangler vars to enable the reviewer

@@ -34,6 +34,15 @@ export interface FactoryEnv {
    */
   BROKER_REQUIRE_PROVISIONING?: string;
   /**
+   * The review model as `service/model` (`anthropic/claude-…`, `openai/gpt-…`).
+   * Unset keeps the deterministic reviewer; set it to turn on the LLM review
+   * (cloud-factory-cf-7or). The service's credential lives in the broker, not here.
+   */
+  REVIEW_MODEL?: string;
+  /** Optional caps for the review call; both have safe defaults. */
+  REVIEW_MAX_TOKENS?: string;
+  REVIEW_MAX_DIFF_CHARS?: string;
+  /**
    * Calls per (agent, service, action) per 60s window before the broker answers
    * 429. Unset means the default (60); "0" disables the quota.
    */
