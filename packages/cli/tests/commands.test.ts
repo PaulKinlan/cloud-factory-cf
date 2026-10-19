@@ -32,3 +32,19 @@ test('command handlers: fail cleanly on missing required arguments', async () =>
   assert.equal(studioCode, 1);
   assert.ok(errors.some((e) => e.includes('missing prompt')));
 });
+
+test('runCli: validates slash-less --repo correctly (fixes cloud-factory-cf-byg)', async () => {
+  const { runCli } = await import('../src/cli.ts');
+  const errors: string[] = [];
+  const io = {
+    stdout: () => {},
+    stderr: (m: string) => errors.push(m),
+  };
+
+  const code = await runCli(
+    ['webhook', '--repo', 'foo', '--url', 'http://127.0.0.1:8787', '--secret', 'secret'],
+    io,
+  );
+  assert.equal(code, 1);
+  assert.ok(errors.some((e) => e.includes('missing --repo <owner/name>')));
+});

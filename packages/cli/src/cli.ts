@@ -230,7 +230,7 @@ export async function runCli(
   }
 
   const cwd = path.resolve(parsed.cwd ?? process.cwd());
-  const [owner = 'local', name = 'local-repo'] = parsed.repo
+  const [owner, name] = parsed.repo
     ? parsed.repo.split('/')
     : ['local', 'local-repo'];
 
