@@ -25,13 +25,13 @@ describe("Worker environment configuration", () => {
     expect(workerEnv.ENVIRONMENT).toBe("development");
   });
 
-  it("conforms to FactoryEnv interface contracts", () => {
-    const factoryEnv: FactoryEnv = {
+  it("detects when a required binding is missing from an environment record", () => {
+    const incompleteEnv: Record<string, unknown> = {
       REPO_COORDINATOR: env.REPO_COORDINATOR,
-      CREDENTIAL_BROKER: env.CREDENTIAL_BROKER,
-      ORG_COORDINATOR: env.ORG_COORDINATOR,
-      ENVIRONMENT: "test",
+      // CREDENTIAL_BROKER and ENVIRONMENT intentionally omitted
     };
-    expect(factoryEnv.ENVIRONMENT).toBe("test");
+
+    const missing = REQUIRED_WORKER_BINDINGS.filter((binding) => incompleteEnv[binding] === undefined);
+    expect(missing).toEqual(["CREDENTIAL_BROKER", "ENVIRONMENT"]);
   });
 });
