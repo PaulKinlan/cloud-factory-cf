@@ -53,3 +53,62 @@ Autonomous software engineering requires specialized personas with distinct mand
 - **Mandate**: Continuous synchronization between codebase reality and markdown documentation.
 - **Rule**: Audits every PR/commit; automatically drafts doc updates when API routes, schemas, or behaviors change.
 - **Output**: Documentation PR proposals and drift audit scorecards.
+
+---
+
+## 11. Custom Role Definition & Inheritance
+
+Teams can define their own specialized agents by either extending one of the 10 built-in personas or authoring a new one using `@factory-cloud/sdk`.
+
+### Pattern A: Class Inheritance (Extending a Base Persona)
+
+```typescript
+import { SecurityExpert, AgentContext } from "@factory-cloud/sdk";
+
+export default class WebCryptoSecurityAuditor extends SecurityExpert {
+  name = "webcrypto-security-auditor";
+  description = "Security persona enforcing constant-time comparisons and valid key algorithms";
+
+  override async onScan(diff: string, ctx: AgentContext): Promise<void> {
+    // 1. Run base security station checks (STRIDE, secret scan, input validation)
+    await super.onScan(diff, ctx);
+
+    // 2. Add domain-specific WebCrypto checks
+    if (diff.includes("crypto.subtle")) {
+      await this.auditSubtleCrypto(diff, ctx);
+    }
+  }
+
+  private async auditSubtleCrypto(diff: string, ctx: AgentContext) {
+    // Specialized domain inspection
+  }
+}
+```
+
+### Pattern B: Composable Functional Agent (`defineAgent`)
+
+```typescript
+import { defineAgent } from "@factory-cloud/sdk";
+
+export default defineAgent({
+  name: "translation-parity-guard",
+  description: "Ensures every newly added UI string key has entries in all locale JSON files",
+  triggers: ["pull_request.opened", "pull_request.synchronize"],
+  execute: async (ctx) => {
+    const diff = await ctx.gitDiff();
+    // Parse diff, check locales/ directory, emit finding
+    if (hasMissingKeys) {
+      await ctx.sink.reportFinding({
+        severity: "medium",
+        category: "i18n",
+        message: "Missing Spanish and Japanese translation keys for new strings in src/components/Banner.tsx"
+      });
+    }
+  }
+});
+```
+
+### Pattern C: Generative Agent Studio Creation
+Users can also author and install custom agents using natural language via the **Agent Studio Canvas**:
+> *"Create an agent that extends UI Designer to ensure all new buttons have aria-label and use our shared design tokens."*
+The Architect Agent compiles the prompt into a verified TypeScript module, tests it against historical PR diffs, and registers it in the repository Durable Object registry.
