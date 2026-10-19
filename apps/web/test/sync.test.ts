@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { createSampleDoc } from "../src/model";
 import {
+  createShareTracker,
   describeShareFailure,
   documentRequest,
   isValidRepository,
   listRequest,
   parseDocumentList,
+  parseShareHint,
   parseStoredDocument,
+  planSave,
   saveRequest,
 } from "../src/sync";
 
@@ -102,5 +105,89 @@ describe("share responses", () => {
     }
     // Other messages are bounded, so a huge server error cannot flood the status.
     expect(describeShareFailure(400, { error: "x".repeat(500) }).length).toBeLessThan(200);
+  });
+});
+
+describe("share tracker (cloud-factory-cf-ci5)", () => {
+  it("keeps one document id per repository", () => {
+    const tracker = createShareTracker();
+    tracker.remember("owner/alpha", "alpha-1");
+    expect(tracker.idFor("owner/alpha")).toBe("alpha-1");
+    // A repository that has never been saved gets a fresh document, so Save
+    // cannot update another repository's copy.
+    expect(tracker.idFor("owner/beta")).toBeNull();
+    tracker.remember("owner/beta", "beta-1");
+    expect(tracker.idFor("owner/alpha")).toBe("alpha-1");
+    expect(tracker.idFor("owner/beta")).toBe("beta-1");
+  });
+
+  it("normalises whitespace and ignores empty values", () => {
+    const tracker = createShareTracker({ " owner/alpha ": "alpha-1", "owner/beta": "" });
+    expect(tracker.idFor("owner/alpha")).toBe("alpha-1");
+    expect(tracker.idFor("  owner/alpha  ")).toBe("alpha-1");
+    expect(tracker.idFor("owner/beta")).toBeNull();
+    tracker.remember("", "ignored");
+    expect(tracker.idFor("")).toBeNull();
+    expect(tracker.toJSON()).toEqual({ ids: { "owner/alpha": "alpha-1" } });
+  });
+
+  it("forgets a repository without touching the others", () => {
+    const tracker = createShareTracker({ "owner/alpha": "a", "owner/beta": "b" });
+    tracker.forget("owner/alpha");
+    expect(tracker.idFor("owner/alpha")).toBeNull();
+    expect(tracker.idFor("owner/beta")).toBe("b");
+  });
+
+  it("reads the hint, and migrates the old single-repository shape", () => {
+    expect(parseShareHint({ ids: { "owner/alpha": "a" }, name: "Layout" })).toEqual({
+      ids: { "owner/alpha": "a" },
+      name: "Layout",
+    });
+    expect(parseShareHint({ repository: "owner/alpha", id: "a" })).toEqual({ ids: { "owner/alpha": "a" } });
+    expect(parseShareHint(null)).toEqual({ ids: {} });
+    expect(parseShareHint({ ids: { "owner/alpha": 7 } })).toEqual({ ids: {} });
+  });
+
+  it("replays the reported repro: a second repository never reuses, or overwrites, the first id", () => {
+    const tracker = createShareTracker();
+    const doc = createSampleDoc();
+    const target = (repository: string) => ({ repository, controlKey: "k" });
+    const save = (repository: string, bound: string | null) => {
+      const plan = planSave(tracker, bound, repository);
+      return {
+        plan,
+        request: saveRequest("https://canvas.test", target(repository), doc, {
+          ...(plan.id === null ? {} : { id: plan.id }),
+          name: "Layout",
+        }),
+      };
+    };
+
+    // Save in alpha: no id yet, so the server assigns one.
+    const first = save("owner/alpha", null);
+    expect(first.plan).toEqual({ id: null, newCopy: false });
+    expect("url" in first.request && first.request.url).toBe("https://canvas.test/canvas/owner/alpha/documents");
+    tracker.remember("owner/alpha", "alpha-1");
+
+    // Switch the repository field to beta and save: beta gets its own document.
+    const second = save("owner/beta", "owner/alpha");
+    expect(second.plan).toEqual({ id: null, newCopy: false });
+    expect("url" in second.request && second.request.url).toBe("https://canvas.test/canvas/owner/beta/documents");
+    tracker.remember("owner/beta", "beta-1");
+
+    // Back to alpha while the canvas is still beta's: do not overwrite alpha.
+    const third = save("owner/alpha", "owner/beta");
+    expect(third.plan).toEqual({ id: null, newCopy: true });
+    expect("url" in third.request && third.request.url).toBe("https://canvas.test/canvas/owner/alpha/documents");
+
+    // Once a document is loaded from alpha, saving updates it in place.
+    const fourth = save("owner/alpha", "owner/alpha");
+    expect(fourth.plan).toEqual({ id: "alpha-1", newCopy: false });
+    expect("url" in fourth.request && fourth.request.url).toBe(
+      "https://canvas.test/canvas/owner/alpha/documents/alpha-1",
+    );
+
+    // A restored hint with no canvas binding still updates that repository's own id.
+    expect(planSave(tracker, null, "owner/beta")).toEqual({ id: "beta-1", newCopy: false });
   });
 });

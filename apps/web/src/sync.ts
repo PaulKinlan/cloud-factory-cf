@@ -121,6 +121,94 @@ export function parseStoredDocument(payload: unknown): { document: CanvasDoc; na
   };
 }
 
+/**
+ * Which document id belongs to which repository.
+ *
+ * A saved id is only meaningful inside the repository it came from: carrying it
+ * across a repository edit asked the server to update a *different*
+ * repository's copy (review finding cloud-factory-cf-ci5). The tracker keeps one
+ * id per repository, so switching back to a repository still updates its own
+ * document, and a repository that has never been saved gets a fresh one.
+ */
+export interface ShareTracker {
+  idFor(repository: string): string | null;
+  remember(repository: string, id: string): void;
+  forget(repository: string): void;
+  /** Serializable hint for sessionStorage. */
+  toJSON(): { ids: Record<string, string> };
+}
+
+function normaliseRepository(repository: string): string {
+  return repository.trim();
+}
+
+export function createShareTracker(initial: Record<string, string> = {}): ShareTracker {
+  const ids = new Map<string, string>();
+  for (const [repository, id] of Object.entries(initial)) {
+    const key = normaliseRepository(repository);
+    if (key.length > 0 && typeof id === "string" && id.length > 0) ids.set(key, id);
+  }
+  return {
+    idFor(repository) {
+      return ids.get(normaliseRepository(repository)) ?? null;
+    },
+    remember(repository, id) {
+      const key = normaliseRepository(repository);
+      if (key.length > 0 && id.length > 0) ids.set(key, id);
+    },
+    forget(repository) {
+      ids.delete(normaliseRepository(repository));
+    },
+    toJSON() {
+      return { ids: Object.fromEntries(ids) };
+    },
+  };
+}
+
+/**
+ * Decides whether a save updates a document or creates one.
+ *
+ * Owning a per-repository id is not enough: the *canvas* can be bound to a
+ * different repository (loaded from beta, then the repository field edited to
+ * alpha). Updating alpha's document with beta's canvas destroyed alpha's copy
+ * in the reported repro, so a save only updates in place when the canvas was
+ * loaded from, or last saved to, the repository being saved to.
+ */
+export interface SavePlan {
+  /** Id to `PUT`, or null to let the server assign one. */
+  id: string | null;
+  /** True when the target already held a document that this save must not overwrite. */
+  newCopy: boolean;
+}
+
+export function planSave(tracker: ShareTracker, boundRepository: string | null, repository: string): SavePlan {
+  const existing = tracker.idFor(repository);
+  if (existing === null) return { id: null, newCopy: false };
+  const bound = boundRepository === null ? null : normaliseRepository(boundRepository);
+  if (bound !== null && bound !== normaliseRepository(repository)) {
+    return { id: null, newCopy: true };
+  }
+  return { id: existing, newCopy: false };
+}
+
+/**
+ * Reads the session hint. Older pages wrote `{ repository, id }`; that shape is
+ * migrated rather than dropped so an open tab keeps its id.
+ */
+export function parseShareHint(raw: unknown): { ids: Record<string, string>; name?: string } {
+  if (typeof raw !== "object" || raw === null) return { ids: {} };
+  const body = raw as { ids?: unknown; repository?: unknown; id?: unknown; name?: unknown };
+  const ids: Record<string, string> = {};
+  if (typeof body.ids === "object" && body.ids !== null) {
+    for (const [repository, id] of Object.entries(body.ids as Record<string, unknown>)) {
+      if (typeof id === "string" && id.length > 0) ids[repository] = id;
+    }
+  } else if (typeof body.repository === "string" && typeof body.id === "string" && body.id.length > 0) {
+    ids[body.repository] = body.id;
+  }
+  return typeof body.name === "string" && body.name.length > 0 ? { ids, name: body.name } : { ids };
+}
+
 /** Human-readable reason for a failed share call, without echoing the key. */
 export function describeShareFailure(status: number, payload: unknown): string {
   // The server's own message is useful for a 400/409, but it is bounded and

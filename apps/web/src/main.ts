@@ -1,9 +1,12 @@
 import {
   describeShareFailure,
+  createShareTracker,
   documentRequest,
   listRequest,
   parseDocumentList,
+  parseShareHint,
   parseStoredDocument,
+  planSave,
   saveRequest,
   type ShareTarget,
 } from "./sync";
@@ -63,7 +66,9 @@ let clearArmed = false;
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 // Repository name and the last saved id survive a reload of the tab; the control
 // key never leaves this variable.
-let shareId: string | null = null;
+let shareIds = createShareTracker();
+/** Repository whose document the current canvas came from (null: never loaded/saved). */
+let boundRepository: string | null = null;
 const SHARE_HINT_KEY = "cloud-factory-canvas:share";
 
 const CONFIG_FIELDS: Record<NodeKind, Array<{ key: string; label: string; control: "text" | "textarea" | "select"; options?: string[] }>> = {
@@ -427,9 +432,16 @@ function setShareStatus(message: string): void {
   announce(message);
 }
 
+function shareIdFor(repository: string): string | null {
+  return shareIds.idFor(repository);
+}
+
 function rememberShareTarget(): void {
   try {
-    sessionStorage.setItem(SHARE_HINT_KEY, JSON.stringify({ repository: shareRepository.value.trim(), id: shareId }));
+    sessionStorage.setItem(
+      SHARE_HINT_KEY,
+      JSON.stringify({ ...shareIds.toJSON(), name: shareName.value }),
+    );
   } catch {
     // Session storage can be unavailable; sharing still works in this page.
   }
@@ -439,11 +451,11 @@ required<HTMLButtonElement>("share").addEventListener("click", () => {
   try {
     const stored = sessionStorage.getItem(SHARE_HINT_KEY);
     if (stored) {
-      const parsed = JSON.parse(stored) as { repository?: unknown; id?: unknown };
-      if (typeof parsed.repository === "string" && shareRepository.value.length === 0) {
-        shareRepository.value = parsed.repository;
-      }
-      if (typeof parsed.id === "string") shareId = parsed.id;
+      const hint = parseShareHint(JSON.parse(stored));
+      // A hint only restores ids that belong to their own repository; the
+      // repository field itself is left to the operator.
+      shareIds = createShareTracker(hint.ids);
+      if (hint.name !== undefined && shareName.value.length === 0) shareName.value = hint.name;
     }
   } catch {
     // Ignore a corrupt hint: an empty form is fine.
@@ -474,9 +486,13 @@ async function sendShare(
 
 required<HTMLButtonElement>("share-save").addEventListener("click", async () => {
   setShareStatus("Saving…");
+  // The id comes from the repository being saved to, never from whichever
+  // repository was last touched (cloud-factory-cf-ci5).
+  const target = shareTarget();
+  const plan = planSave(shareIds, boundRepository, target.repository);
   const result = await sendShare(
-    saveRequest(location.origin, shareTarget(), doc, {
-      ...(shareId === null ? {} : { id: shareId }),
+    saveRequest(location.origin, target, doc, {
+      ...(plan.id === null ? {} : { id: plan.id }),
       name: shareName.value,
     }),
   );
@@ -486,9 +502,12 @@ required<HTMLButtonElement>("share-save").addEventListener("click", async () => 
     return;
   }
   const body = result.payload as { id?: unknown; name?: unknown };
-  if (typeof body.id === "string") shareId = body.id;
+  if (typeof body.id === "string") shareIds.remember(target.repository, body.id);
+  boundRepository = target.repository;
   rememberShareTarget();
-  setShareStatus(`Saved “${typeof body.name === "string" ? body.name : shareName.value}” (${shareId ?? "no id"})`);
+  const savedId = shareIdFor(target.repository) ?? "no id";
+  const copyNote = plan.newCopy ? " as a new copy — that document was loaded from another repository" : "";
+  setShareStatus(`Saved “${typeof body.name === "string" ? body.name : shareName.value}”${copyNote} (${savedId})`);
   void refreshDocumentList();
 });
 
@@ -552,7 +571,8 @@ async function loadDocument(id: string, name: string): Promise<void> {
   doc = stored.document;
   selectedId = doc.nodes[0]?.id ?? null;
   connectFrom = null;
-  shareId = id;
+  shareIds.remember(shareTarget().repository, id);
+  boundRepository = shareTarget().repository;
   shareName.value = stored.name;
   persist();
   render();

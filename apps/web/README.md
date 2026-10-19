@@ -71,18 +71,22 @@ npm test -w @factory-cloud/web          # model unit tests (Node, no browser)
 
 - **Save to repository** `PUT`s the exported document (creating on first save,
   updating the same id after that), then refreshes the list.
+- Document ids are kept **per repository**: Save only updates in place when the
+  current canvas was loaded from, or last saved to, the repository being saved
+  to. Otherwise it creates a new document and says so in the status line, so
+  editing the repository field can never overwrite another repository's layout.
 - **Refresh list** shows the repository's stored documents; **Load** replaces the
   current canvas with one of them (validated through the same `parseDoc` the
   local copy uses) and writes it back to `localStorage`.
 - The control key lives **in memory only** — it is never written to
-  `localStorage`, `sessionStorage` or the exported JSON. The repository name, the
-  last document id and the document name survive a reload in `sessionStorage`.
+  `localStorage`, `sessionStorage` or the exported JSON. The per-repository
+  document ids and the document name survive a reload in `sessionStorage`.
 - Failures are reported in the dialog (key rejected, no key on the deployment,
   repository at its document limit, unreachable API) instead of the console, and
   a failed load leaves the current canvas untouched.
 
 `src/sync.ts` holds the request builders and response parsers, so the wiring is
-unit-tested (7 tests) without a DOM.
+unit-tested (12 tests) without a DOM.
 
 ## Serving it
 
