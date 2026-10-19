@@ -109,7 +109,9 @@ accepted it, the run reports that action in `deliveryError` and the event is
 settled rather than retried — including by the `/runs` drain — because a retry
 would create the issue or task a second time. When the provider *rejected* the
 action, a rejected ledger write is not a gap: nothing was delivered, so the event
-must stay retryable and the failure is reported as an ordinary failure.
+must stay retryable and the failure is reported as an ordinary failure. The same
+holds for the pair-level row: a rejected pair write after a **failed** run is not
+a gap either — only a successful run's unrecorded write is.
 
 If the ledger cannot record a run after the side effects happened (a rejected or
 unreachable write), the run is retried three times; if it still fails the outcome

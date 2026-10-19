@@ -646,7 +646,7 @@ describe("a rejected action-ledger write is reported, not retried (cloud-factory
   });
 });
 
-describe("the drain acknowledges a run it could not record (cloud-factory-cf-835)", () => {
+describe("the drain acknowledges a successful run it could not record (cloud-factory-cf-835)", () => {
   it("acks instead of failing the event when the side effect is unrecorded", async () => {
     const claimedEvent = {
       deliveryId: "evt-835-drain",
@@ -679,15 +679,14 @@ describe("the drain acknowledges a run it could not record (cloud-factory-cf-835
       controlKey: "k",
       coordinator,
       broker: { fetch: async () => Response.json({ ok: true }) },
-      executionFn: async () => ({ status: "failure", error: "provider said no", toolCallsCount: 0 }),
+      executionFn: async () => ({ status: "success", output: "delivered", toolCallsCount: 0 }),
     });
 
     expect(report.runs[0]?.deliveryError ?? "").toContain("delivery ledger rejected the completion");
-    // The event is acknowledged (a retry would repeat the provider call), and the
-    // failure is still counted in the report.
+    // The event is acknowledged (a retry would repeat the provider call).
     expect(paths).toContain("/ack");
     expect(paths).not.toContain("/fail");
-    expect(report.failed).toBe(1);
+    expect(report.succeeded).toBe(1);
     expect(report.unsettled).toBe(0);
   });
 });
@@ -732,5 +731,50 @@ describe("a failed action stays retryable despite a rejected ledger write (cloud
     // event has to stay retryable.
     const state = (ctx as unknown as { state: Record<string, unknown> }).state;
     expect(state["actionDeliveryErrors"]).toBeUndefined();
+  });
+});
+
+describe("a failed run stays retryable when the pair write is rejected (uit)", () => {
+  it("fails the event instead of acknowledging it when nothing was delivered", async () => {
+    const claimedEvent = {
+      deliveryId: "evt-pair-fail",
+      provider: "github",
+      event: "issues",
+      action: "opened",
+      repository: "acme/pair-fail",
+      actor: "octocat",
+      attempts: 1,
+      leaseId: "lease-1",
+    };
+    const paths: string[] = [];
+    const coordinator = {
+      fetch: async (input: RequestInfo | URL) => {
+        const path = new URL(String(input)).pathname;
+        paths.push(path);
+        if (path === "/claim") return Response.json({ ok: true, claimed: [claimedEvent], leaseUntil: "later" });
+        if (path === "/events/evt-pair-fail/payload") {
+          return Response.json({ ok: true, payload: { number: 14, title: "T", issue: { number: 14 } } });
+        }
+        if (path === "/deliveries/claim") return Response.json({ ok: true, run: true });
+        if (path === "/deliveries/complete") return Response.json({ ok: false, error: "nope" }, { status: 503 });
+        if (path === "/ack" || path === "/fail" || path === "/release") return Response.json({ ok: true });
+        return Response.json({ ok: false, error: `unexpected ${path}` }, { status: 500 });
+      },
+    };
+
+    const report = await drainRepository({
+      repository: "acme/pair-fail",
+      controlKey: "k",
+      coordinator,
+      broker: { fetch: async () => Response.json({ ok: true }) },
+      executionFn: async () => ({ status: "failure", error: "provider said no", toolCallsCount: 0 }),
+    });
+
+    // Nothing was delivered, so the rejected pair write must not look like a gap:
+    // the event is failed and therefore retried.
+    expect(report.runs[0]?.deliveryError).toBeUndefined();
+    expect(paths).toContain("/fail");
+    expect(paths).not.toContain("/ack");
+    expect(report.failed).toBe(1);
   });
 });

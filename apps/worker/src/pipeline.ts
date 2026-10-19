@@ -649,10 +649,14 @@ export async function runEvent(
       agentKey,
       summary.status === "success" ? "delivered" : "failed",
     );
+    // A rejected write only means "the side effect may have happened" when the run
+    // actually succeeded. For a failed run nothing was delivered, so the event must
+    // stay retryable — recording a gap there acknowledges it and drops the work
+    // (findings cloud-factory-cf-uil / -lbi pair level).
+    const pairGap = summary.status === "success" ? pairDeliveryError : null;
     const actionErrors = (ctx.state["actionDeliveryErrors"] as string[] | undefined) ?? [];
     const deliveryError =
-      [pairDeliveryError, ...actionErrors].filter((entry): entry is string => typeof entry === "string").join("; ") ||
-      null;
+      [pairGap, ...actionErrors].filter((entry): entry is string => typeof entry === "string").join("; ") || null;
     if (summary.status === "failure") {
       return {
         ...base,
