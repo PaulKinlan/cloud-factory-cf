@@ -51,6 +51,7 @@ export {
   githubAdapter,
   gitlabAdapter,
   isDevPlatform,
+  kindOf,
   parseRepositoryKey,
   repositoryKey,
 } from './types/devplatform.ts';

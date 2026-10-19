@@ -295,6 +295,23 @@ export const giteaAdapter: DevPlatformAdapter = {
   webhookPath: (repository) => `/webhooks/gitea/${repository}`,
 };
 
+/**
+ * The raw-event → kind tables behind the adapters, keyed by platform. A stored
+ * delivery keeps its raw event name but not its request headers, so a consumer
+ * (or a row written before the queue carried `kind`) needs the mapping without an
+ * adapter call: this is the same table the adapters use, not a second copy.
+ */
+const KINDS_BY_PLATFORM: Record<DevPlatform, Record<string, SdlcKind>> = {
+  github: GITHUB_KINDS,
+  gitlab: GITLAB_KINDS,
+  gitea: GITEA_KINDS,
+};
+
+/** The canonical kind for a provider's raw event name; `unknown` when unmapped. */
+export function kindOf(platform: DevPlatform, rawEvent: string): SdlcKind {
+  return KINDS_BY_PLATFORM[platform]?.[rawEvent] ?? "unknown";
+}
+
 /** Every adapter the factory ships, keyed by platform. */
 export const devPlatformAdapters: Record<DevPlatform, DevPlatformAdapter> = {
   github: githubAdapter,

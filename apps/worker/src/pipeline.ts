@@ -20,7 +20,12 @@ import {
 import {
   AgentRuntime,
   CoordinatorMemoryStore,
+  canonicalAction,
   createAgentContext,
+  isDevPlatform,
+  kindOf,
+  type SdlcAction,
+  type SdlcKind,
   type ActionSink,
   type AgentContext,
   type AgentExecutionFn,
@@ -60,6 +65,13 @@ export interface ClaimedEvent {
   provider: string;
   event: string;
   action: string | null;
+  /**
+   * Canonical SDLC kind/action written by the ingestion adapters (ADR 003). Absent
+   * or null on a row that predates the columns, which is why every decision goes
+   * through `canonicalView()` rather than reading these directly.
+   */
+  kind?: string | null;
+  canonicalAction?: string | null;
   repository: string;
   actor: string | null;
   attempts: number;
@@ -239,6 +251,33 @@ export interface Decision {
   payload: Record<string, unknown>;
 }
 
+/** The portable view of an event every decision is made on. */
+export interface CanonicalView {
+  kind: SdlcKind;
+  action: SdlcAction;
+}
+
+/**
+ * The canonical event, falling back to the provider's own vocabulary for a row
+ * written before the queue carried `kind` (ADR 003 slice 4). The raw event name is
+ * still stored, so the kind table can be consulted without the request headers the
+ * adapters would otherwise need; the action is mapped by the same `canonicalAction`
+ * the adapters use.
+ */
+export function canonicalView(
+  facts: Pick<EventFacts, "provider" | "event" | "action" | "kind" | "canonicalAction">,
+): CanonicalView {
+  const platform = isDevPlatform(facts.provider) ? facts.provider : null;
+  const stored = typeof facts.kind === "string" && facts.kind.length > 0 ? facts.kind : null;
+  const kind: SdlcKind =
+    stored !== null ? (stored as SdlcKind) : platform === null ? "unknown" : kindOf(platform, facts.event);
+  const action: SdlcAction =
+    typeof facts.canonicalAction === "string" && facts.canonicalAction.length > 0
+      ? (facts.canonicalAction as SdlcAction)
+      : canonicalAction(facts.action);
+  return { kind, action };
+}
+
 /**
  * Everything the deterministic agent does for an event, given the sink types the
  * layout wired. A wired provider sink produces its action; with no wiring (the
@@ -246,13 +285,14 @@ export interface Decision {
  */
 export function actionsFor(facts: EventFacts, wired: readonly string[] | undefined, reviewCount = 0): Decision[] {
   const actions: Decision[] = [];
+  const view = canonicalView(facts);
   const base = decideAction(facts);
   const wiredTypes =
     wired === undefined ? ["github-pr-review", "github-issue-comment"] : canonicalSinkTypes(wired);
   const wants = (type: string) => wiredTypes.includes(type) || wiredTypes.includes("*");
 
   if (base !== null && wants(base.type === "github:pr:review" ? "github-pr-review" : "github-issue-comment")) {
-    if (facts.event === "pull_request") base.payload["body"] = reviewBody(facts, reviewCount);
+    if (view.kind === "merge_request") base.payload["body"] = reviewBody(facts, reviewCount);
     actions.push(base);
   }
   const summary = `#${facts.number ?? "?"} in ${facts.repository}`;
@@ -262,7 +302,7 @@ export function actionsFor(facts: EventFacts, wired: readonly string[] | undefin
       type: "github:issue:create",
       payload: {
         title: `Follow up on ${detail}`,
-        body: `Raised by cloud-factory from ${facts.event}.${facts.action ?? ""}`.trim(),
+        body: `Raised by cloud-factory from ${view.kind}.${view.action ?? ""}`.trim(),
       },
     });
   }
@@ -271,7 +311,7 @@ export function actionsFor(facts: EventFacts, wired: readonly string[] | undefin
       type: "beads:task:create",
       payload: {
         title: `Act on ${detail}`,
-        description: `cloud-factory task for ${facts.event}.${facts.action ?? "-"} (${facts.deliveryId})`,
+        description: `cloud-factory task for ${view.kind}.${view.action ?? "-"} (${facts.deliveryId})`,
         priority: "P2",
       },
     });
@@ -281,7 +321,7 @@ export function actionsFor(facts: EventFacts, wired: readonly string[] | undefin
       type: "telemetry:log",
       payload: {
         level: "info",
-        message: `handled ${facts.event}.${facts.action ?? "-"} for ${facts.repository}`,
+        message: `handled ${view.kind}.${view.action ?? "-"} for ${facts.repository}`,
         attributes: { deliveryId: facts.deliveryId, repository: facts.repository },
       },
     });
@@ -291,14 +331,19 @@ export function actionsFor(facts: EventFacts, wired: readonly string[] | undefin
 
 /**
  * The default agent policy, kept pure so it is unit-testable:
- * - `pull_request.opened|reopened|synchronize` → a COMMENT review;
- * - `issues.opened` → an issue comment;
+ * - a merge request opened or updated → a COMMENT review;
+ * - an issue opened → an issue comment;
  * - everything else → no action (the event is acknowledged and skipped, so the
  *   queue does not spin on events this agent does not care about).
+ *
+ * The rules are stated in the canonical vocabulary, so a GitLab `Merge Request
+ * Hook`/`open` or a Gitea `pull_request`/`synchronize` reaches the decision a GitHub
+ * delivery does (ADR 003). A merged request is deliberately not reviewed.
  */
 export function decideAction(facts: EventFacts): Decision | null {
   const number = facts.number;
-  if (facts.event === "pull_request" && ["opened", "reopened", "synchronize"].includes(facts.action ?? "")) {
+  const view = canonicalView(facts);
+  if (view.kind === "merge_request" && (view.action === "opened" || view.action === "updated")) {
     if (number === null) return null;
     return {
       type: "github:pr:review",
@@ -309,7 +354,7 @@ export function decideAction(facts: EventFacts): Decision | null {
       },
     };
   }
-  if (facts.event === "issues" && facts.action === "opened" && number !== null) {
+  if (view.kind === "issue" && view.action === "opened" && number !== null) {
     return {
       type: "github:issue:comment",
       payload: { issueNumber: number, body: issueBody(facts) },
@@ -332,7 +377,7 @@ export function issueBody(facts: EventFacts): string {
 /** A prompt from the event facts, so a model runtime gets the same context. */
 export function promptFor(facts: EventFacts): string {
   return [
-    `You are reviewing a ${facts.provider} ${facts.event} event (${facts.action ?? "no action"}) in ${facts.repository}.`,
+    `You are reviewing a ${facts.provider} ${facts.event} event (${canonicalView(facts).kind}/${canonicalView(facts).action ?? "no action"}) in ${facts.repository}.`,
     facts.title ? `Title: ${facts.title}` : "",
     facts.actor ? `Triggered by: ${facts.actor}` : "",
     "Decide whether to act and reply.",
