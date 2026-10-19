@@ -57,7 +57,10 @@ contract:
   branch is not invisible (the failure mode of `vitest run --changed` with no ref,
   findings `cloud-factory-cf-gy5`/`l0q`);
 - a changed **source** file (`apps/*/src`, `packages/*/src`) that selects **no**
-  suite is a **failure named on stderr**, not a silent pass;
+  suite is a **failure named on stderr**, not a silent pass (files tested outside
+  Node like `apps/web/src/main.ts`—which is driven in Chrome via CDP—are explicitly
+  listed in `DECLARED_UNVERIFIED` referencing `cloud-factory-cf-5e8`/`d8s`, and trigger
+  the workspace smoke suite instead of failing);
 - a delta with no source changes runs a fixed **smoke set** (`apps/web`'s node
   suite, `apps/worker`'s `worker`/`assets` tests) instead of nothing: a gate that
   executes no suite at all cannot be distinguished from one whose selection broke,

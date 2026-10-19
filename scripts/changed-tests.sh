@@ -34,6 +34,12 @@ fi
 
 is_source() { case "$1" in apps/*/src/*|packages/*/src/*) return 0 ;; *) return 1 ;; esac; }
 
+# Files that are source but have no suite yet. They are named loudly rather than
+# silently passing, and the bead tracks adding a test (cloud-factory-cf-5e8, cloud-factory-cf-d8s).
+# The canvas UI entry point is exercised in the browser, not in node.
+DECLARED_UNVERIFIED="apps/web/src/main.ts"
+is_declared() { case " $DECLARED_UNVERIFIED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
 sources=$(echo "$changed" | while read -r path; do is_source "$path" && echo "$path"; done)
 if [ -z "$sources" ]; then
   # Build/config/docs only: nothing maps to a suite, but a gate that runs no suite
@@ -61,9 +67,27 @@ for ws in apps/web apps/worker; do
   selected=$( (cd "$ws" && npx vitest list --changed "$BASE" --filesOnly 2>/dev/null) | grep -cE '\.test\.ts$' || true)
   if [ "$selected" -eq 0 ]; then
     if [ -n "$ws_sources" ]; then
-      echo "changed-tests: FAIL ${ws} — these changed source files match no suite in this workspace:" >&2
-      echo "$ws_sources" | sed 's/^/  /' >&2
-      status=1
+      undeclared=$(echo "$ws_sources" | while read -r path; do is_declared "$path" || echo "$path"; done)
+      if [ -n "$undeclared" ]; then
+        echo "changed-tests: FAIL ${ws} — these changed source files match no suite in this workspace:" >&2
+        echo "$undeclared" | sed 's/^/  /' >&2
+        status=1
+      fi
+      has_declared=0
+      while read -r path; do
+        if is_declared "$path"; then
+          has_declared=1
+          echo "changed-tests: DECLARED UNVERIFIED $path (no suite yet — cloud-factory-cf-5e8, cloud-factory-cf-d8s)"
+        fi
+      done <<< "$ws_sources"
+      if [ "$has_declared" -eq 1 ] && [ -z "$undeclared" ]; then
+        if [ "$LIST" -eq 1 ]; then
+          echo "changed-tests: ${ws}: whole suite (smoke)"
+          continue
+        fi
+        ran=$((ran + 1))
+        (cd "$ws" && npx vitest run) || status=1
+      fi
     fi
     continue
   fi
