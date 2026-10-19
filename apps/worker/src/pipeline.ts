@@ -14,6 +14,7 @@
 import {
   SINK_TYPES,
   allSinks,
+  canonicalSinkTypes,
   type SinkDeps,
 } from "./action-sinks";
 import {
@@ -233,7 +234,8 @@ export interface Decision {
 export function actionsFor(facts: EventFacts, wired: readonly string[] | undefined, reviewCount = 0): Decision[] {
   const actions: Decision[] = [];
   const base = decideAction(facts);
-  const wiredTypes = wired === undefined ? ["github-pr-review", "github-issue-comment"] : wired;
+  const wiredTypes =
+    wired === undefined ? ["github-pr-review", "github-issue-comment"] : canonicalSinkTypes(wired);
   const wants = (type: string) => wiredTypes.includes(type) || wiredTypes.includes("*");
 
   if (base !== null && wants(base.type === "github:pr:review" ? "github-pr-review" : "github-issue-comment")) {

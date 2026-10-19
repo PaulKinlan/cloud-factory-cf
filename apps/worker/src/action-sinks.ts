@@ -40,6 +40,22 @@ export const SINK_TYPES: Record<string, string> = {
   "cloud-telemetry": "cloud-telemetry-sink",
 };
 
+/**
+ * The canvas's older sink names, resolved to the type the pipeline compares
+ * against. `SINK_TYPES` alone is not enough: the run also decides which *action*
+ * to emit from the wired names, so both paths have to speak one vocabulary
+ * (cloud-factory-cf-w45).
+ */
+export const CANONICAL_SINK_TYPES: Record<string, string> = {
+  "github-issue": "github-issue-comment",
+  beads: "beads-task",
+};
+
+/** Resolves a layout's sink names to the canonical types the pipeline uses. */
+export function canonicalSinkTypes(types: readonly string[]): string[] {
+  return types.map((type) => CANONICAL_SINK_TYPES[type] ?? type);
+}
+
 /** Sink name → the action types it accepts, so a decision can target it. */
 export const SINK_ACTIONS: Record<string, string> = {
   "github-pr-review-sink": "github:pr:review",

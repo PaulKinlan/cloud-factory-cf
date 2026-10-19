@@ -2,7 +2,7 @@ import { SELF, env } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentContext } from "@factory-cloud/sdk";
 import { SINK_TYPES, allSinks, telemetrySink } from "../src/action-sinks";
-import { sinksFor } from "../src/pipeline";
+import { actionsFor, sinksFor } from "../src/pipeline";
 import { signBody, TEST_SECRET } from "./support/webhook";
 
 /**
@@ -296,5 +296,66 @@ describe("provider rejections fail the action (cloud-factory-cf-2f5)", () => {
     const report = await run(documentId);
     expect(report.failed).toBe(1);
     expect(report.agents[0]?.error ?? "").toContain("beads task.create answered 503");
+  });
+});
+
+describe("the legacy canvas names decide actions too (cloud-factory-cf-w45)", () => {
+  const issueOpened = {
+    deliveryId: "w45-issue",
+    provider: "github",
+    event: "issues",
+    action: "opened",
+    repository: "acme/action-sinks",
+    actor: "octocat",
+    number: 7,
+    title: "Something broke",
+    prNumber: null,
+  };
+
+  it("emits the issue comment for a Github issue event wired as `github-issue`", () => {
+    const legacy = actionsFor(issueOpened as never, ["github-issue"]);
+    const canonical = actionsFor(issueOpened as never, ["github-issue-comment"]);
+    expect(legacy.map((action) => action.type)).toEqual(["github:issue:comment"]);
+    expect(legacy).toEqual(canonical);
+  });
+
+  it("emits the beads task for a layout wired as `beads`", () => {
+    const legacy = actionsFor(issueOpened as never, ["beads"]);
+    const canonical = actionsFor(issueOpened as never, ["beads-task"]);
+    expect(legacy.map((action) => action.type)).toEqual(["beads:task:create"]);
+    expect(legacy).toEqual(canonical);
+  });
+
+  it("delivers end to end for a document saved with the old name", async () => {
+    // The canvas UI saved `github-issue`; the agent has to comment, not run dry.
+    await provision("github", "issue.comment");
+    const documentId = await storeDocument(layout("github-issue", { event: "issues" }));
+    deliverySeq += 1;
+    const deliveryId = `legacy-${deliverySeq}`;
+    const payload = JSON.stringify({
+      action: "opened",
+      number: 21,
+      delivery: deliveryId,
+      sender: { login: "octocat" },
+      repository: { full_name: REPOSITORY },
+      issue: { number: 21, title: "Legacy document" },
+    });
+    const accepted = await SELF.fetch(`https://example.com/webhooks/github/${REPOSITORY}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": deliveryId,
+        "x-github-event": "issues",
+        "x-hub-signature-256": await signBody(TEST_SECRET, payload),
+      },
+      body: payload,
+    });
+    expect(accepted.status).toBe(202);
+    const { calls } = stubUpstream();
+
+    const report = await run(documentId);
+    expect(report.failed).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(`https://api.github.com/repos/${REPOSITORY}/issues/21/comments`);
   });
 });
