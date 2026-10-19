@@ -226,6 +226,22 @@ export function createShareTracker(initial: Record<string, string> = {}): ShareT
 }
 
 /**
+ * Which repository a loaded document belongs to: the one the request was made
+ * against, never whichever the field says when the response arrives (finding
+ * cloud-factory-cf-qd6 — an in-flight repository edit used to rebind the
+ * document, and the next save wrote it into the wrong repository).
+ */
+export interface LoadBinding {
+  bound: string;
+  repositoryChanged: boolean;
+}
+
+export function bindLoadedDocument(requested: string, current: string): LoadBinding {
+  const bound = requested.trim();
+  return { bound, repositoryChanged: bound !== current.trim() };
+}
+
+/**
  * Decides whether a save updates a document or creates one.
  *
  * Owning a per-repository id is not enough: the *canvas* can be bound to a

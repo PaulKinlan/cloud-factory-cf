@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createSampleDoc, serialize } from "../src/model";
 import {
+  bindLoadedDocument,
   createShareTracker,
   describeShareFailure,
   documentRequest,
@@ -272,5 +273,30 @@ describe("restoring a page (cloud-factory-cf-aju reload regression)", () => {
     expect(planSave(tracker, reloaded.bound, "owner/beta2")).toEqual({ id: "beta-original", newCopy: false });
     // ...while any other repository still gets a copy.
     expect(planSave(tracker, reloaded.bound, "owner/alpha2")).toEqual({ id: null, newCopy: true });
+  });
+});
+
+describe("in-flight load binding (cloud-factory-cf-qd6)", () => {
+  it("binds the document to the repository it was requested from", () => {
+    // Repository edited from alpha to beta while the alpha GET is in flight.
+    expect(bindLoadedDocument("owner/alpha", "owner/beta")).toEqual({
+      bound: "owner/alpha",
+      repositoryChanged: true,
+    });
+    // Unchanged field: normal case, no note.
+    expect(bindLoadedDocument("owner/alpha", "owner/alpha ")).toEqual({
+      bound: "owner/alpha",
+      repositoryChanged: false,
+    });
+  });
+
+  it("keeps the next save out of the repository that was selected mid-request", () => {
+    const tracker = createShareTracker({ "owner/beta": "beta-original" });
+    const binding = bindLoadedDocument("owner/alpha", "owner/beta");
+    tracker.remember(binding.bound, "alpha-id");
+    // Alpha's document stays bound to alpha, so saving while the field says beta
+    // cannot PUT over beta's own document.
+    expect(planSave(tracker, binding.bound, "owner/beta")).toEqual({ id: null, newCopy: true });
+    expect(planSave(tracker, binding.bound, "owner/alpha")).toEqual({ id: "alpha-id", newCopy: false });
   });
 });

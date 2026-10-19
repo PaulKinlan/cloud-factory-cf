@@ -1,4 +1,5 @@
 import {
+  bindLoadedDocument,
   describeShareFailure,
   createShareTracker,
   documentRequest,
@@ -561,7 +562,12 @@ async function refreshDocumentList(): Promise<void> {
 
 async function loadDocument(id: string, name: string): Promise<void> {
   setShareStatus(`Loading “${name}”…`);
-  const result = await sendShare(documentRequest(location.origin, shareTarget(), id));
+  // The repository is captured with the request: the document that comes back
+  // belongs to the repository it was asked of, even if the field is edited while
+  // the request is in flight (finding cloud-factory-cf-qd6). Otherwise an alpha
+  // document would be bound to beta and the next save would write it there.
+  const target = shareTarget();
+  const result = await sendShare(documentRequest(location.origin, target, id));
   if (!result) return;
   if (result.status !== 200) {
     setShareStatus(describeShareFailure(result.status, result.payload));
@@ -575,14 +581,19 @@ async function loadDocument(id: string, name: string): Promise<void> {
   doc = stored.document;
   selectedId = doc.nodes[0]?.id ?? null;
   connectFrom = null;
-  shareIds.remember(shareTarget().repository, id);
-  boundRepository = shareTarget().repository;
+  const binding = bindLoadedDocument(target.repository, shareRepository.value);
+  shareIds.remember(binding.bound, id);
+  boundRepository = binding.bound;
   saveNow();
   shareName.value = stored.name;
   persist();
   render();
   rememberShareTarget();
-  setShareStatus(`Loaded “${stored.name}” and replaced the current canvas`);
+  setShareStatus(
+    binding.repositoryChanged
+      ? `Loaded “${stored.name}” from ${binding.bound}; the Repository field changed while loading, so that is the copy this canvas belongs to`
+      : `Loaded “${stored.name}” and replaced the current canvas`,
+  );
 }
 
 required<HTMLButtonElement>("export-copy").addEventListener("click", async () => {
