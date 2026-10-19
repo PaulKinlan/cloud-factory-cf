@@ -1,5 +1,5 @@
 export interface CliParsedArgs {
-  command: 'run' | 'worker' | 'studio' | 'review' | 'webhook' | 'help' | 'version';
+  command: 'run' | 'worker' | 'studio' | 'review' | 'webhook' | 'audit' | 'help' | 'version';
   studioAction?: 'author' | 'test' | 'list';
   prompt?: string;
   cwd?: string;
@@ -24,6 +24,9 @@ export interface CliParsedArgs {
   payload?: string;
   drain?: boolean;
   controlKey?: string;
+  deliveryId?: string;
+  status?: string;
+  json?: boolean;
 }
 
 export interface CliIo {

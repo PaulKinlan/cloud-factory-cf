@@ -6,6 +6,7 @@ import {
   handleStudioCommand,
   handleReviewCommand,
   handleWebhookCommand,
+  handleAuditCommand,
 } from './commands/index.ts';
 
 export type { CliParsedArgs, CliIo, CommandContext };
@@ -24,7 +25,7 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
     return { command: 'help' };
   }
   const rest = args.slice(1);
-  let command: 'run' | 'worker' | 'studio' | 'review' | 'webhook' | 'help' | 'version' = 'run';
+  let command: 'run' | 'worker' | 'studio' | 'review' | 'webhook' | 'audit' | 'help' | 'version' = 'run';
   let studioAction: 'author' | 'test' | 'list' | undefined;
   let remaining = rest;
 
@@ -36,6 +37,8 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
     command = 'review';
   } else if (first === 'webhook') {
     command = 'webhook';
+  } else if (first === 'audit') {
+    command = 'audit';
   } else if (first === 'studio') {
     command = 'studio';
     if (rest.length > 0 && !rest[0]!.startsWith('-')) {
@@ -77,6 +80,9 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
   let payload: string | undefined;
   let drain: boolean | undefined;
   let controlKey: string | undefined;
+  let deliveryId: string | undefined;
+  let status: string | undefined;
+  let json: boolean | undefined;
   const extensions: string[] = [];
 
   for (let i = 0; i < remaining.length; i++) {
@@ -133,8 +139,18 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
       drain = true;
     } else if (arg === '--control-key' && i + 1 < remaining.length) {
       controlKey = remaining[++i];
+    } else if (arg === '--key' && i + 1 < remaining.length) {
+      controlKey = remaining[++i];
+    } else if ((arg === '--delivery' || arg === '--delivery-id') && i + 1 < remaining.length) {
+      deliveryId = remaining[++i];
+    } else if (arg === '--status' && i + 1 < remaining.length) {
+      status = remaining[++i];
+    } else if (arg === '--json') {
+      json = true;
     } else if (!arg.startsWith('-')) {
-      if (command === 'studio' && studioAction === 'test' && !manifestPath) {
+      if (command === 'audit' && !repo) {
+        repo = arg;
+      } else if (command === 'studio' && studioAction === 'test' && !manifestPath) {
         manifestPath = arg;
       } else if (!prompt) {
         prompt = arg;
@@ -168,6 +184,9 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
     payload,
     drain,
     controlKey,
+    deliveryId,
+    status,
+    json,
   };
 }
 
@@ -179,6 +198,7 @@ USAGE:
   factory-cloud worker [options]             Run a local queue worker polling RepoCoordinator
   factory-cloud review [options]             Self-hosted PR reviewer agent (dogfooding)
   factory-cloud webhook [options]            Dispatch signed GitHub webhook to Worker & drain
+  factory-cloud audit <owner/repo> [options] Query DO event audit log and delivery history
   factory-cloud studio author <prompt>       Synthesize agent manifest from natural language
   factory-cloud studio test <manifest.json>  Simulate agent execution in test harness
   factory-cloud studio list [options]        List installed agents
@@ -207,6 +227,9 @@ OPTIONS:
   --payload <json/file>  Webhook payload JSON string or file path
   --drain                Trigger queue drain after posting webhook
   --control-key <key>    Bearer control key for queue drain
+  --delivery <id>        Delivery ID to inspect single event detail and agent deliveries
+  --status <status>      Filter events by status (pending, processing, processed, failed)
+  --json                 Output machine-readable JSON
 `;
 }
 
@@ -247,6 +270,8 @@ export async function runCli(
       return handleReviewCommand(parsed, context);
     case 'webhook':
       return handleWebhookCommand(parsed, context);
+    case 'audit':
+      return handleAuditCommand(parsed, context);
     default:
       return 0;
   }

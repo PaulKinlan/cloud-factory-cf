@@ -3,6 +3,7 @@ import { handleBroker } from "./routes/broker";
 import { handleStudio } from "./routes/studio";
 import { handleCanvas } from "./routes/canvas";
 import { handleRuns } from "./routes/runs";
+import { handleAudit } from "./routes/audit";
 import { handleTrace } from "./routes/trace";
 import { handleWebhooks } from "./routes/webhooks";
 import { serveAsset } from "./routes/assets";
@@ -36,6 +37,9 @@ export default {
 
     const runResponse = await handleRuns(request, env, url);
     if (runResponse) return runResponse;
+
+    const auditResponse = await handleAudit(request, env, url);
+    if (auditResponse) return auditResponse;
 
     const traceResponse = await handleTrace(request, env, url);
     if (traceResponse) return traceResponse;

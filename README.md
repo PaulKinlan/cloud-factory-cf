@@ -22,7 +22,8 @@ Gate commands, their measured cost and the test-tier rules live in
 agent prompts or runtimes) is described in
 [docs/credentials.md](docs/credentials.md). Every run is traced: the execution
 steps, a live socket and the usage/cost HUD are documented in
-[docs/observability.md](docs/observability.md), and
+[docs/observability.md](docs/observability.md); the DO event audit log API and
+historical view are documented in [docs/audit.md](docs/audit.md); and
 [docs/deploy.md](docs/deploy.md) covers deployment (CLI and dashboard import),
 the `wrangler.jsonc` bindings/secrets and the GitHub App webhook setup.
 

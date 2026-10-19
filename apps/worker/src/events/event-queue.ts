@@ -364,27 +364,52 @@ export class EventQueue {
   listEvents(url: URL): Response {
     const limit = clampInt(url.searchParams.get("limit"), 1, 200, 50);
     const status = url.searchParams.get("status");
-    const rows = status
-      ? this.sql
-          .exec<EventRow>(
-            `SELECT ${EVENT_COLUMNS} FROM events WHERE status = ?
-             ORDER BY received_at DESC LIMIT ?`,
-            status,
-            limit,
-          )
-          .toArray()
-      : this.sql
-          .exec<EventRow>(
-            `SELECT ${EVENT_COLUMNS} FROM events ORDER BY received_at DESC LIMIT ?`,
-            limit,
-          )
-          .toArray();
+    const deliveryId = url.searchParams.get("deliveryId");
+    const event = url.searchParams.get("event");
+
+    const clauses: string[] = [];
+    const params: SqlStorageValue[] = [];
+
+    if (deliveryId) {
+      clauses.push("delivery_id = ?");
+      params.push(deliveryId);
+    }
+    if (status) {
+      clauses.push("status = ?");
+      params.push(status);
+    }
+    if (event) {
+      clauses.push("event = ?");
+      params.push(event);
+    }
+
+    const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
+    const query = `SELECT ${EVENT_COLUMNS} FROM events${where} ORDER BY received_at DESC LIMIT ?`;
+    params.push(limit);
+
+    const rows = this.sql.exec<EventRow>(query, ...params).toArray();
 
     return Response.json({
       ok: true,
       count: rows.length,
       events: rows.map(toWireEvent),
     });
+  }
+
+  findEvent(deliveryId: string): (WireEvent & { payload: unknown }) | null {
+    if (deliveryId.length === 0) return null;
+    const rows = this.sql
+      .exec<EventRow & { payload: string }>(
+        `SELECT ${EVENT_COLUMNS}, payload FROM events WHERE delivery_id = ?`,
+        deliveryId,
+      )
+      .toArray();
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      ...toWireEvent(row),
+      payload: safeParseJson(row.payload),
+    };
   }
 
   statusCounts(): Record<string, number> {
@@ -456,7 +481,22 @@ interface EventRow extends Record<string, SqlStorageValue> {
   lease_id: string | null;
 }
 
-function toWireEvent(row: EventRow) {
+export interface WireEvent {
+  deliveryId: string;
+  provider: string;
+  event: string;
+  action: string | null;
+  repository: string;
+  actor: string | null;
+  receivedAt: string;
+  status: string;
+  attempts: number;
+  availableAt: string;
+  lastError: string | null;
+  leaseId: string | null;
+}
+
+export function toWireEvent(row: EventRow): WireEvent {
   return {
     deliveryId: row.delivery_id,
     provider: row.provider,

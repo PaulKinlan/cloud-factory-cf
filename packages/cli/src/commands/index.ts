@@ -3,3 +3,4 @@ export { handleWorkerCommand } from './worker.ts';
 export { handleStudioCommand } from './studio.ts';
 export { handleReviewCommand } from './review.ts';
 export { handleWebhookCommand } from './webhook.ts';
+export { handleAuditCommand } from './audit.ts';
