@@ -249,6 +249,10 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
       setStatus("Not checked yet", "muted");
       return;
     }
+    const owner = ownerInput?.value.trim() ?? "";
+    if (owner && repoSelect && repoSelect.options.length <= 1) {
+      void loadAuthorizedRepos(owner);
+    }
     void poller.check().finally(() => {
       if (!poller.state.paused) poller.start();
     });
@@ -281,7 +285,14 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
   async function loadAuthorizedRepos(owner: string): Promise<void> {
     if (!owner || repoSelect === null) return;
     try {
-      const res = await (options.fetchImpl ?? fetch)(`${base}/api/repos?owner=${encodeURIComponent(owner)}`);
+      const headers: Record<string, string> = {};
+      const key = keyInput?.value.trim() ?? "";
+      if (key.length > 0) {
+        headers["x-factory-control-key"] = key;
+      }
+      const res = await (options.fetchImpl ?? fetch)(`${base}/api/repos?owner=${encodeURIComponent(owner)}`, {
+        headers,
+      });
       if (!res.ok) return;
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;

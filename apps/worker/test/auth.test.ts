@@ -80,8 +80,22 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(location).toContain(`owner=${testUser}`);
     expect(location).toContain("installation_id=inst_456");
 
-    // 4. Query /api/repos to verify repos are persisted in OrgCoordinator
-    const reposRes = await SELF.fetch(`https://example.com/api/repos?owner=${testUser}`);
+    // 4. Verify /api/repos requires control-key authentication
+    const unauthRes = await SELF.fetch(`https://example.com/api/repos?owner=${testUser}`);
+    expect(unauthRes.status).toBe(401);
+    const unauthData = (await unauthRes.json()) as any;
+    expect(unauthData.ok).toBe(false);
+    expect(unauthData.error).toContain("not authorised");
+
+    const wrongKeyRes = await SELF.fetch(`https://example.com/api/repos?owner=${testUser}`, {
+      headers: { "x-factory-control-key": "invalid-secret" },
+    });
+    expect(wrongKeyRes.status).toBe(401);
+
+    // 5. Query /api/repos with valid control key to verify repos are persisted in OrgCoordinator
+    const reposRes = await SELF.fetch(`https://example.com/api/repos?owner=${testUser}`, {
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
     expect(reposRes.status).toBe(200);
     const reposData = (await reposRes.json()) as any;
     expect(reposData.ok).toBe(true);
@@ -89,5 +103,36 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(reposData.repositories).toHaveLength(2);
     expect(reposData.repositories[0].fullName).toBe("octodev/widget-service");
     expect(reposData.repositories[1].isPrivate).toBe(true);
+  });
+
+  it("/api/repos: rejects unauthenticated requests, bad methods, and missing parameters", async () => {
+    // 1. Unauthenticated request without control key is rejected with 401
+    const noAuth = await SELF.fetch("https://example.com/api/repos?owner=octodev");
+    expect(noAuth.status).toBe(401);
+    const noAuthJson = (await noAuth.json()) as any;
+    expect(noAuthJson.ok).toBe(false);
+    expect(noAuthJson.error).toContain("not authorised");
+
+    // 2. Request with invalid control key is rejected with 401
+    const badKey = await SELF.fetch("https://example.com/api/repos?owner=octodev", {
+      headers: { "x-factory-control-key": "bad-key-guess" },
+    });
+    expect(badKey.status).toBe(401);
+
+    // 3. Disallowed HTTP methods return 405
+    const postReq = await SELF.fetch("https://example.com/api/repos?owner=octodev", {
+      method: "POST",
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(postReq.status).toBe(405);
+
+    // 4. Missing ?owner returns 400
+    const missingOwner = await SELF.fetch("https://example.com/api/repos", {
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(missingOwner.status).toBe(400);
+    const missingOwnerJson = (await missingOwner.json()) as any;
+    expect(missingOwnerJson.ok).toBe(false);
+    expect(missingOwnerJson.error).toContain("Missing required query parameter ?owner");
   });
 });

@@ -1,4 +1,5 @@
 import type { Env } from "../env";
+import { sameSecret } from "../secrets";
 
 export const AUTH_LOGIN_PATH = "/auth/github/login";
 export const AUTH_CALLBACK_PATH = "/auth/github/callback";
@@ -197,6 +198,20 @@ export async function handleApiRepos(
   env: Env,
   url: URL,
 ): Promise<Response> {
+  const controlKey = env.BROKER_CONTROL_KEY;
+  if (!controlKey) {
+    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
+  }
+
+  const presented = request.headers.get("x-factory-control-key");
+  if (!(await sameSecret(controlKey, presented))) {
+    return Response.json({ ok: false, error: "not authorised to access repository metadata" }, { status: 401 });
+  }
+
+  if (request.method !== "GET") {
+    return new Response("method not allowed", { status: 405 });
+  }
+
   const owner = url.searchParams.get("owner");
   if (!owner) {
     return Response.json(
