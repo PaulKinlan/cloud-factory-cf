@@ -48,7 +48,15 @@ Slices:
    `kind: null`.
 3. DO addressing: prefix `RepoCoordinator` names with the platform and migrate the
    existing `owner/repo` rows.
-4. Sinks: speak `SdlcEvent` rather than provider payloads.
+4. **Done (6to.4), pipeline half:** `decideAction`/`actionsFor` reason about the
+   canonical event (`canonicalView()` → `kind` + `canonicalAction`) instead of the
+   provider's event names, so a GitLab `Merge Request Hook`/`open` and a Gitea
+   `pull_request`/`synchronize` reach the same review the GitHub equivalent does.
+   A row written before the queue carried `kind` falls back to the shared
+   `kindOf(platform, rawEvent)` table, so nothing queued earlier stops being handled.
+   The remaining half — each sink building its own provider request from the
+   canonical event (a GitLab review via `pr.review` on GitLab's API) — is slice 5,
+   because the broker's provider calls are per-service and out of scope here.
 
 ## Consequences
 

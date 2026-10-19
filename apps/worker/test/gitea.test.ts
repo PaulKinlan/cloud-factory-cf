@@ -1,5 +1,6 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { decideAction, type EventFacts } from "../src/pipeline";
 import { signBody } from "./support/webhook";
 
 /**
@@ -62,6 +63,28 @@ describe("gitea webhooks", () => {
       actor: "forge-user",
       status: "pending",
     });
+  });
+
+  it("turns the queued Gitea row into the same review action a GitHub PR gets", async () => {
+    // The whole slice: ingest a Gitea delivery, read the row the queue actually
+    // stores, and let the pipeline decide on it. No provider-specific branch.
+    const response = await SELF.fetch(await giteaRequest("forge/decision-repo", { delivery: "gitea-decide" }));
+    expect(response.status).toBe(202);
+
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("forge/decision-repo"));
+    const listed = (await (await stub.fetch(`${BASE}/events`)).json()) as {
+      events: Array<Record<string, unknown>>;
+    };
+    const row = listed.events.find((entry) => entry["deliveryId"] === "gitea-decide");
+    expect(row).toBeDefined();
+
+    const facts = {
+      ...(row as unknown as EventFacts),
+      payload: { action: "opened", number: 4, repository: { full_name: "forge/decision-repo" } },
+      number: 4,
+      title: "Add the adapter",
+    } satisfies EventFacts;
+    expect(decideAction(facts)).toMatchObject({ type: "github:pr:review", payload: { prNumber: 4 } });
   });
 
   it("accepts a Forgejo delivery through the same route and adapter", async () => {

@@ -1,6 +1,7 @@
 import { SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  canonicalView,
   decideAction,
   drainRepository,
   numberFrom,
@@ -157,6 +158,48 @@ describe("pipeline decisions", () => {
     expect(decideAction(facts({ number: null }))).toBeNull();
     expect(decideAction(facts({ event: "push", action: null }))).toBeNull();
     expect(decideAction(facts({ event: "issues", action: "opened" }))?.type).toBe("github:issue:comment");
+  });
+
+  it("decides on the canonical event, so GitLab and Gitea reach the same action", () => {
+    // GitLab Merge Request Hook: raw event + action are provider words; the queue row
+    // carries kind/canonicalAction, and that is what the decision reads (ADR 003).
+    const gitlab = facts({
+      provider: "gitlab",
+      event: "Merge Request Hook",
+      action: "open",
+      kind: "merge_request",
+      canonicalAction: "opened",
+    });
+    expect(decideAction(gitlab)).toMatchObject({ type: "github:pr:review", payload: { prNumber: 7 } });
+
+    const gitea = facts({
+      provider: "gitea",
+      event: "pull_request",
+      action: "synchronize",
+      kind: "merge_request",
+      canonicalAction: "updated",
+    });
+    expect(decideAction(gitea)?.type).toBe("github:pr:review");
+
+    // A merged request is not reviewed, whatever the provider called it.
+    expect(decideAction(facts({ kind: "merge_request", canonicalAction: "merged" }))).toBeNull();
+
+    // An issue through GitLab is still an issue.
+    const issue = facts({ provider: "gitlab", event: "Issue Hook", action: "open", kind: "issue", canonicalAction: "opened" });
+    expect(decideAction(issue)?.type).toBe("github:issue:comment");
+  });
+
+  it("falls back to the provider vocabulary for a row written before the columns", () => {
+    // Legacy rows have no kind: the raw event name still maps through the shared
+    // kind table, so nothing that was queued before slice 2 stops being handled.
+    expect(canonicalView(facts({ kind: null, canonicalAction: null }))).toEqual({
+      kind: "merge_request",
+      action: "opened",
+    });
+    expect(decideAction(facts({ action: "synchronize", kind: null, canonicalAction: null }))?.type).toBe(
+      "github:pr:review",
+    );
+    expect(canonicalView(facts({ provider: "unknown-forge", kind: null })).kind).toBe("unknown");
   });
 
   it("reads the number and title out of the shapes providers actually send", () => {
