@@ -721,6 +721,18 @@ describe("GitHub OAuth & App Install Flow", () => {
       expect(noIdCallbackRes.status).toBe(503);
       const noIdCallbackJson = (await noIdCallbackRes.json()) as any;
       expect(noIdCallbackJson.error).toContain("GitHub OAuth credentials are not configured in environment");
+
+      // Blank GITHUB_CLIENT_SECRET alone with GITHUB_CLIENT_ID restored (cloud-factory-cf-mesa)
+      (env as any).GITHUB_CLIENT_ID = origId;
+      (env as any).GITHUB_CLIENT_SECRET = "";
+
+      const noSecretCallbackRes = await SELF.fetch(
+        `https://example.com/auth/github/callback?code=valid_code&state=${state}`,
+        { method: "GET", headers: { cookie: cookieHeader } },
+      );
+      expect(noSecretCallbackRes.status).toBe(503);
+      const noSecretCallbackJson = (await noSecretCallbackRes.json()) as any;
+      expect(noSecretCallbackJson.error).toContain("GitHub OAuth credentials are not configured in environment");
     } finally {
       (env as any).GITHUB_CLIENT_ID = origId;
       (env as any).GITHUB_CLIENT_SECRET = origSecret;
