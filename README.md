@@ -57,6 +57,26 @@ npm run dev -w @factory-cloud/web     # Vite dev server on :5173 (canvas only)
 See [apps/web/README.md](apps/web/README.md) for the wiring rules, the exported
 contract and the keyboard model.
 
+## Canvas documents (per repository Durable Object)
+
+A canvas layout can be stored with the repository so it is not stuck in one
+operator's browser. Documents live in the repository's `RepoCoordinator` SQLite
+and are control-plane data (a layout names agents and actions), so every call
+needs `x-factory-control-key`:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /canvas/:owner/:repo/documents` | list (id, name, timestamps) |
+| `PUT /canvas/:owner/:repo/documents` | create — server assigns the id (201) |
+| `PUT /canvas/:owner/:repo/documents/:id` | create-or-update that id (200/201) |
+| `GET /canvas/:owner/:repo/documents/:id` | fetch name + document |
+| `DELETE /canvas/:owner/:repo/documents/:id` | delete (404 when absent) |
+
+The document is validated before storage: `version: 1`, `nodes`/`edges` arrays,
+at most 500 nodes and 2 000 edges, at most 256 KiB, names under 120 characters,
+and at most 200 documents per repository. A body the canvas could not load is a
+400 rather than a stored trap.
+
 ## Event pipeline (per repository Durable Object)
 
 Each `<provider>/<owner>/<repo>` endpoint maps to one `RepoCoordinator` Durable

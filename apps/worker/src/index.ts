@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { sameSecret } from "./secrets";
 import { MAX_WEBHOOK_BYTES } from "./webhooks";
 
 // Durable Object classes are resolved from the Worker's main module, so they
@@ -8,6 +9,7 @@ export { OrgCoordinator } from "./org-coordinator";
 export { RepoCoordinator } from "./repo-coordinator";
 
 const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
+const CANVAS_PATH = /^\/canvas\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/documents(?:\/(?<id>[^/]+))?$/;
 const BROKER_PATH =
   /^\/broker\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>capabilities|permissions|proxy|audit)$/;
 
@@ -46,6 +48,12 @@ export default {
         operation: string;
       };
       return routeBroker(request, env, owner, repo, operation, url.search);
+    }
+
+    const canvas = CANVAS_PATH.exec(url.pathname);
+    if (canvas?.groups) {
+      const { owner, repo, id } = canvas.groups as { owner: string; repo: string; id?: string };
+      return routeCanvas(request, env, owner, repo, id);
     }
 
     const match = WEBHOOK_PATH.exec(url.pathname);
@@ -91,6 +99,40 @@ export default {
  * Routes to the per-repository credential broker. The agent's request carries a
  * capability, never a credential; the object in front of the secrets decides.
  */
+/**
+ * Canvas documents live in the repository's coordinator object. They are
+ * control-plane data (a layout names agents and actions), so every method needs
+ * the same control key the broker uses.
+ */
+async function routeCanvas(
+  request: Request,
+  env: Env,
+  owner: string,
+  repo: string,
+  id: string | undefined,
+): Promise<Response> {
+  const controlKey = env.BROKER_CONTROL_KEY;
+  if (!controlKey) {
+    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
+  }
+  if (!(await sameSecret(controlKey, request.headers.get("x-factory-control-key")))) {
+    return Response.json({ ok: false, error: "not authorised to read or write canvas documents" }, { status: 401 });
+  }
+  if (!["GET", "PUT", "DELETE"].includes(request.method)) {
+    return new Response("method not allowed", { status: 405 });
+  }
+
+  const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`${owner}/${repo}`));
+  const target = id === undefined ? "/canvas" : `/canvas/${encodeURIComponent(id)}`;
+  return stub.fetch(
+    new Request(`https://repo-coordinator.internal${target}`, {
+      method: request.method,
+      headers: { "content-type": "application/json" },
+      body: request.method === "PUT" ? await request.text() : undefined,
+    }),
+  );
+}
+
 async function routeBroker(
   request: Request,
   env: Env,
