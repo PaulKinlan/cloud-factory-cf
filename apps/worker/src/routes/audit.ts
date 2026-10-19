@@ -67,14 +67,16 @@ export async function handleAudit(
 
   // domain === "events"
   if (id === "stats") {
-    // If an event with deliveryId "stats" exists, return its detail view
-    const detailRes = await coordinator.fetch("https://repo-coordinator.internal/events/stats?detail=1");
-    if (detailRes.ok) {
-      const body = (await detailRes.json()) as Record<string, unknown>;
-      return Response.json(body, { status: 200 });
+    // If not explicitly requesting counts, check if an event with deliveryId "stats" exists:
+    if (!url.searchParams.has("counts")) {
+      const detailRes = await coordinator.fetch("https://repo-coordinator.internal/events/stats?detail=1");
+      if (detailRes.ok) {
+        const body = (await detailRes.json()) as Record<string, unknown>;
+        return Response.json(body, { status: 200 });
+      }
     }
 
-    const res = await coordinator.fetch("https://repo-coordinator.internal/events/stats?counts=1");
+    const res = await coordinator.fetch("https://repo-coordinator.internal/events/stats");
     const body = (await res.json()) as { ok?: boolean; counts?: Record<string, number> };
     return Response.json(
       {

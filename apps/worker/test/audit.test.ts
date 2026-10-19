@@ -229,13 +229,27 @@ describe("DO event audit log API", () => {
     expect(detailBody.event.deliveryId).toBe("stats");
     expect(detailBody.deliveries).toBeDefined();
 
-    // Query param /audit/events/:owner/:repo?deliveryId=stats also returns the event list with the event
+    // Query param /audit/events/:owner/:repo?deliveryId=stats also returns the event list with the event and preserved stats breakdown
     const listRes = await callAudit(`/audit/events/${repository}?deliveryId=stats`, authHeaders);
     expect(listRes.status).toBe(200);
     const listBody = (await listRes.json()) as any;
     expect(listBody.ok).toBe(true);
     expect(listBody.count).toBe(1);
     expect(listBody.events[0].deliveryId).toBe("stats");
+    expect(listBody.stats["pending"]).toBe(1);
+
+    // Event list all events maintains stats breakdown counts (cloud-factory-cf-xib7)
+    const listAllRes = await callAudit(`/audit/events/${repository}`, authHeaders);
+    expect(listAllRes.status).toBe(200);
+    const listAllBody = (await listAllRes.json()) as any;
+    expect(listAllBody.stats["pending"]).toBe(1);
+
+    // Public /stats?counts=1 route returns status breakdown counts even for repos holding 'stats' delivery
+    const countsRes = await callAudit(`/audit/events/${repository}/stats?counts=1`, authHeaders);
+    expect(countsRes.status).toBe(200);
+    const countsBody = (await countsRes.json()) as any;
+    expect(countsBody.ok).toBe(true);
+    expect(countsBody.stats["pending"]).toBe(1);
   });
 
   it("lists canvas run audits via /audit/runs", async () => {

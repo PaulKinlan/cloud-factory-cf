@@ -106,7 +106,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       return this.eventQueue.listEvents(url);
     }
     if (request.method === "GET" && url.pathname === "/events/stats") {
-      if (url.searchParams.get("detail") === "1" || (this.eventQueue.findEvent("stats") && !url.searchParams.has("counts"))) {
+      if (url.searchParams.get("detail") === "1") {
         return this.eventDetail("stats");
       }
       return Response.json({
