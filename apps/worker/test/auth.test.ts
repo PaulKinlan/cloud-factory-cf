@@ -30,21 +30,7 @@ function setupDefaultFetch() {
           },
         );
       }
-      if (url.includes("/api.github.com/app/installations/") || url.includes("/api.github.com/user/installations/")) {
-        if (url.includes("/repositories")) {
-          return new Response(
-            JSON.stringify({
-              total_count: 1,
-              repositories: [
-                { id: 10, full_name: "acme/widget", name: "widget", private: false, default_branch: "main", owner: { login: "acme" } },
-              ],
-            }),
-            {
-              status: 200,
-              headers: { "content-type": "application/json" },
-            },
-          );
-        }
+      if (url.includes("/api.github.com/app/installations/")) {
         return new Response(JSON.stringify({ id: 789, account: { login: "acme", type: "Organization" } }), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -584,7 +570,7 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(evilInstallRes.status).toBe(502);
     const evilJson = (await evilInstallRes.json()) as any;
     expect(evilJson.ok).toBe(false);
-    expect(evilJson.error).toContain("GitHub installation endpoint failed with HTTP 401");
+    expect(evilJson.error).toContain("GitHub App installation endpoint requires an App JWT");
 
     // Ensure victimorg's authorized_repos remained empty / untouched
     const victimReposRes = await SELF.fetch("https://example.com/api/repos?owner=victimorg", {
@@ -620,7 +606,7 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(failReposRes.status).toBe(502);
     const failJson = (await failReposRes.json()) as any;
     expect(failJson.ok).toBe(false);
-    expect(failJson.error).toContain("GitHub installation repositories failed with HTTP 500");
+    expect(failJson.error).toContain("GitHub /installation/repositories failed with HTTP 500");
   });
 
   it("OAuth failure branches: covers /user/repos failure, persistence failure, and query credential override rejection (cloud-factory-cf-yp07)", async () => {
@@ -689,42 +675,16 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(capturedBody.client_secret).toBe("gh_test_client_secret");
   });
 
-  it("flow=install: exercises PAT fallback when App endpoints reject with 401 (cloud-factory-cf-pyis)", async () => {
-    const installOwner = "patorg";
+  it("flow=install: rejects PAT with explicit error on App installation endpoints (cloud-factory-cf-egp6, cloud-factory-cf-kgr3)", async () => {
     const installId = 555;
-    const installRepos = [
-      { id: 101, full_name: "patorg/service-x", name: "service-x", private: false, default_branch: "main", owner: { login: installOwner } },
-    ];
 
     vi.stubGlobal(
       "fetch",
       (async (input: RequestInfo | URL) => {
         const url = String(input);
-        // App endpoints 401 for PAT tokens
+        // GitHub rejects PAT tokens with 401 on /app/installations/
         if (url.includes("/app/installations/")) {
           return new Response(JSON.stringify({ message: "A regular PAT cannot access /app/installations" }), { status: 401 });
-        }
-        if (url.includes("/installation/repositories")) {
-          return new Response(JSON.stringify({ message: "A regular PAT cannot access /installation/repositories" }), { status: 401 });
-        }
-        // User endpoints succeed for PAT
-        if (url === "https://api.github.com/user/installations") {
-          return new Response(
-            JSON.stringify({
-              total_count: 1,
-              installations: [{ id: installId, account: { login: installOwner, type: "Organization" } }],
-            }),
-            { status: 200, headers: { "content-type": "application/json" } },
-          );
-        }
-        if (url.includes(`/user/installations/${installId}/repositories`)) {
-          return new Response(
-            JSON.stringify({
-              total_count: 1,
-              repositories: installRepos,
-            }),
-            { status: 200, headers: { "content-type": "application/json" } },
-          );
         }
         return new Response("Not found", { status: 404 });
       }) as unknown as typeof fetch,
@@ -735,21 +695,9 @@ describe("GitHub OAuth & App Install Flow", () => {
       { method: "GET", redirect: "manual" },
     );
 
-    expect(installRes.status).toBe(302);
-    const loc = installRes.headers.get("location")!;
-    expect(loc).toContain("connected=1");
-    expect(loc).toContain(`owner=${installOwner}`);
-    expect(loc).toContain(`installation_id=${installId}`);
-    expect(loc).toContain("count=1");
-
-    // Verify repositories were persisted in OrgCoordinator
-    const orgReposRes = await SELF.fetch(`https://example.com/api/repos?owner=${installOwner}`, {
-      headers: { "x-factory-control-key": "test-control-key" },
-    });
-    expect(orgReposRes.status).toBe(200);
-    const orgReposData = (await orgReposRes.json()) as any;
-    expect(orgReposData.ok).toBe(true);
-    expect(orgReposData.count).toBe(1);
-    expect(orgReposData.repositories[0].fullName).toBe("patorg/service-x");
+    expect(installRes.status).toBe(502);
+    const installJson = (await installRes.json()) as any;
+    expect(installJson.ok).toBe(false);
+    expect(installJson.error).toContain("GitHub App installation endpoint requires an App JWT; personal access tokens (ghp_) are not accepted by GitHub");
   });
 });

@@ -400,15 +400,6 @@ export async function handleGithubCallback(
           "user-agent": "CloudFactory-Auth",
         },
       });
-      if (!instRes.ok && token.startsWith("ghp_")) {
-        instRes = await fetch("https://api.github.com/user/installations", {
-          headers: {
-            authorization: `Bearer ${token}`,
-            accept: "application/vnd.github+json",
-            "user-agent": "CloudFactory-Auth",
-          },
-        });
-      }
     } catch (err) {
       return Response.json(
         { ok: false, error: `Failed to reach GitHub App installation endpoint: ${String(err)}` },
@@ -417,19 +408,18 @@ export async function handleGithubCallback(
     }
 
     if (!instRes.ok) {
+      const errText =
+        instRes.status === 401
+          ? "GitHub App installation endpoint requires an App JWT; personal access tokens (ghp_) are not accepted by GitHub"
+          : `GitHub /app/installations failed with HTTP ${instRes.status}`;
       return Response.json(
-        { ok: false, error: `GitHub installation endpoint failed with HTTP ${instRes.status}` },
+        { ok: false, error: errText },
         { status: 502, headers: { "set-cookie": clearCookie } },
       );
     }
 
     const instData = (await instRes.json().catch(() => ({}))) as any;
-    const account =
-      instData.account ??
-      instData.installation?.account ??
-      (Array.isArray(instData.installations)
-        ? instData.installations.find((i: any) => String(i.id) === String(installationId))?.account
-        : null);
+    const account = instData.account ?? instData.installation?.account;
     if (!account?.login) {
       return Response.json(
         { ok: false, error: "GitHub App installation response contains no valid account login" },
@@ -449,15 +439,6 @@ export async function handleGithubCallback(
           "user-agent": "CloudFactory-Auth",
         },
       });
-      if (!instReposRes.ok && token.startsWith("ghp_")) {
-        instReposRes = await fetch(`https://api.github.com/user/installations/${installationId}/repositories?per_page=100`, {
-          headers: {
-            authorization: `Bearer ${token}`,
-            accept: "application/vnd.github+json",
-            "user-agent": "CloudFactory-Auth",
-          },
-        });
-      }
     } catch (err) {
       return Response.json(
         { ok: false, error: `Failed to reach GitHub installation repositories endpoint: ${String(err)}` },
@@ -466,8 +447,12 @@ export async function handleGithubCallback(
     }
 
     if (!instReposRes.ok) {
+      const errText =
+        instReposRes.status === 401
+          ? "GitHub installation repositories endpoint requires an installation access token; personal access tokens (ghp_) are not accepted by GitHub"
+          : `GitHub /installation/repositories failed with HTTP ${instReposRes.status}`;
       return Response.json(
-        { ok: false, error: `GitHub installation repositories failed with HTTP ${instReposRes.status}` },
+        { ok: false, error: errText },
         { status: 502, headers: { "set-cookie": clearCookie } },
       );
     }
