@@ -1,12 +1,16 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { Env, FactoryEnv } from "../src/env";
+import { REQUIRED_WORKER_BINDINGS, type Env, type FactoryEnv } from "../src/env";
 
 describe("Worker environment configuration", () => {
   it("provides expected core Durable Object and environment bindings", () => {
     const workerEnv: Env = env;
     expect(workerEnv).toBeDefined();
-    expect(workerEnv.REPO_COORDINATOR).toBeDefined();
+
+    for (const binding of REQUIRED_WORKER_BINDINGS) {
+      expect(workerEnv[binding]).toBeDefined();
+    }
+
     expect(typeof workerEnv.REPO_COORDINATOR.get).toBe("function");
     expect(typeof workerEnv.REPO_COORDINATOR.idFromName).toBe("function");
 
