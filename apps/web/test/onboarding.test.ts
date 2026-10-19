@@ -1,13 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 // The header control and the dialog are part of the contract, so assert on the markup.
 import indexHtml from "../index.html?raw";
 import {
+  ConnectPoller,
+  DIALOG_POLL_MS,
+  IDLE_POLL_MS,
   STALE_AFTER_MS,
   ageLabel,
   connectSummary,
   installUrl,
   parseRepository,
   pillLabel,
+  pollIntervalMs,
   webhookUrl,
   type ConnectEvidence,
 } from "../src/onboarding";
@@ -142,5 +146,168 @@ describe("markup contract", () => {
     expect(indexHtml).toContain('id="connect-check"');
     expect(indexHtml).toContain('id="connect-status"');
     expect(indexHtml).toContain('aria-live="polite"');
+  });
+});
+
+function connectResponse(evidenceBody: ConnectEvidence | null, status = 200): Response {
+  return new Response(JSON.stringify(evidenceBody === null ? { ok: false } : { ok: true, connect: evidenceBody }), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+describe("live indicator poller", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("reads the route and reports the evidence", async () => {
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      seen.push(String(input));
+      return connectResponse(evidence({ lastPingAt: iso(0), lastEventAt: iso(0), pings: 1 }));
+    });
+    const poller = new ConnectPoller({
+      base: "https://factory.example/",
+      scope: () => ({ owner: "acme", repo: "widget" }),
+      key: () => "sekret",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+    });
+    await poller.check();
+    expect(seen).toEqual(["https://factory.example/trace/acme/widget/connect"]);
+    expect(poller.state.evidence?.pings).toBe(1);
+    expect(poller.state.error).toBeNull();
+    // The key travels in a header, never in the URL.
+    const headers = (fetchImpl.mock.calls[0]?.[1] as RequestInit | undefined)?.headers as
+      | Record<string, string>
+      | undefined;
+    expect(headers?.["x-factory-control-key"]).toBe("sekret");
+    expect(seen[0]).not.toContain("sekret");
+  });
+
+  it("polls on the dialog cadence, then the slower idle cadence", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn(async () => connectResponse(evidence({ lastPingAt: iso(0), pings: 1 })));
+    const poller = new ConnectPoller({
+      base: "https://factory.example",
+      scope: () => ({ owner: "acme", repo: "widget" }),
+      key: () => "k",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+    });
+    poller.setMode("dialog");
+    poller.start();
+    expect(pollIntervalMs("dialog")).toBe(DIALOG_POLL_MS);
+    expect(pollIntervalMs("idle")).toBe(IDLE_POLL_MS);
+    await vi.advanceTimersByTimeAsync(DIALOG_POLL_MS);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(DIALOG_POLL_MS);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    poller.setMode("idle");
+    await vi.advanceTimersByTimeAsync(DIALOG_POLL_MS);
+    // The dialog's cadence was left behind with the dialog.
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(IDLE_POLL_MS);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    poller.stop();
+    expect(poller.active).toBe(false);
+    await vi.advanceTimersByTimeAsync(IDLE_POLL_MS * 3);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops hammering a refused key until it changes", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn(async () => connectResponse(null, 401));
+    const poller = new ConnectPoller({
+      base: "https://factory.example",
+      scope: () => ({ owner: "acme", repo: "widget" }),
+      key: () => "wrong",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+      dialogMs: 100,
+    });
+    poller.setMode("dialog");
+    poller.start();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(poller.state.paused).toBe(true);
+    expect(poller.state.error).toBe("control key rejected (401)");
+    expect(poller.active).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // The operator edits the key: polling is allowed again.
+    poller.reset();
+    expect(poller.state.paused).toBe(false);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    poller.stop();
+  });
+
+  it("reports a transport failure instead of throwing, and keeps polling", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("offline");
+    });
+    const poller = new ConnectPoller({
+      base: "https://factory.example",
+      scope: () => ({ owner: "acme", repo: "widget" }),
+      key: () => "k",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+      idleMs: 100,
+    });
+    poller.start();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(poller.state.error).toContain("offline");
+    expect(poller.active).toBe(true);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    poller.stop();
+  });
+
+  it("does not read without a scope or a key, and never overlaps requests", async () => {
+    let resolve: ((value: Response) => void) | null = null;
+    const fetchImpl = vi.fn(
+      () =>
+        new Promise<Response>((done) => {
+          resolve = done;
+        }),
+    );
+    const poller = new ConnectPoller({
+      base: "https://factory.example",
+      scope: () => null,
+      key: () => "k",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+    });
+    await poller.check();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(poller.state.error).toBe("No repository selected");
+
+    const scoped = new ConnectPoller({
+      base: "https://factory.example",
+      scope: () => ({ owner: "acme", repo: "widget" }),
+      key: () => "",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+    });
+    await scoped.check();
+    expect(scoped.state.error).toBe("A control key is needed");
+
+    const busy = new ConnectPoller({
+      base: "https://factory.example",
+      scope: () => ({ owner: "acme", repo: "widget" }),
+      key: () => "k",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+    });
+    const first = busy.check();
+    await busy.check(); // second call while the first is in flight is a no-op
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    resolve!(connectResponse(evidence({ lastPingAt: iso(0) })));
+    await first;
+    expect(busy.state.evidence?.repository).toBe("acme/widget");
   });
 });
