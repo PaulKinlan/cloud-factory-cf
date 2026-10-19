@@ -19,6 +19,7 @@ export interface CliParsedArgs {
   manifestPath?: string;
   eventFile?: string;
   outPath?: string;
+  install?: boolean;
 }
 
 export function parseArgs(args: readonly string[]): CliParsedArgs {
@@ -72,6 +73,7 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
   let manifestPath: string | undefined;
   let eventFile: string | undefined;
   let outPath: string | undefined;
+  let install: boolean | undefined;
   const extensions: string[] = [];
 
   for (let i = 0; i < remaining.length; i++) {
@@ -98,6 +100,8 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
       eventFile = remaining[++i];
     } else if (arg === '--out' && i + 1 < remaining.length) {
       outPath = remaining[++i];
+    } else if (arg === '--install') {
+      install = true;
     } else if (!arg.startsWith('-')) {
       if (command === 'studio' && studioAction === 'test' && !manifestPath) {
         manifestPath = arg;
@@ -121,6 +125,7 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
     manifestPath,
     eventFile,
     outPath,
+    install,
   };
 }
 
@@ -274,6 +279,15 @@ export async function runCli(
     const studio = new AgentStudio();
     const action = parsed.studioAction ?? 'author';
 
+    const defaultCliPermissions = [
+      { service: 'github', action: 'repo.read' },
+      { service: 'github', action: 'issue.comment' },
+      { service: 'github', action: 'pr.comment' },
+      { service: 'github', action: 'pr.review' },
+      { service: 'gitlab', action: 'project.read' },
+      { service: 'gitlab', action: 'mr.comment' },
+    ];
+
     if (action === 'author') {
       if (!parsed.prompt) {
         io.stderr(
@@ -285,6 +299,7 @@ export async function runCli(
       io.stdout('[factory-cloud studio] Grounding prompt against control plane...');
       const manifest = await studio.author(parsed.prompt, {
         availableTools: localTools,
+        availablePermissions: defaultCliPermissions,
         availableSinks: ['github-pr-review', 'github-issue', 'beads-task', 'cloud-telemetry'],
         repoContext: { owner: owner ?? 'local', repo: name ?? 'local-repo' },
       });
@@ -296,6 +311,14 @@ export async function runCli(
         io.stdout(`[factory-cloud studio] Saved manifest to ${outResolved}`);
       } else {
         io.stdout(`[factory-cloud studio] Authored Agent Manifest:\n${jsonStr}`);
+      }
+
+      if (parsed.install) {
+        const localAgentsDir = path.resolve(cwd, '.factory', 'agents');
+        await fs.mkdir(localAgentsDir, { recursive: true });
+        const installPath = path.join(localAgentsDir, `${manifest.name}.json`);
+        await fs.writeFile(installPath, jsonStr, 'utf8');
+        io.stdout(`[factory-cloud studio] Installed agent to ${installPath}`);
       }
       return 0;
     }
@@ -338,7 +361,10 @@ export async function runCli(
           event: event ?? { type: 'test.simulated' },
           promptInput: parsed.prompt,
         },
-        { tools: localTools },
+        {
+          tools: localTools,
+          allowedCapabilities: defaultCliPermissions,
+        },
       );
 
       io.stdout(
@@ -351,8 +377,77 @@ export async function runCli(
     }
 
     if (action === 'list') {
+      const agents: { name: string; version: string; description?: string; source: string }[] = [];
+
+      // 1. Inspect local .factory/agents/ directory
+      const localAgentsDir = path.resolve(cwd, '.factory', 'agents');
+      try {
+        const entries = await fs.readdir(localAgentsDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isFile() && entry.name.endsWith('.json')) {
+            try {
+              const content = await fs.readFile(path.join(localAgentsDir, entry.name), 'utf8');
+              const parsedManifest = JSON.parse(content) as AgentManifest;
+              if (parsedManifest.name) {
+                agents.push({
+                  name: parsedManifest.name,
+                  version: parsedManifest.version || '0.1.0',
+                  description: parsedManifest.description,
+                  source: `local (.factory/agents/${entry.name})`,
+                });
+              }
+            } catch {
+              // ignore invalid files
+            }
+          }
+        }
+      } catch {
+        // directory does not exist
+      }
+
+      // 2. Query coordinator if coordinator URL provided
+      if (parsed.coordinator) {
+        try {
+          const res = await fetch(`${parsed.coordinator}/memory?prefix=agents:`, {
+            signal: AbortSignal.timeout(2000),
+          });
+          if (res.ok) {
+            const data = (await res.json()) as {
+              ok: boolean;
+              entries?: { key: string; value: unknown }[];
+            };
+            if (data.entries) {
+              for (const entry of data.entries) {
+                const val =
+                  (entry.value as { manifest?: AgentManifest; value?: AgentManifest })?.manifest ??
+                  (entry.value as { manifest?: AgentManifest; value?: AgentManifest })?.value ??
+                  (entry.value as AgentManifest);
+                if (val && typeof val === 'object' && 'name' in val) {
+                  agents.push({
+                    name: (val as AgentManifest).name,
+                    version: (val as AgentManifest).version || '0.1.0',
+                    description: (val as AgentManifest).description,
+                    source: `coordinator (${parsed.coordinator})`,
+                  });
+                }
+              }
+            }
+          }
+        } catch {
+          // coordinator not reachable
+        }
+      }
+
       io.stdout('[factory-cloud studio] Installed agents:');
-      io.stdout('  (none installed in local scope)');
+      if (agents.length === 0) {
+        io.stdout('  (none installed in local scope)');
+      } else {
+        for (const ag of agents) {
+          io.stdout(
+            `  - ${ag.name}@${ag.version} [${ag.source}]${ag.description ? `: ${ag.description}` : ''}`,
+          );
+        }
+      }
       return 0;
     }
   }

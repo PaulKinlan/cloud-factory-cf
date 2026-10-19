@@ -107,5 +107,64 @@ describe("Prompt-to-Agent Studio Worker API", () => {
     };
     expect(getData.ok).toBe(true);
     expect(getData.value.name).toBe("issue-responder");
+
+    // Rejects manifest with unauthorized capabilities (fixes cloud-factory-cf-w8v)
+    const badCapReq = new Request(
+      "https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/agents",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          manifest: {
+            ...manifest,
+            name: "malicious-agent",
+            capabilities: [{ service: "github", action: "admin.delete_all" }],
+          },
+        }),
+      }
+    );
+    const badCapRes = await worker.fetch(badCapReq, env);
+    expect(badCapRes.status).toBe(400);
+
+    // Rejects manifest with unregistered sinks (fixes cloud-factory-cf-w8v)
+    const badSinkReq = new Request(
+      "https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/agents",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          manifest: {
+            ...manifest,
+            name: "bad-sink-agent",
+            sinks: [{ type: "nope-sink" }],
+          },
+        }),
+      }
+    );
+    const badSinkRes = await worker.fetch(badSinkReq, env);
+    expect(badSinkRes.status).toBe(400);
+
+    // Supports memoryScope: "both" (fixes cloud-factory-cf-w8v)
+    const bothReq = new Request(
+      "https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/agents",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          manifest: {
+            ...manifest,
+            name: "dual-scope-agent",
+            memoryScope: "both",
+          },
+        }),
+      }
+    );
+    const bothRes = await worker.fetch(bothReq, env);
+    expect(bothRes.status).toBe(200);
+
+    // Verify stored in org coordinator
+    const orgStub = env.ORG_COORDINATOR!.get(env.ORG_COORDINATOR!.idFromName("PaulKinlan"));
+    const orgGetRes = await orgStub.fetch("https://org-coordinator.internal/memory/agents:dual-scope-agent");
+    expect(orgGetRes.status).toBe(200);
   });
 });

@@ -5,6 +5,7 @@
 import { PromptToAgentCompiler } from './prompt-compiler.ts';
 import type {
   AgentManifest,
+  AgentCapabilityRequest,
   StudioContext,
   SimulationRequest,
   SimulationResult,
@@ -57,7 +58,7 @@ export class AgentStudio {
     return (api: ExtensionAPI) => {
       // Listen to triggers
       for (const trigger of manifest.triggers) {
-        api.on(trigger.event === 'event' ? 'event' : trigger.event, async (eventPayload, ctx) => {
+        api.on(trigger.event, async (eventPayload, ctx) => {
           ctx.log('info', `Agent ${manifest.name} triggered by event: ${trigger.event}`);
           if (options.customExecutor) {
             await options.customExecutor(ctx, eventPayload);
@@ -96,6 +97,8 @@ export class AgentStudio {
       tools?: readonly ToolDefinition[];
       sinks?: readonly ActionSink[];
       memoryStore?: HierarchicalMemoryStore;
+      credentialBroker?: CredentialBroker;
+      allowedCapabilities?: readonly AgentCapabilityRequest[];
       agentExecutor?: (simCtx: SimulationContext, event: unknown) => Promise<unknown>;
     } = {}
   ): Promise<SimulationResult> {
@@ -113,18 +116,28 @@ export class AgentStudio {
       memoryMutations.push(mutation);
     });
 
-    // 2. Build mock CredentialBroker to track permission checks and signed requests
-    const allowedCaps = new Set(
-      request.manifest.capabilities.map((c) => `${c.service}:${c.action}`)
+    // 2. Build mock CredentialBroker to track permission checks against environment policy
+    const allowedCaps = new Set<string>(
+      (options.allowedCapabilities ?? []).map((c) => `${c.service}:${c.action}`)
     );
 
     const credentialBroker: CredentialBroker = {
       async hasPermission(service: string, action: string): Promise<boolean> {
+        if (options.credentialBroker) {
+          const allowed = await options.credentialBroker.hasPermission(service, action);
+          permissionChecks.push({ service, action, allowed });
+          return allowed;
+        }
         const allowed = allowedCaps.has(`${service}:${action}`);
         permissionChecks.push({ service, action, allowed });
         return allowed;
       },
       async executeSignedRequest<T = unknown>(req: CredentialCapabilityRequest): Promise<T> {
+        if (options.credentialBroker) {
+          const res = await options.credentialBroker.executeSignedRequest<T>(req);
+          permissionChecks.push({ service: req.service, action: req.action, allowed: true });
+          return res;
+        }
         const key = `${req.service}:${req.action}`;
         const allowed = allowedCaps.has(key);
         permissionChecks.push({ service: req.service, action: req.action, allowed });
@@ -140,29 +153,81 @@ export class AgentStudio {
       },
     };
 
-    // 3. Build simulated ActionSink capturing emitted actions
-    const simulatedSink: ActionSink = {
-      name: 'studio-simulated-sink',
-      supportedActions: ['*'],
-      canHandle: (_action) => true,
-      handle: async (action, ctx) => {
-        ctx.log('info', `Simulated sink handled action: ${action.type}`, {
-          target: action.target,
-        });
+    // Pre-validate capabilities against policy (fail-closed)
+    for (const cap of request.manifest.capabilities) {
+      const allowed = await credentialBroker.hasPermission(cap.service, cap.action);
+      if (!allowed) {
         return {
-          sinkName: 'studio-simulated-sink',
-          actionId: action.id ?? 'sim',
-          actionType: action.type,
-          success: true,
-          durationMs: 0,
+          runId,
+          status: 'denied',
+          logs,
+          toolCalls,
+          sinkActions,
+          memoryMutations,
+          permissionChecks,
+          error: `Capability check failed: unauthorized capability "${cap.service}:${cap.action}"`,
+          durationMs: Date.now() - startTime,
         };
-      },
-    };
+      }
+    }
 
-    // 4. Build simulated tools with call tracking
+    // Pre-validate required tools exist in simulation environment
+    const providedTools = options.tools ?? [];
+    const availableToolNames = new Set(providedTools.map((t) => t.name));
+    for (const toolName of request.manifest.tools) {
+      if (!availableToolNames.has(toolName)) {
+        return {
+          runId,
+          status: 'failed',
+          logs,
+          toolCalls,
+          sinkActions,
+          memoryMutations,
+          permissionChecks,
+          error: `Tool "${toolName}" requested by manifest is not available in simulation environment`,
+          durationMs: Date.now() - startTime,
+        };
+      }
+    }
+
+    // Pre-validate required sinks exist in simulation environment
+    const callerSinks = options.sinks ?? [];
+    const knownSinkTypes = new Set([
+      'github-pr-review',
+      'github-issue',
+      'beads-task',
+      'cloud-telemetry',
+      ...callerSinks.flatMap((s) => [s.name, ...s.supportedActions]),
+    ]);
+
+    for (const sink of request.manifest.sinks) {
+      const isAvailable =
+        knownSinkTypes.has(sink.type) ||
+        knownSinkTypes.has('*') ||
+        callerSinks.some(
+          (s) =>
+            s.name === sink.type ||
+            s.supportedActions.includes(sink.type) ||
+            s.supportedActions.includes('*')
+        );
+      if (!isAvailable) {
+        return {
+          runId,
+          status: 'failed',
+          logs,
+          toolCalls,
+          sinkActions,
+          memoryMutations,
+          permissionChecks,
+          error: `Sink "${sink.type}" requested by manifest is not registered in simulation environment`,
+          durationMs: Date.now() - startTime,
+        };
+      }
+    }
+
+    // 3. Build ActionSink dispatcher: caller sinks take priority, simulated fallback handles remaining
     const runtime = new AgentRuntime();
     const sinkRegistry = new ActionSinkRegistry();
-    sinkRegistry.registerSink(simulatedSink);
     if (options.sinks) {
       for (const s of options.sinks) {
         sinkRegistry.registerSink(s);
@@ -170,7 +235,34 @@ export class AgentStudio {
       }
     }
 
-    const providedTools = options.tools ?? [];
+    const simulatedSink: ActionSink = {
+      name: 'studio-simulated-sink',
+      supportedActions: ['*'],
+      canHandle: (action) => {
+        return !callerSinks.some(
+          (s) =>
+            s.name === action.type ||
+            s.supportedActions.includes(action.type) ||
+            s.supportedActions.includes('*')
+        );
+      },
+      handle: async (action, sinkCtx) => {
+        sinkCtx.log('info', `Simulated sink handled action: ${action.type}`, {
+          target: action.target,
+        });
+        return {
+          sinkName: 'studio-simulated-sink',
+          actionId: action.id ?? generateId(),
+          actionType: action.type,
+          success: true,
+          durationMs: 0,
+        };
+      },
+    };
+    sinkRegistry.registerSink(simulatedSink);
+    runtime.registerSink(simulatedSink);
+
+    // 4. Build simulated tools with call tracking
     for (const tool of providedTools) {
       if (request.manifest.tools.includes(tool.name)) {
         runtime.registerTool({
@@ -250,18 +342,46 @@ export class AgentStudio {
         ctx,
         async (_input) => {
           let agentOutput: unknown;
-          try {
-            if (options.agentExecutor) {
-              agentOutput = await options.agentExecutor(simCtx, request.event);
-            } else {
-              agentOutput = {
-                executed: true,
-                agent: request.manifest.name,
-              };
+          if (options.agentExecutor) {
+            agentOutput = await options.agentExecutor(simCtx, request.event);
+          } else {
+            // Default simulation executor: actually exercises declared tools and sinks
+            const toolResults: Record<string, unknown> = {};
+            for (const toolName of request.manifest.tools) {
+              const mockParams =
+                (request.mockToolInputs?.[toolName] as Record<string, unknown> | undefined) ??
+                (toolName === 'read_file'
+                  ? { path: 'README.md' }
+                  : toolName === 'list_files'
+                    ? { dir: '.' }
+                    : toolName === 'exec_command'
+                      ? { command: 'echo "simulated test"' }
+                      : {});
+              const res = await simCtx.invokeTool(toolName, mockParams);
+              toolResults[toolName] = res;
             }
-          } catch (execErr) {
-            console.error('AGENT EXECUTOR THREW:', execErr);
-            throw execErr;
+
+            for (const sink of request.manifest.sinks) {
+              await simCtx.ctx.sinks.emit(
+                {
+                  type: sink.type,
+                  target: `simulated-target-${request.manifest.name}`,
+                  payload: {
+                    agent: request.manifest.name,
+                    event: request.event,
+                    toolResults,
+                  },
+                },
+                simCtx.ctx,
+              );
+            }
+
+            agentOutput = {
+              executed: true,
+              agent: request.manifest.name,
+              toolsExecuted: Object.keys(toolResults),
+              sinksEmitted: request.manifest.sinks.map((s) => s.type),
+            };
           }
           return {
             status: 'success',
@@ -313,14 +433,32 @@ export class AgentStudio {
    * Persists an AgentManifest into central memory storage under agents:<name>.
    */
   async install(manifest: AgentManifest, storage: HierarchicalMemoryStore): Promise<void> {
-    const scope = manifest.memoryScope === 'org' ? 'org' : 'repo';
-    await storage.set(scope, `agents:${manifest.name}`, manifest);
+    if (manifest.memoryScope === 'org') {
+      await storage.set('org', `agents:${manifest.name}`, manifest);
+    } else if (manifest.memoryScope === 'both') {
+      await storage.set('repo', `agents:${manifest.name}`, manifest);
+      await storage.set('org', `agents:${manifest.name}`, manifest);
+    } else {
+      await storage.set('repo', `agents:${manifest.name}`, manifest);
+    }
   }
 
   /**
    * Loads an installed AgentManifest from central memory storage.
    */
-  async load(name: string, storage: HierarchicalMemoryStore): Promise<AgentManifest | null> {
+  async load(
+    name: string,
+    storage: HierarchicalMemoryStore,
+    scope?: 'repo' | 'org',
+  ): Promise<AgentManifest | null> {
+    if (scope === 'org') {
+      const inOrg = await storage.get('org', `agents:${name}`);
+      return (inOrg as AgentManifest) ?? null;
+    }
+    if (scope === 'repo') {
+      const inRepo = await storage.get('repo', `agents:${name}`);
+      return (inRepo as AgentManifest) ?? null;
+    }
     const inRepo = await storage.get('repo', `agents:${name}`);
     if (inRepo) return inRepo as AgentManifest;
     const inOrg = await storage.get('org', `agents:${name}`);

@@ -71,6 +71,7 @@ export interface SimulationRequest {
   readonly event?: Record<string, unknown>;
   readonly promptInput?: string;
   readonly mockToolResponses?: Record<string, unknown>;
+  readonly mockToolInputs?: Record<string, unknown>;
 }
 
 export interface SimulatedToolCall {

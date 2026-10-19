@@ -113,6 +113,54 @@ test('runCli: studio author and test simulation', async () => {
     );
     assert.equal(testCode, 0);
     assert.ok(testOutputs.some((o) => o.includes('Simulation completed')));
+
+    // 3. Test studio list with installed agent (fixes cloud-factory-cf-hkq)
+    const installOutputs: string[] = [];
+    await runCli(
+      [
+        'studio',
+        'author',
+        'Create an agent called doc-helper that reads files',
+        '--cwd',
+        tmpDir,
+        '--install',
+      ],
+      { stdout: (m) => installOutputs.push(m), stderr: () => {} },
+    );
+
+    const listOutputs: string[] = [];
+    const listCode = await runCli(['studio', 'list', '--cwd', tmpDir], {
+      stdout: (m) => listOutputs.push(m),
+      stderr: () => {},
+    });
+    assert.equal(listCode, 0);
+    assert.ok(listOutputs.some((o) => o.includes('doc-helper@0.1.0')));
+
+    // 4. Test studio test rejects over-privileged or bogus manifest (fixes cloud-factory-cf-2vp, cloud-factory-cf-pf5)
+    const bogusPath = path.join(tmpDir, 'bogus.json');
+    await fs.writeFile(
+      bogusPath,
+      JSON.stringify({
+        name: 'bogus',
+        version: '0.1.0',
+        prompt: 'p',
+        triggers: [{ event: 'push' }],
+        tools: ['exec_command'],
+        capabilities: [{ service: 'github', action: 'admin.delete_all' }],
+        sinks: [{ type: 'nope-not-registered' }],
+        memoryScope: 'repo',
+      }),
+      'utf8',
+    );
+
+    const bogusOutputs: string[] = [];
+    const bogusErrors: string[] = [];
+    const bogusCode = await runCli(
+      ['studio', 'test', bogusPath, '--cwd', tmpDir],
+      { stdout: (m) => bogusOutputs.push(m), stderr: (m) => bogusErrors.push(m) },
+    );
+    assert.equal(bogusCode, 1);
+    assert.ok(bogusOutputs.some((o) => o.includes('Simulation denied') || o.includes('Simulation failed')));
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }

@@ -80,12 +80,12 @@ export class PromptToAgentCompiler {
       triggers.push({ event: 'event' });
     }
 
-    // 3. Derive capabilities from context and keywords
+    // 3. Derive capabilities from context and keywords (fail-closed)
     const capabilities: AgentCapabilityRequest[] = [];
     const availablePerms = context.availablePermissions ?? [];
 
     const isPermAllowed = (service: string, action: string): boolean => {
-      if (availablePerms.length === 0) return true;
+      if (availablePerms.length === 0) return false;
       return availablePerms.some((p) => p.service === service && p.action === action);
     };
 
@@ -108,12 +108,12 @@ export class PromptToAgentCompiler {
       capabilities.push({ service: 'github', action: 'repo.read' });
     }
 
-    // 4. Match tools
+    // 4. Match tools (fail-closed)
     const tools: string[] = [];
     const availableToolNames = context.availableTools ? context.availableTools.map((t) => t.name) : [];
 
     const addToolIfAvailable = (toolName: string) => {
-      if (availableToolNames.length === 0 || availableToolNames.includes(toolName)) {
+      if (availableToolNames.length > 0 && availableToolNames.includes(toolName)) {
         if (!tools.includes(toolName)) {
           tools.push(toolName);
         }
@@ -131,12 +131,12 @@ export class PromptToAgentCompiler {
       addToolIfAvailable('exec_command');
     }
 
-    // 5. Match sinks
+    // 5. Match sinks (fail-closed)
     const sinks: AgentSinkConfig[] = [];
     const availableSinkNames = context.availableSinks ?? [];
 
     const addSinkIfAvailable = (sinkType: string) => {
-      if (availableSinkNames.length === 0 || availableSinkNames.includes(sinkType)) {
+      if (availableSinkNames.length > 0 && availableSinkNames.includes(sinkType)) {
         if (!sinks.some((s) => s.type === sinkType)) {
           sinks.push({ type: sinkType });
         }
@@ -198,7 +198,7 @@ export class PromptToAgentCompiler {
       ? candidate.triggers
       : [{ event: 'event' }];
 
-    // Validate tools against available tools
+    // Validate tools against available tools in context (fail-closed)
     let tools = Array.from(candidate.tools ?? []);
     if (context.availableTools && context.availableTools.length > 0) {
       const allowedToolNames = new Set(context.availableTools.map((t) => t.name));
@@ -208,6 +208,10 @@ export class PromptToAgentCompiler {
           `Agent manifest requests tools that are not available in current context: ${invalidTools.join(', ')}`
         );
       }
+    } else if (tools.length > 0) {
+      throw new Error(
+        `Agent manifest requests tools (${tools.join(', ')}) but no tools are available in current context`
+      );
     }
 
     // Validate capabilities against available permissions (fail-closed)
@@ -224,9 +228,14 @@ export class PromptToAgentCompiler {
           `Security violation: prompt requests unauthorized capabilities: ${unauthStrings}`
         );
       }
+    } else if (capabilities.length > 0) {
+      const unauthStrings = capabilities.map((c) => `${c.service}:${c.action}`).join(', ');
+      throw new Error(
+        `Security violation: prompt requests unauthorized capabilities: ${unauthStrings}`
+      );
     }
 
-    // Validate sinks
+    // Validate sinks (fail-closed)
     let sinks = Array.from(candidate.sinks ?? []);
     if (context.availableSinks && context.availableSinks.length > 0) {
       const allowedSinkNames = new Set(context.availableSinks);
@@ -236,6 +245,10 @@ export class PromptToAgentCompiler {
           `Agent manifest requests sinks that are not registered in current context: ${invalidSinks.map((s) => s.type).join(', ')}`
         );
       }
+    } else if (sinks.length > 0) {
+      throw new Error(
+        `Agent manifest requests sinks (${sinks.map((s) => s.type).join(', ')}) but no sinks are registered in current context`
+      );
     }
 
     const memoryScope = candidate.memoryScope ?? 'repo';
