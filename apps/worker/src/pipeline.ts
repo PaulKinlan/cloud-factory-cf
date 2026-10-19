@@ -393,12 +393,19 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
     const failed = emitted.some((result) => !result.success) || emitted.length === 0;
     const completionError = await ledger?.complete(decision.type, failed ? "failed" : "delivered");
     if (completionError !== null && completionError !== undefined) {
-      // The side effect happened but could not be recorded: retrying would repeat
-      // it, so the gap is reported and the run is settled rather than retried
-      // (findings cloud-factory-cf-lbi / -835).
-      const errors = (ctx.state["actionDeliveryErrors"] as string[] | undefined) ?? [];
-      errors.push(`${decision.type}: ${completionError}`);
-      ctx.state["actionDeliveryErrors"] = errors;
+      if (failed) {
+        // The provider rejected the action, so nothing was delivered and a retry is
+        // safe: recording the gap here would acknowledge the event and silently
+        // drop a comment or task that never happened (finding cloud-factory-cf-uil).
+        // The action's own failure is already in the run's result.
+      } else {
+        // The side effect happened but could not be recorded: retrying would repeat
+        // it, so the gap is reported and the run is settled rather than retried
+        // (findings cloud-factory-cf-lbi / -835).
+        const errors = (ctx.state["actionDeliveryErrors"] as string[] | undefined) ?? [];
+        errors.push(`${decision.type}: ${completionError}`);
+        ctx.state["actionDeliveryErrors"] = errors;
+      }
     }
     results.push(...emitted);
   }

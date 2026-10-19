@@ -103,10 +103,13 @@ an event that any agent already delivered and hands it back to the queue
 (`release`) — it neither re-posts a review nor acknowledges a failure belonging to
 a canvas agent.
 
-The same at-most-once stance applies one level down: if an *action's* ledger write
-is rejected after the provider accepted it, the run reports that action in
-`deliveryError` and the event is settled rather than retried — including by the
-`/runs` drain — because a retry would create the issue or task a second time.
+The same at-most-once stance applies one level down, but **only to actions the
+provider accepted**: if an action's ledger write is rejected after the provider
+accepted it, the run reports that action in `deliveryError` and the event is
+settled rather than retried — including by the `/runs` drain — because a retry
+would create the issue or task a second time. When the provider *rejected* the
+action, a rejected ledger write is not a gap: nothing was delivered, so the event
+must stay retryable and the failure is reported as an ordinary failure.
 
 If the ledger cannot record a run after the side effects happened (a rejected or
 unreachable write), the run is retried three times; if it still fails the outcome

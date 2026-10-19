@@ -691,3 +691,46 @@ describe("the drain acknowledges a run it could not record (cloud-factory-cf-835
     expect(report.unsettled).toBe(0);
   });
 });
+
+describe("a failed action stays retryable despite a rejected ledger write (cloud-factory-cf-uil)", () => {
+  const facts = {
+    deliveryId: "evt-uil",
+    provider: "github",
+    event: "issues",
+    action: "opened",
+    repository: "acme/failed-action",
+    actor: "octocat",
+    attempts: 1,
+    leaseId: "lease-1",
+    number: 13,
+    title: "Rejected comment",
+    prNumber: null,
+  } as never;
+
+  it("does not record a delivery gap when the provider rejected the action", async () => {
+    const ctx = {
+      state: {
+        event: facts,
+        wiredSinks: ["github-issue-comment"],
+        actionLedger: {
+          claim: async () => "run",
+          // Even the "failed" write is rejected by the ledger.
+          complete: async () => "delivery ledger rejected the completion (503)",
+        },
+      },
+      memory: { get: async () => undefined, set: async () => {} },
+      sinks: {
+        emit: async (action: { type: string }) => [
+          { sinkName: "s", actionId: "a", actionType: action.type, success: false, error: "GitHub rejected comment (500)", durationMs: 0 },
+        ],
+      },
+    } as never;
+
+    const result = await ruleBasedReview({ runId: "ruil", prompt: "p", tools: [], ctx });
+    expect(result.status).toBe("failure");
+    // Nothing was delivered, so nothing must be recorded as a delivery gap: the
+    // event has to stay retryable.
+    const state = (ctx as unknown as { state: Record<string, unknown> }).state;
+    expect(state["actionDeliveryErrors"]).toBeUndefined();
+  });
+});
