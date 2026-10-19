@@ -33,6 +33,8 @@ if [ -z "$changed" ]; then
 fi
 
 is_source() { case "$1" in apps/*/src/*|packages/*/src/*) return 0 ;; *) return 1 ;; esac; }
+is_test() { case "$1" in apps/*/test/*.test.ts|packages/*/tests/*.test.ts) return 0 ;; *) return 1 ;; esac; }
+is_runnable() { is_source "$1" || is_test "$1"; }
 
 # Files that are source but have no suite yet. They are named loudly rather than
 # silently passing, and the bead tracks adding a test (cloud-factory-cf-5e8, cloud-factory-cf-d8s).
@@ -40,12 +42,13 @@ is_source() { case "$1" in apps/*/src/*|packages/*/src/*) return 0 ;; *) return 
 DECLARED_UNVERIFIED="apps/web/src/main.ts"
 is_declared() { case " $DECLARED_UNVERIFIED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
+runnables=$(echo "$changed" | while read -r path; do is_runnable "$path" && echo "$path"; done)
 sources=$(echo "$changed" | while read -r path; do is_source "$path" && echo "$path"; done)
-if [ -z "$sources" ]; then
+if [ -z "$runnables" ]; then
   # Build/config/docs only: nothing maps to a suite, but a gate that runs no suite
   # at all cannot be told apart from one whose selection broke (the fleet gate
   # reports coverage UNKNOWN). Run a fixed smoke set so the verdict has evidence.
-  echo "changed-tests: $(echo "$changed" | wc -l | tr -d ' ') changed path(s), none of them source — running the smoke set"
+  echo "changed-tests: $(echo "$changed" | wc -l | tr -d ' ') changed path(s), none of them source or test — running the smoke set"
   echo "$changed" | sed 's/^/  /'
   if [ "$LIST" -eq 1 ]; then
     echo "changed-tests: smoke = apps/web (whole node suite), apps/worker test/worker.test.ts test/assets.test.ts"
@@ -102,8 +105,8 @@ done
 
 # The node:test packages: their suites are seconds, so changed means run them.
 for ws in packages/sdk packages/cli packages/canvas-model; do
-  ws_sources=$(echo "$sources" | grep -E "^${ws}/src/" || true)
-  [ -n "$ws_sources" ] || continue
+  ws_runnables=$(echo "$runnables" | grep -E "^${ws}/(src|tests)/" || true)
+  [ -n "$ws_runnables" ] || continue
   if [ "$LIST" -eq 1 ]; then echo "changed-tests: ${ws}: whole suite (node:test)"; continue; fi
   echo "changed-tests: ${ws}: whole suite (node:test)"
   ran=$((ran + 1))

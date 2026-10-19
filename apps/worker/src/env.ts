@@ -44,6 +44,12 @@ export interface FactoryEnv {
   ENVIRONMENT: string;
 }
 
+export const REQUIRED_WORKER_BINDINGS = [
+  "REPO_COORDINATOR",
+  "CREDENTIAL_BROKER",
+  "ENVIRONMENT",
+] as const;
+
 /** The bindings the Worker itself sees. */
 export type Env = FactoryEnv;
 
