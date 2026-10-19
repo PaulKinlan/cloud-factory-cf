@@ -141,7 +141,6 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
 
       const diffFiles = diffRes.stdout
         .split('\0')
-        .map((s) => s.trim())
         .filter((s) => s.length > 0);
 
       const statusFiles: string[] = [];
@@ -154,7 +153,7 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
           continue;
         }
         const status = item.slice(0, 2);
-        const filePath = item.slice(3).trim();
+        const filePath = item.slice(3);
         if (filePath) {
           statusFiles.push(filePath);
         }

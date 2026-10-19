@@ -491,6 +491,38 @@ test('runPrReview: inspects filenames containing literal " -> " using NUL delimi
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
+test('runPrReview: preserves paths with leading or trailing whitespace (fixes cloud-factory-cf-snj)', async () => {
+  const { exec } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execAsync = promisify(exec);
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-whitespace-file-'));
+  await execAsync('git init -q -b main . && git config user.email "test@example.com" && git config user.name "Test"', { cwd: tmpDir });
+  await fs.mkdir(path.join(tmpDir, 'src'), { recursive: true });
+  await fs.writeFile(path.join(tmpDir, 'src', 'a.ts'), 'export const a = 1;\n', 'utf8');
+  await execAsync('git add -A && git commit -qm "init"', { cwd: tmpDir });
+  await execAsync('git update-ref refs/remotes/origin/main HEAD', { cwd: tmpDir });
+
+  // Add file with trailing space in filename containing credential
+  await fs.writeFile(
+    path.join(tmpDir, 'src', 'b.ts '),
+    'export const token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";\n',
+    'utf8',
+  );
+
+  const result = await runPrReview({
+    cwd: tmpDir,
+    dryRun: true,
+    io: { stdout: () => {}, stderr: () => {} },
+  });
+
+  assert.ok(result.changedFiles.includes('src/b.ts '));
+  assert.equal(result.verdict, 'REQUEST_CHANGES');
+  assert.ok(result.findings.some((f) => f.includes('Potential credential detected in `src/b.ts `')));
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
 test('runPrReview: degrades to step summary with notice without network calls (fixes cloud-factory-cf-e2c, isp, 156)', async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-readonly-token-'));
   await fs.writeFile(path.join(tmpDir, 'README.md'), '# hi\n', 'utf8');
