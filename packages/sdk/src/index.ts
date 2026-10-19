@@ -35,6 +35,27 @@ export type {
 } from './types/events.ts';
 
 export type {
+  DevPlatform,
+  DevPlatformAdapter,
+  HeaderReader,
+  SdlcAction,
+  SdlcEvent,
+  SdlcKind,
+} from './types/devplatform.ts';
+
+export {
+  adapterFor,
+  canonicalAction,
+  devPlatformAdapters,
+  giteaAdapter,
+  githubAdapter,
+  gitlabAdapter,
+  isDevPlatform,
+  parseRepositoryKey,
+  repositoryKey,
+} from './types/devplatform.ts';
+
+export type {
   JSONSchemaProperty,
   ToolParameterSchema,
   ToolDefinition,
