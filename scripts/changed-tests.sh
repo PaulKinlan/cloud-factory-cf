@@ -159,8 +159,18 @@ done <<< "$changed"
 # (cloud-factory-cf-9ef).
 source_is_referenced() { # <workspace> <source path>
   local ws="$1" src="$2" stem
+  case "$src" in
+    # Assets carry no module graph, so no import can vouch for them: the workspace
+    # suite the caller is about to run is the only coverage that can exist
+    # (cloud-factory-cf-2ng: a stylesheet delta was failing the gate by name).
+    *.css|*.html|*.htm|*.md|*.json|*.svg|*.txt) return 0 ;;
+  esac
   stem="${src#*/src/}"
   stem="${stem%.*}"
+  case "$stem" in
+    # A barrel (`src/events/index.ts`) is imported by its directory, never by name.
+    */index) stem="${stem%/index}" ;;
+  esac
   [ -n "$stem" ] || return 1
   grep -rqE "(^|[/'\"])${stem//./\\.}(\\.(m|c)?(t|j)s)?['\"]" "$ws" \
     --include='*.ts' --include='*.tsx' --include='*.js' --include='*.mjs' \

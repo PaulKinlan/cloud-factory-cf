@@ -13,6 +13,7 @@ import {
   serializeCanvasState,
   type ShareTarget,
 } from "./sync";
+import { initObservability } from "./observability";
 import {
   KIND_LABELS,
   NODE_HEIGHT,
@@ -878,3 +879,14 @@ fieldLabel.addEventListener("input", () => {
 if (storedCanvas === null) fitToContent();
 render();
 announce(`Canvas ready with ${doc.nodes.length} nodes`);
+
+const obsPanel = document.getElementById("observability-panel");
+const obsToggle = document.getElementById("observability-toggle");
+if (obsPanel && obsToggle) {
+  const [initialOwner, initialRepo] = (boundRepository ?? "").split("/");
+  initObservability(obsPanel, {
+    toggleButton: obsToggle,
+    initialOwner: initialOwner || "",
+    initialRepo: initialRepo || "",
+  });
+}

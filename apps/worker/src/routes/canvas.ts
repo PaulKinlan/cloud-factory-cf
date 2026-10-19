@@ -1,4 +1,5 @@
 import type { Env } from "../env";
+import { traceSink } from "../events";
 import { runCanvasDocument } from "../canvas-runs";
 import { sameSecret } from "../secrets";
 
@@ -38,6 +39,7 @@ export async function routeCanvasRun(
       controlKey,
       coordinator,
       broker: env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository)),
+      onStep: traceSink(coordinator),
       ...(env.TELEMETRY_ENDPOINT === undefined ? {} : { telemetryEndpoint: env.TELEMETRY_ENDPOINT }),
     },
     id,

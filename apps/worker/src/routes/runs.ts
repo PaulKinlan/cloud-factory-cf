@@ -1,5 +1,6 @@
 import type { Env } from "../env";
 import { drainRepository } from "../pipeline";
+import { traceSink } from "../events";
 import { sameSecret } from "../secrets";
 
 export const RUN_PATH = /^\/runs\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
@@ -30,12 +31,14 @@ export async function routeRun(
   const body = (await request.json().catch(() => ({}))) as { limit?: unknown };
   const limit = typeof body.limit === "number" && Number.isFinite(body.limit) ? Math.trunc(body.limit) : undefined;
 
+  const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
   const report = await drainRepository(
     {
       repository,
       controlKey,
-      coordinator: env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository)),
+      coordinator,
       broker: env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository)),
+      onStep: traceSink(coordinator),
       ...(env.TELEMETRY_ENDPOINT === undefined ? {} : { telemetryEndpoint: env.TELEMETRY_ENDPOINT }),
     },
     ...(limit === undefined ? [] : [{ limit }]),
