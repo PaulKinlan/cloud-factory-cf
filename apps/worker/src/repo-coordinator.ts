@@ -60,6 +60,10 @@ export class RepoCoordinator extends DurableObject<Env> {
     if (request.method === "GET" && url.pathname === "/events") {
       return this.listEvents(url);
     }
+    if (request.method === "GET" && url.pathname.startsWith("/events/") && url.pathname.endsWith("/payload")) {
+      const deliveryId = decodeURIComponent(url.pathname.slice("/events/".length, -"/payload".length));
+      return this.eventPayload(deliveryId);
+    }
     if (request.method === "POST" && url.pathname === "/claim") {
       return this.claim(await readJson(request));
     }
@@ -275,6 +279,30 @@ export class RepoCoordinator extends DurableObject<Env> {
     await this.armAlarm();
 
     return Response.json({ ok: true, claimed, leaseUntil });
+  }
+
+  /** Full provider payload for one event; the runner fetches it after claiming. */
+  private eventPayload(deliveryId: string): Response {
+    if (deliveryId.length === 0) {
+      return Response.json({ ok: false, error: "missing deliveryId" }, { status: 400 });
+    }
+    const rows = this.sql
+      .exec<{ delivery_id: string; provider: string; event: string; action: string | null; repository: string; payload: string }>(
+        `SELECT delivery_id, provider, event, action, repository, payload FROM events WHERE delivery_id = ?`,
+        deliveryId,
+      )
+      .toArray();
+    const row = rows[0];
+    if (!row) return Response.json({ ok: false, error: "not found", deliveryId }, { status: 404 });
+    return Response.json({
+      ok: true,
+      deliveryId: row.delivery_id,
+      provider: row.provider,
+      event: row.event,
+      action: row.action,
+      repository: row.repository,
+      payload: safeParseJson(row.payload),
+    });
   }
 
   private async ack(payload: unknown): Promise<Response> {
@@ -680,4 +708,12 @@ function sameRepository(a: string, b: string): boolean {
 
 function byteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
+}
+
+function safeParseJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }

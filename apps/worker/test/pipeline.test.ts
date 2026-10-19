@@ -1,0 +1,325 @@
+import { SELF } from "cloudflare:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  decideAction,
+  numberFrom,
+  recordingSinks,
+  reviewBody,
+  titleFrom,
+  type EventFacts,
+} from "../src/pipeline";
+import { githubRequest, TEST_SECRET } from "./support/webhook";
+
+/**
+ * End-to-end: a signed webhook lands on the queue, `POST /runs/:owner/:repo`
+ * claims it, an agent run emits a sink action, the sink asks the credential
+ * broker for a capability, the broker attaches the real credential upstream,
+ * and the event is acked. Nothing here is mocked except the provider itself.
+ */
+const CONTROL_KEY = "test-control-key";
+const GITHUB_CREDENTIAL = "ghp_test_github_credential";
+/**
+ * Every test gets its own repository: provisioning, capability quota and
+ * repository memory are all keyed by it, so the tests stay independent.
+ */
+const REPOSITORY = "acme/pipeline";
+
+async function provision(repository: string, action: string): Promise<void> {
+  const response = await SELF.fetch(`https://example.com/broker/${repository}/provisioning`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-factory-control-key": CONTROL_KEY },
+    body: JSON.stringify({ agent: `cloud-factory:${repository}`, service: "github", action }),
+  });
+  expect([200, 201]).toContain(response.status);
+}
+
+async function run(
+  init: { repository?: string; controlKey?: string | null; method?: string; limit?: number } = {},
+): Promise<Response> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (init.controlKey !== null) headers["x-factory-control-key"] = init.controlKey ?? CONTROL_KEY;
+  const method = init.method ?? "POST";
+  return SELF.fetch(`https://example.com/runs/${init.repository ?? REPOSITORY}`, {
+    method,
+    headers,
+    body: method === "POST" ? JSON.stringify(init.limit === undefined ? {} : { limit: init.limit }) : undefined,
+  });
+}
+
+async function enqueue(deliveryId: string, body: string, event = "pull_request", repository = REPOSITORY): Promise<void> {
+  const response = await SELF.fetch(`https://example.com/webhooks/github/${repository}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-github-delivery": deliveryId,
+      "x-github-event": event,
+      "x-hub-signature-256": await sign(deliveryId, body, repository),
+    },
+    body,
+  });
+  expect(response.status).toBe(202);
+}
+
+async function sign(deliveryId: string, body: string, repository = REPOSITORY): Promise<string> {
+  const request = await githubRequest(deliveryId, repository, { body });
+  return request.headers.get("x-hub-signature-256") as string;
+}
+
+function pullRequestPayload(
+  deliveryId: string,
+  overrides: { number?: number; action?: string; title?: string; repository?: string } = {},
+): string {
+  const repository = overrides.repository ?? REPOSITORY;
+  return JSON.stringify({
+    action: overrides.action ?? "opened",
+    number: overrides.number ?? 7,
+    delivery: deliveryId,
+    sender: { login: "octocat" },
+    repository: { full_name: repository },
+    pull_request: { number: overrides.number ?? 7, title: overrides.title ?? "Add the pipeline", state: "open" },
+  });
+}
+
+interface UpstreamCall {
+  url: string;
+  authorization: string | null;
+  body?: unknown;
+}
+
+function stubUpstream(status = 201): { calls: UpstreamCall[] } {
+  const calls: UpstreamCall[] = [];
+  vi.stubGlobal(
+    "fetch",
+    (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({
+        url: String(input),
+        authorization: new Headers(init?.headers).get("authorization"),
+        body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+      });
+      return new Response(JSON.stringify({ id: 1 }), { status });
+    }) as unknown as typeof fetch,
+  );
+  return { calls };
+}
+
+async function queueEvents(
+  repository = REPOSITORY,
+): Promise<Array<{ deliveryId: string; status: string; attempts: number; lastError: string | null }>> {
+  const { env } = await import("cloudflare:test");
+  const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+  const response = await coordinator.fetch("https://repo-coordinator.internal/events?limit=50");
+  const payload = (await response.json()) as {
+    events?: Array<{ deliveryId: string; status: string; attempts: number; lastError: string | null }>;
+  };
+  return payload.events ?? [];
+}
+
+async function stats(repository = REPOSITORY): Promise<{ processed: number; failed: number; pending: number; processing: number }> {
+  const { env } = await import("cloudflare:test");
+  const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+  const queue = await coordinator.fetch("https://repo-coordinator.internal/stats");
+  const payload = (await queue.json()) as { counts?: Record<string, number> };
+  const counts = payload.counts ?? {};
+  return {
+    processed: counts["processed"] ?? 0,
+    failed: counts["failed"] ?? 0,
+    pending: counts["pending"] ?? 0,
+    processing: counts["processing"] ?? 0,
+  };
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("pipeline decisions", () => {
+  const facts = (overrides: Partial<EventFacts> = {}): EventFacts => ({
+    deliveryId: "d1",
+    provider: "github",
+    event: "pull_request",
+    action: "opened",
+    repository: REPOSITORY,
+    actor: "octocat",
+    attempts: 1,
+    leaseId: "lease-1",
+    payload: {},
+    number: 7,
+    title: "Add the pipeline",
+    ...overrides,
+  });
+
+  it("reviews opened/reopened/synchronize pull requests and ignores the rest", () => {
+    expect(decideAction(facts())).toMatchObject({ type: "github:pr:review", payload: { prNumber: 7, event: "COMMENT" } });
+    expect(decideAction(facts({ action: "synchronize" }))?.type).toBe("github:pr:review");
+    expect(decideAction(facts({ action: "closed" }))).toBeNull();
+    expect(decideAction(facts({ number: null }))).toBeNull();
+    expect(decideAction(facts({ event: "push", action: null }))).toBeNull();
+    expect(decideAction(facts({ event: "issues", action: "opened" }))?.type).toBe("github:issue:comment");
+  });
+
+  it("reads the number and title out of the shapes providers actually send", () => {
+    expect(numberFrom({ number: 3 })).toBe(3);
+    expect(numberFrom({ pull_request: { number: 5 } })).toBe(5);
+    expect(numberFrom({ issue: { number: 6 } })).toBe(6);
+    expect(numberFrom({ number: 0 })).toBeNull();
+    expect(numberFrom({ number: "7" })).toBeNull();
+    expect(titleFrom({ title: "  hello  " })).toBe("hello");
+    expect(titleFrom({ pull_request: { title: "pr" } })).toBe("pr");
+    expect(titleFrom({})).toBeNull();
+  });
+
+  it("includes the review counter in the body and records emitted sinks", async () => {
+    expect(reviewBody(facts(), 2)).toContain("review #2");
+    const emitted: string[] = [];
+    const [wrapped] = recordingSinks(
+      [
+        {
+          name: "s",
+          supportedActions: ["github:pr:review"],
+          handle: async (action) => ({
+            sinkName: "s",
+            actionId: action.id,
+            actionType: action.type,
+            success: true,
+            durationMs: 0,
+          }),
+        },
+      ],
+      emitted,
+    );
+    const result = await wrapped!.handle(
+      { id: "a1", type: "github:pr:review", payload: {}, timestamp: 0 },
+      {} as never,
+    );
+    expect(result.success).toBe(true);
+    expect(emitted).toEqual(["github:pr:review"]);
+  });
+});
+
+describe("pipeline end to end", () => {
+  it("reviews a queued pull request through the broker and acks the event", async () => {
+    const repository = "acme/pipeline-review";
+    await provision(repository, "pr.review");
+    await enqueue("pipe-1", pullRequestPayload("pipe-1", { repository }), "pull_request", repository);
+    const { calls } = stubUpstream(201);
+
+    const response = await run({ repository });
+    expect(response.status).toBe(200);
+    const report = (await response.json()) as {
+      ok: boolean;
+      repository: string;
+      claimed: number;
+      succeeded: number;
+      failed: number;
+      runs: Array<{ deliveryId: string; status: string; actionTypes: string[] }>;
+    };
+    expect(report).toMatchObject({ ok: true, repository, claimed: 1, succeeded: 1, failed: 0 });
+    expect(report.runs[0]).toMatchObject({ deliveryId: "pipe-1", status: "succeeded", actionTypes: ["github:pr:review"] });
+
+    // The provider saw the review with the real credential, once.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(`https://api.github.com/repos/${repository}/pulls/7/reviews`);
+    expect(calls[0]?.authorization).toBe(`Bearer ${GITHUB_CREDENTIAL}`);
+    expect(calls[0]?.body).toMatchObject({ event: "COMMENT" });
+    expect(String((calls[0]?.body as { body?: string }).body)).toContain("Automated review of #7");
+
+    // The queue moved on.
+    expect(await stats(repository)).toMatchObject({ processed: 1, pending: 0, processing: 0 });
+
+    // Draining again finds nothing to do (no double review).
+    const second = (await (await run({ repository })).json()) as { claimed: number };
+    expect(second.claimed).toBe(0);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("counts reviews across runs using repository memory", async () => {
+    const repository = "acme/pipeline-memory";
+    await provision(repository, "pr.review");
+
+    await enqueue("pipe-2", pullRequestPayload("pipe-2", { number: 8, repository }), "pull_request", repository);
+    const first = stubUpstream(201);
+    expect((await run({ repository })).status).toBe(200);
+    vi.unstubAllGlobals();
+
+    await enqueue("pipe-3", pullRequestPayload("pipe-3", { number: 9, repository }), "pull_request", repository);
+    const second = stubUpstream(201);
+    expect((await run({ repository })).status).toBe(200);
+
+    expect(first.calls).toHaveLength(1);
+    expect(second.calls).toHaveLength(1);
+    const firstBody = String((first.calls[0]?.body as { body?: string }).body);
+    const secondBody = String((second.calls[0]?.body as { body?: string }).body);
+    // Repository memory is durable across runs, which is what a model runtime
+    // will rely on for context.
+    expect(firstBody).toContain("review #1");
+    expect(secondBody).toContain("review #2");
+  });
+
+  it("fails the event when the provider rejects the call", async () => {
+    const repository = "acme/pipeline-fail";
+    await provision(repository, "pr.review");
+    await enqueue("pipe-4", pullRequestPayload("pipe-4", { number: 11, repository }), "pull_request", repository);
+    vi.stubGlobal(
+      "fetch",
+      (async () => {
+        throw new Error("connection reset");
+      }) as unknown as typeof fetch,
+    );
+
+    const failed = (await (await run({ repository })).json()) as {
+      failed: number;
+      runs: Array<{ status: string; error?: string }>;
+    };
+    expect(failed.failed).toBe(1);
+    expect(failed.runs[0]?.status).toBe("failed");
+    expect(failed.runs[0]?.error ?? "").toContain("upstream request failed");
+
+    // A first failure is a retry, not a dead letter: the event goes back to
+    // `pending` with its error recorded and a backoff.
+    const after = await stats(repository);
+    expect(after.processing).toBe(0);
+    expect(after.pending + after.failed).toBe(1);
+    const [event] = await queueEvents(repository);
+    expect(event?.status).toBe("pending");
+    expect(event?.attempts).toBe(1);
+    expect(event?.lastError ?? "").toContain("upstream request failed");
+  });
+
+  it("acknowledges events the agent decides not to act on", async () => {
+    const repository = "acme/pipeline-skip";
+    await enqueue(
+      "pipe-5",
+      pullRequestPayload("pipe-5", { action: "closed", repository }),
+      "pull_request",
+      repository,
+    );
+    const { calls } = stubUpstream(201);
+
+    const report = (await (await run({ repository })).json()) as { claimed: number; skipped: number; succeeded: number };
+    expect(report).toMatchObject({ claimed: 1, skipped: 1, succeeded: 0 });
+    expect(calls).toHaveLength(0);
+    expect((await stats(repository)).processed).toBeGreaterThanOrEqual(1);
+  });
+
+  it("requires the control key and POST", async () => {
+    expect((await run({ controlKey: null })).status).toBe(401);
+    expect((await run({ controlKey: "wrong" })).status).toBe(401);
+    expect((await run({ method: "GET" })).status).toBe(405);
+  });
+
+  it("fails the run when the agent is not provisioned", async () => {
+    const repository = "acme/pipeline-unprovisioned";
+    await enqueue(
+      "pipe-6",
+      pullRequestPayload("pipe-6", { number: 12, repository }),
+      "pull_request",
+      repository,
+    );
+    const { calls } = stubUpstream(201);
+
+    const report = (await (await run({ repository })).json()) as { failed: number; runs: Array<{ error?: string }> };
+    expect(report.failed).toBe(1);
+    expect(report.runs[0]?.error ?? "").toContain("not provisioned");
+    expect(calls).toHaveLength(0);
+  });
+});
