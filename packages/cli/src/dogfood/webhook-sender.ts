@@ -133,14 +133,30 @@ export async function sendWebhook(options: WebhookSenderOptions): Promise<Webhoo
 
       if (!drainRes.ok) {
         const text = await drainRes.text().catch(() => '');
-        io.stderr(`[dogfood webhook] Drain failed (${drainRes.status}): ${text}`);
+        const errorMsg = `Drain failed (${drainRes.status}): ${text}`;
+        io.stderr(`[dogfood webhook] ${errorMsg}`);
+        return {
+          ok: false,
+          deliveryId,
+          webhookStatus: res.status,
+          webhookResponse: responseData,
+          error: errorMsg,
+        };
       } else {
         drainReport = (await drainRes.json().catch(() => ({}))) as Record<string, unknown>;
         io.stdout(`[dogfood webhook] Drain completed: ${JSON.stringify(drainReport)}`);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      io.stderr(`[dogfood webhook] Drain request failed: ${msg}`);
+      const errorMsg = `Drain request failed: ${msg}`;
+      io.stderr(`[dogfood webhook] ${errorMsg}`);
+      return {
+        ok: false,
+        deliveryId,
+        webhookStatus: res.status,
+        webhookResponse: responseData,
+        error: errorMsg,
+      };
     }
   }
 

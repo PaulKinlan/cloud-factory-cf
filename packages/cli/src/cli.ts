@@ -124,14 +124,16 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
       once = true;
     } else if (arg === '--manifest' && i + 1 < remaining.length) {
       manifestPath = remaining[++i];
-    } else if ((arg === '--event' || arg === '--event-file') && i + 1 < remaining.length) {
+    } else if (arg === '--event-file' && i + 1 < remaining.length) {
+      eventFile = remaining[++i];
+    } else if (arg === '--event-type' && i + 1 < remaining.length) {
+      event = remaining[++i];
+    } else if (arg === '--event' && i + 1 < remaining.length) {
       if (command === 'webhook') {
         event = remaining[++i];
       } else {
         eventFile = remaining[++i];
       }
-    } else if (arg === '--event-type' && i + 1 < remaining.length) {
-      event = remaining[++i];
     } else if (arg === '--out' && i + 1 < remaining.length) {
       outPath = remaining[++i];
     } else if (arg === '--install') {
@@ -637,7 +639,7 @@ export async function runCli(
       });
 
       io.stdout(`[factory-cloud review] Verdict: ${result.verdict} (${result.findings.length} finding(s))`);
-      if (parsed.strict && result.verdict === 'REQUEST_CHANGES') {
+      if (parsed.strict && (result.verdict !== 'APPROVE' || result.findings.length > 0)) {
         return 1;
       }
       return 0;

@@ -116,39 +116,41 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
   // 3. Inspect changed files via git or options or directory walk fallback
   let changedFiles: string[] = options.changedFiles ? [...options.changedFiles] : [];
 
-  if (changedFiles.length === 0) {
+  if (changedFiles.length === 0 && !options.changedFiles) {
+    let gitSucceeded = false;
     try {
       const { stdout } = await execAsync(
         `git diff --name-only origin/${baseRef}...HEAD 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || git status --porcelain`,
         { cwd },
       );
+      gitSucceeded = true;
       changedFiles = stdout
         .split('\n')
         .map((l) => l.trim().replace(/^[MADRCU?!]{1,2}\s+/, ''))
         .filter((l) => l.length > 0);
     } catch {
-      changedFiles = [];
+      gitSucceeded = false;
     }
-  }
 
-  // If git returned nothing (e.g. non-git directory in tests/harness), fallback to workspace files
-  if (changedFiles.length === 0) {
-    async function walk(dir: string, base: string): Promise<string[]> {
-      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
-      const results: string[] = [];
-      for (const entry of entries) {
-        if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === 'dist') continue;
-        const rel = path.join(base, entry.name);
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          results.push(...(await walk(full, rel)));
-        } else if (entry.isFile()) {
-          results.push(rel);
+    // If git failed (e.g. non-git directory in test fixtures), fallback to workspace files
+    if (!gitSucceeded) {
+      async function walk(dir: string, base: string): Promise<string[]> {
+        const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+        const results: string[] = [];
+        for (const entry of entries) {
+          if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === 'dist') continue;
+          const rel = path.join(base, entry.name);
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            results.push(...(await walk(full, rel)));
+          } else if (entry.isFile()) {
+            results.push(rel);
+          }
         }
+        return results;
       }
-      return results;
+      changedFiles = await walk(cwd, '');
     }
-    changedFiles = await walk(cwd, '');
   }
 
   // Deduplicate and normalize

@@ -242,6 +242,109 @@ test('sendWebhook: delivers signed webhook payload and can trigger drain', async
   assert.equal(drainAuth, 'Bearer control-12345');
 });
 
+test('sendWebhook: fails closed and returns ok: false when drain fails (fixes cloud-factory-cf-6ox)', async () => {
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    if (url.pathname.startsWith('/webhooks/')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, deliveryId: 'deliv-123' }));
+      return;
+    }
+    if (url.pathname.startsWith('/runs/')) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'internal error' }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const port = (server.address() as any).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  const result = await sendWebhook({
+    url: baseUrl,
+    owner: 'test-owner',
+    repo: 'test-repo',
+    secret: 'whsec_test',
+    event: 'pull_request',
+    payload: { action: 'opened' },
+    drain: true,
+    controlKey: 'control-12345',
+    io: { stdout: () => {}, stderr: () => {} },
+  });
+
+  server.close();
+
+  assert.equal(result.ok, false);
+  assert.ok(result.error?.includes('Drain failed (500)'));
+});
+
+test('parseArgs: parses --event-file as payload file, not event type (fixes cloud-factory-cf-vc7)', () => {
+  const parsed = parseArgs([
+    'webhook',
+    '--url',
+    'http://x',
+    '--secret',
+    's',
+    '--repo',
+    'o/r',
+    '--event-file',
+    '/tmp/payload.json',
+  ]);
+  assert.equal(parsed.command, 'webhook');
+  assert.equal(parsed.eventFile, '/tmp/payload.json');
+  assert.equal(parsed.event, undefined);
+});
+
+test('runCli: review --strict returns exit code 1 when COMMENT has findings (fixes cloud-factory-cf-npo)', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-strict-'));
+  await fs.mkdir(path.join(tmpDir, 'src'), { recursive: true });
+  await fs.writeFile(path.join(tmpDir, 'src', 'feature.ts'), 'export const x = 1;\n', 'utf8');
+
+  const logs: string[] = [];
+  const exitCode = await runCli(
+    ['review', '--cwd', tmpDir, '--dry-run', '--strict'],
+    {
+      stdout: (m) => logs.push(m),
+      stderr: (m) => logs.push(m),
+    },
+  );
+
+  assert.equal(exitCode, 1);
+  assert.ok(logs.some((l) => l.includes('Verdict: COMMENT')));
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
+test('runPrReview: empty git diff reports 0 files and APPROVE without whole-repo scan (fixes cloud-factory-cf-c7v)', async () => {
+  const { exec } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execAsync = promisify(exec);
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-empty-diff-'));
+  await execAsync('git init -q -b main . && git config user.email "test@example.com" && git config user.name "Test"', { cwd: tmpDir });
+  await fs.mkdir(path.join(tmpDir, 'src'), { recursive: true });
+  await fs.writeFile(path.join(tmpDir, 'src', 'a.ts'), 'export const a = 1;\n', 'utf8');
+  await fs.writeFile(path.join(tmpDir, 'README.md'), '# hi\n', 'utf8');
+  await execAsync('git add -A && git commit -qm "init"', { cwd: tmpDir });
+  await execAsync('git update-ref refs/remotes/origin/main HEAD', { cwd: tmpDir });
+
+  // When HEAD == origin/main, diff is empty
+  const result = await runPrReview({
+    cwd: tmpDir,
+    dryRun: true,
+    io: { stdout: () => {}, stderr: () => {} },
+  });
+
+  assert.equal(result.changedFiles.length, 0);
+  assert.equal(result.findings.length, 0);
+  assert.equal(result.verdict, 'APPROVE');
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
 test('runCli: review command runs and succeeds with 0 exit code', async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-review-'));
   const eventFilePath = path.join(tmpDir, 'event.json');
