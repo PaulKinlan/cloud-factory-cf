@@ -10,7 +10,8 @@
     "preview": "vite preview --port 4173",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "test:file": "vitest run"
+    "test:file": "vitest run",
+    "test:changed": "vitest run --changed $(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

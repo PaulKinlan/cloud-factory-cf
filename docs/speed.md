@@ -15,13 +15,12 @@ served by `fleet-deps`.
 | `npm run ci` | build + typecheck + test | 14–17s idle VM; 45s+ when the VM is loaded |
 | `npm run test:file -- test/<file>.test.ts` | one workerd test file | 2–3s |
 | `npm run test -w @factory-cloud/web` | one node-mode test file set (canvas model) | 0.9s |
-| `vitest run --changed` | dev-loop only, **not a gate** — see below | selects 0 tests in a committed worktree |
+| `npm run test:changed` | dev-loop only, **not the gate** — see "Fast tier" | affected suites; fails when a source change maps to none |
 
 `apps/web` is in those numbers: its unit tests run in plain Node (≈0.2s) and its
-build is a 0.1s `vite build`. `apps/worker` builds the canvas before its own
-dry-run deploy and before its tests (`prebuild`/`pretest`), which is what keeps
-`ASSETS` pointing at a directory that exists; the cost is that `vite build` runs
-twice per `npm run ci` (≈0.2s total). Measured 2026-10-19: the assets binding
+build is a 0.1s `vite build`. The root `build` chain builds the canvas bundle
+exactly once before `apps/worker`, so `ASSETS` points at a directory that exists
+without any `prebuild`/`pretest` hook (see "Build each workspace once"). Measured 2026-10-19: the assets binding
 itself adds no measurable test time (15.12s with `assets` vs 14.98s without, same
 loaded machine — the earlier 7.4s figure was a quiet VM).
 
@@ -36,55 +35,54 @@ is vitest + workerd pool startup.
 - **Iterating (everyone):** run the tests for what you changed —
   `npm run test:file -- test/<file>.test.ts` — in the foreground with a
   `timeout`. Do not run the full suite per edit.
-- **Implementers:** `fleet-check --fast` on the committed tree (this repo's fast
-  tier, once installed, is `npm run ci` — it runs everything).
+- **Implementers:** `fleet-check --fast` on the committed tree — `npm run build &&
+  npm run typecheck && bash scripts/changed-tests.sh` (see "Fast tier" below).
 - **Mergers:** `fleet-check` once on the merged union, not per branch.
 - Never re-gate an unchanged tree: verdicts are cached per commit tree.
 
 ### Fast tier for this repo
 
-This repo currently has **no fast tier configured**, so `fleet-check --fast`
-exits 2 for every lane and each implementer either runs focused tests by hand or
-pays the full gate. The gate is small enough that a second command set buys
-little, so the proposal is the same command for both tiers:
+`~/.fleet/check.conf` (installed 2026-10-19, bead `cloud-factory-cf-cn8`):
 
 ```conf
-CHECK_CMD="npm run ci"          # ~14-17s idle, longer when the VM is loaded
-CHECK_FAST_CMD="npm run ci"     # same: the whole gate is already "fast"
-CHECK_TIMEOUT=300
-CHECK_FAST_TIMEOUT=180
+CHECK_FAST_CMD="npm run build && npm run typecheck && bash scripts/changed-tests.sh"
 ```
 
-`~/.fleet/check.conf` is host-wide machine state, so the coordinator/hub owns
-writing it; this file only records the values and the measurements behind them.
-If the suite grows past ~60s, split the tier by *scope*, not by change
-detection: keep `npm run ci` as the fast tier and move the slow suite (browsers,
-integration journeys) behind its own npm script that the full gate adds. A fast
-tier must run tests unconditionally (see the next section).
+The fast tier must be a **strict subset** of the full gate and must never report a
+pass for a change nothing covered. `scripts/changed-tests.sh` is written to that
+contract:
 
-### Why `vitest --changed` is not a gate here
+- the delta is `origin/main...HEAD` **plus** working-tree changes, so a committed
+  branch is not invisible (the failure mode of `vitest run --changed` with no ref,
+  findings `cloud-factory-cf-gy5`/`l0q`);
+- a changed **source** file (`apps/*/src`, `packages/*/src`) that selects **no**
+  suite is a **failure named on stderr**, not a silent pass;
+- a delta with no source changes is exempt and says so;
+- a delta that runs nothing exits non-zero rather than reporting green;
+- for `apps/web`/`apps/worker` it asks `vitest list --changed --filesOnly` what is
+  affected; the `node:test` packages (`sdk`, `cli`, `canvas-model`) are seconds, so
+  a change there runs their whole suite.
 
-Background: this section started as a "changed tests" fast tier. It is not one,
-for two different reasons (findings `cloud-factory-cf-gy5`, `cloud-factory-cf-l0q`):
+Measured on an ordinary source-only delta it selects a handful of files instead of
+19; for a manifest change vitest conservatively selects the whole workspace, which
+is the honest answer rather than a guess. The merger's full gate remains the oracle
+for the merged union.
 
-**No ref** (`vitest run --changed`, vitest 4.1.12, verified on this tree
-2026-10-18) — the change list comes from staged/unstaged git state only, never
-from the branch's commits. A committed branch therefore looks unchanged, and
-`fleet-check` only accepts a committed tree, so this mode reported
-**"No test files found, exiting with code 0"** on the state a gate actually
-verifies. (On this pool it also selected nothing with an uncommitted edit to
-`apps/worker/src/webhooks.ts`, which is why it is not trusted here at all.)
+### Build each workspace once
 
-**Explicit ref** (`vitest run --changed=origin/main`) — vitest diffs
-`ref...HEAD` in addition to staged/unstaged files, so a branch that only touches
-docs or manifests legitimately selects zero tests. That zero is correct, not a
-bug; the problem is that it still exits 0, so "no affected tests" is
-indistinguishable from "the selection broke" or "there are no tests".
+`npm run ci` used to build `apps/web` **three times**: twice inside `npm run build`
+(root `--workspaces` sweep plus `apps/worker`'s `prebuild`) and once more from
+`apps/worker`'s `pretest`. The hooks are gone and the root build is an explicit
+chain:
 
-Either way a green run can mean nothing ran. Gates here run tests
-unconditionally: `npm run test:file -- test/<file>.test.ts` while iterating,
-`npm run ci` for any verdict. The `test:changed` npm scripts were removed so the
-false-green path cannot be reached by habit or by a copied gate config.
+```
+canvas-model → sdk → web → worker
+```
+
+Measured (`npm run build`, same VM, alternating runs): **8.3–9.0s → 5.2–7.7s**, one
+vite build instead of three. A consequence worth knowing: `npm test` on its own no
+longer builds the canvas bundle, so **`npm run ci` (or `fleet-check`) is the entry
+point from a clean tree**; that was already the rule for `packages/sdk/dist`.
 
 ## Budgets
 
@@ -119,8 +117,10 @@ from clean** (verified 2026-10-19: `npm test` fails in ~1s from a cleaned tree,
   dependency graph);
 - add it to `workspaces` in dependency position so `typecheck`/`test` see the
   same order;
-- a workspace that must exist before tests run should say so with a
-  `prebuild`/`pretest` hook (as `apps/worker` does for the canvas bundle).
+- a workspace whose output another workspace *bundles* (as `apps/worker` embeds
+  `apps/web/dist`) belongs on that chain too — do not reach for
+  `prebuild`/`pretest` hooks: they rebuild it once per workspace command, which is
+  how `apps/web` came to be built three times (bead `cloud-factory-cf-cn8`).
 
 ## Test independence (why the suite stays cheap and green)
 
