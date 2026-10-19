@@ -1,3 +1,5 @@
+import { safeParseJson } from "./events/helpers";
+
 export interface MemoryRow extends Record<string, SqlStorageValue> {
   key: string;
   value: string;
@@ -36,8 +38,8 @@ export class MemoryHandler {
     return Response.json({
       ok: true,
       key: row.key,
-      value: safeParseJson(row.value),
-      metadata: row.metadata ? safeParseJson(row.metadata) : undefined,
+      value: safeParseJson(row.value, row.value),
+      metadata: row.metadata ? safeParseJson(row.metadata, row.metadata) : undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     });
@@ -66,8 +68,8 @@ export class MemoryHandler {
       keys: rows.map((r) => r.key),
       entries: rows.map((r) => ({
         key: r.key,
-        value: safeParseJson(r.value),
-        metadata: r.metadata ? safeParseJson(r.metadata) : undefined,
+        value: safeParseJson(r.value, r.value),
+        metadata: r.metadata ? safeParseJson(r.metadata, r.metadata) : undefined,
         createdAt: r.created_at,
         updatedAt: r.updated_at,
       })),
@@ -120,13 +122,5 @@ export class MemoryHandler {
 
   total(): number {
     return this.sql.exec<{ total: number }>("SELECT count(*) AS total FROM memory").one().total;
-  }
-}
-
-export function safeParseJson(value: string): unknown {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
   }
 }

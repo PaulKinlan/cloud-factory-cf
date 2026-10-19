@@ -11,6 +11,8 @@
  * verification rules are unit-testable and reused by the coordinator.
  */
 
+import { asRecord } from "./events/helpers";
+
 export type Provider = "github" | "gitlab";
 
 export const SUPPORTED_PROVIDERS: readonly Provider[] = ["github", "gitlab"];
@@ -148,9 +150,7 @@ function loginOf(root: Record<string, unknown> | null): string | null {
   return typeof user === "string" ? user : null;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
-}
+
 
 function hexToBytes(hex: string): Uint8Array<ArrayBuffer> | null {
   // Backed by a real ArrayBuffer (not ArrayBufferLike) so the result is a valid

@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
 import { MemoryHandler, migrateMemoryTable } from "./memory";
+import { safeDecode } from "./events/helpers";
 
 export class OrgCoordinator extends DurableObject<Env> {
   private memoryHandler!: MemoryHandler;
@@ -80,14 +81,6 @@ export class OrgCoordinator extends DurableObject<Env> {
       org: this.ctx.id.name ?? "unknown",
       totalKeys: this.memoryHandler.total(),
     });
-  }
-}
-
-function safeDecode(value: string): string | null {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return null;
   }
 }
 
