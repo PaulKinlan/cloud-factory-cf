@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import viteConfig from "../vite.config";
 import {
   validatePem,
   validateApiKey,
@@ -71,5 +72,10 @@ describe("Admin Dashboard Frontend Utilities", () => {
     expect(buildWebhookUrl("http://localhost:8787", "org", "repo")).toBe(
       "http://localhost:8787/webhooks/github/org/repo",
     );
+  });
+
+  it("vite.config: configures multi-page inputs for main and admin", () => {
+    expect((viteConfig.build?.rollupOptions?.input as any)?.admin).toBe("admin.html");
+    expect((viteConfig.build?.rollupOptions?.input as any)?.main).toBe("index.html");
   });
 });
