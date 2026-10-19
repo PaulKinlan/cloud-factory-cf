@@ -80,8 +80,10 @@ control key because the metadata names agents and actions.
 - Per-agent quota is enforced (see below); nothing yet stops a *holder of the
   control key* from issuing many capabilities, which is the next hardening bead
   (`cloud-factory-cf-2j3`, provisioning records).
-- Capability issuance trusts the control key alone: there is no per-agent
-  provisioning record, so any holder can mint a capability for any agent id.
+- Capability issuance requires a provisioning record per (agent, service,
+  action) — see below — but the control key can still create one for any agent:
+  the next step is tying provisioning to an authenticated control-plane caller
+  rather than a single shared key.
 - The policy table is static; per-repo overrides would need a config surface.
 - One upstream credential per service, not per installation.
 
@@ -106,3 +108,26 @@ the calls it will make on an agent's behalf:
   status `429` — no upstream request is made.
 - Expired rows are pruned on every check, so the table is bounded by the quota
   itself rather than by traffic history.
+
+## Provisioning (who may receive a capability)
+
+The control key alone no longer mints a capability for any agent id. Issuance
+also needs a provisioning record for the exact `(agent, service, action)`, or a
+record with `action = "*"` for that service:
+
+| Route (broker object) | Purpose |
+| --- | --- |
+| `POST /provisioning` | add `{agent, service, action}` (`action: "*"` allows every action the policy permits) |
+| `DELETE /provisioning` | revoke `{agent, service, action}` (404 when there is nothing to revoke) |
+| `GET /provisioning` | list records, plus whether enforcement is on |
+
+All three require `x-factory-control-key`. Provisioning cannot widen the policy
+table: a record for an action the policy does not permit is refused with 403, and
+a wildcard record still leaves policy-denied actions denied at issuance.
+
+- Enforcement is **on by default**. `BROKER_REQUIRE_PROVISIONING=0` (or `false`/`no`)
+  turns the check off for a deployment that provisions elsewhere.
+- Issuance without a record returns `403` with `error: "agent is not provisioned
+  for this action"` and writes an audit row (outcome `denied`) so a probing agent
+  leaves a trace.
+- Provisioning writes are audited too (`provisioned` / `deprovisioned`).

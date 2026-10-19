@@ -19,7 +19,13 @@ async function call(repository: string, operation: string, body?: unknown): Prom
   });
 }
 
+/** Capability issuance needs a provisioning record, so tests provision first. */
+async function provision(repository: string, agent: string, action: string): Promise<Response> {
+  return call(repository, "provisioning", { agent, service: "github", action });
+}
+
 async function issue(repository: string, agent: string, action: string): Promise<string> {
+  await provision(repository, agent, action);
   const response = await call(repository, "capabilities", { agent, service: "github", action });
   const payload = (await response.json()) as { ok: boolean; capability?: string };
   expect(payload.ok).toBe(true);

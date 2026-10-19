@@ -18,6 +18,11 @@ export interface FactoryEnv {
   /** Control-plane key required to issue a capability. Never committed. */
   BROKER_CONTROL_KEY?: string;
   /**
+   * Capability issuance requires a provisioning record unless this is "0"/"false".
+   * Default (unset) enforces provisioning.
+   */
+  BROKER_REQUIRE_PROVISIONING?: string;
+  /**
    * Calls per (agent, service, action) per 60s window before the broker answers
    * 429. Unset means the default (60); "0" disables the quota.
    */
