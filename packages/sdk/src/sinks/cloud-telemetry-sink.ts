@@ -40,7 +40,10 @@ export class CloudTelemetrySink implements ActionSink {
     this.name = options.name ?? 'cloud-telemetry-sink';
     this.customExporter = options.exporter;
     this.bufferInMemory = options.bufferInMemory ?? true;
-    this.maxBufferSize = options.maxBufferSize ?? 1000;
+    this.maxBufferSize =
+      typeof options.maxBufferSize === 'number' && Number.isFinite(options.maxBufferSize)
+        ? Math.max(0, Math.trunc(options.maxBufferSize))
+        : 1000;
   }
 
   private pushBuffer(entry: {
@@ -48,7 +51,10 @@ export class CloudTelemetrySink implements ActionSink {
     payload: TelemetryMetricPayload | TelemetryLogPayload;
     timestamp: number;
   }): void {
-    if (this.buffer.length >= this.maxBufferSize) {
+    if (this.maxBufferSize === 0) {
+      return;
+    }
+    while (this.buffer.length >= this.maxBufferSize) {
       this.buffer.shift();
     }
     this.buffer.push(entry);
