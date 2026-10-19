@@ -35,20 +35,27 @@ cloud-factory-cf/
 
 ## 3. Build Order & Dependency Graph
 
-`dist/` directories are gitignored. Packages and apps have explicit compilation order:
+`dist/` directories are gitignored. The actual workspace package dependencies are:
 
 ```
-packages/canvas-model ──► packages/sdk ──► packages/cli
-         │                                       ▲
-         ▼                                       │
-     apps/web ───────────────────────────► apps/worker
+packages/canvas-model ──────┬──► apps/web ──(ASSETS)──┐
+                            │                         ▼
+                            └──► apps/worker ◄── packages/sdk ◄── packages/cli
 ```
 
-1. **`packages/canvas-model`**: compiles first via `tsc -p tsconfig.build.json`.
-2. **`packages/sdk`**: depends on `canvas-model`, compiles via `tsc -p tsconfig.build.json`.
-3. **`packages/cli`**: depends on `sdk`, compiles via `tsc -p tsconfig.build.json`.
-4. **`apps/web`**: builds canvas bundle via `vite build` into `apps/web/dist`.
-5. **`apps/worker`**: bundles Worker and validates DO bindings via `wrangler deploy --dry-run --outdir dist`.
+- **`packages/canvas-model`**: standalone document model (no internal dependencies).
+- **`packages/sdk`**: standalone extension and studio SDK (no internal dependencies).
+- **`packages/cli`**: CLI tools and runner; depends on `@factory-cloud/sdk`.
+- **`apps/web`**: canvas UI; depends on `@factory-cloud/canvas-model`.
+- **`apps/worker`**: Cloudflare Worker; depends on `@factory-cloud/canvas-model` and `@factory-cloud/sdk`, and binds `apps/web/dist` as static assets (`ASSETS`).
+
+### Compilation Order
+Because `dist/` is gitignored, clean-tree compilation builds shared packages before consumers:
+1. `packages/canvas-model` (`tsc -p tsconfig.build.json`)
+2. `packages/sdk` (`tsc -p tsconfig.build.json`)
+3. `packages/cli` (`tsc -p tsconfig.build.json`)
+4. `apps/web` (`vite build`)
+5. `apps/worker` (`wrangler deploy --dry-run --outdir dist`)
 
 Run root compilation with:
 ```bash
