@@ -95,6 +95,33 @@ false-green path cannot be reached by habit or by a copied gate config.
 - Adding a test that costs ~1s (like the `@cloudflare/computer` resolution
   guard) is fine when it protects a real contract; say so in the summary.
 
+## Order matters from a clean tree: `npm run ci`, not `npm test`
+
+`dist/` is gitignored, and `@factory-cloud/cli` resolves `@factory-cloud/sdk`
+through `packages/sdk/dist`. So in a **clean** checkout — a new worktree, a fresh
+clone, or right after a `dist` cleanup — `npm test` on its own fails before it
+runs anything:
+
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '.../node_modules/@factory-cloud/sdk/dist/index.js'
+  imported from .../packages/cli/src/runner/local-runner.ts
+```
+
+That is not a broken test: the root `build` script deliberately builds the SDK
+first (`npm run build -w @factory-cloud/sdk && npm run build --workspaces`), and
+`ci` is `build && typecheck && test`, so **`npm run ci` is the command that works
+from clean** (verified 2026-10-19: `npm test` fails in ~1s from a cleaned tree,
+`npm run ci` from the same tree passes). Rules for adding a workspace package:
+
+- build it **before** everything that imports it: put it on the explicit
+  `-w <package>` chain in the root `build` script, not only inside the
+  `--workspaces` sweep (that sweep follows `workspaces` order, not the
+  dependency graph);
+- add it to `workspaces` in dependency position so `typecheck`/`test` see the
+  same order;
+- a workspace that must exist before tests run should say so with a
+  `prebuild`/`pretest` hook (as `apps/worker` does for the canvas bundle).
+
 ## Test independence (why the suite stays cheap and green)
 
 These are the pathologies that turn one lane's change red for everyone else:
