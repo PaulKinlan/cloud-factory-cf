@@ -25,7 +25,10 @@ done
 [ -n "$BASE" ] || BASE=$(git merge-base origin/main HEAD 2>/dev/null || git rev-parse HEAD)
 
 changed=$(
-  { git diff --name-only "$BASE"...HEAD; git diff --name-only; git ls-files --others --exclude-standard; } 2>/dev/null | sort -u
+  { git diff --name-only "$BASE"...HEAD
+    git diff --cached --name-only        # staged but uncommitted
+    git diff --name-only                 # unstaged
+    git ls-files --others --exclude-standard; } 2>/dev/null | sort -u
 )
 if [ -z "$changed" ]; then
   echo "changed-tests: no changes against $BASE — nothing to run"
@@ -33,6 +36,24 @@ if [ -z "$changed" ]; then
 fi
 
 is_source() { case "$1" in apps/*/src/*|packages/*/src/*) return 0 ;; *) return 1 ;; esac; }
+is_test() { case "$1" in apps/*/test/*.test.ts|packages/*/tests/*.test.ts) return 0 ;; *) return 1 ;; esac; }
+
+# Workspaces this gate can actually run, and where their tests live.
+VITEST_WORKSPACES="apps/web apps/worker"
+NODE_TEST_WORKSPACES="packages/sdk packages/cli packages/canvas-model"
+owns_tests() { # <workspace> <path>
+  case "$1" in
+    apps/*) case "$2" in "$1"/test/*.test.ts) return 0 ;; esac ;;
+    *)      case "$2" in "$1"/tests/*.test.ts) return 0 ;; esac ;;
+  esac
+  return 1
+}
+run_workspace_suite() { # <workspace>
+  case "$1" in
+    apps/*) (cd "$1" && npx vitest run) ;;
+    *)      (cd "$1" && npm test --silent) ;;
+  esac
+}
 
 # Files that are source but have no suite yet. They are named loudly rather than
 # silently passing, and the bead tracks adding a test (cloud-factory-cf-5e8, cloud-factory-cf-d8s).
@@ -42,10 +63,42 @@ is_declared() { case " $DECLARED_UNVERIFIED " in *" $1 "*) return 0 ;; *) return
 
 sources=$(echo "$changed" | while read -r path; do is_source "$path" && echo "$path"; done)
 if [ -z "$sources" ]; then
-  # Build/config/docs only: nothing maps to a suite, but a gate that runs no suite
-  # at all cannot be told apart from one whose selection broke (the fleet gate
-  # reports coverage UNKNOWN). Run a fixed smoke set so the verdict has evidence.
-  echo "changed-tests: $(echo "$changed" | wc -l | tr -d ' ') changed path(s), none of them source — running the smoke set"
+  # No source changed. A test-file delta runs its workspace's whole suite — a
+  # deleted or renamed test is never selected by `vitest --changed`, so asking for
+  # the delta would run nothing — and anything else falls back to a fixed smoke
+  # set. Neither may hard-FAIL: "no suite covers this" for a test-only delta is a
+  # false red (cloud-factory-cf-8f1).
+  tests=$(echo "$changed" | while read -r path; do is_test "$path" && echo "$path"; done)
+  test_status=0
+  ran_tests=0
+  if [ -n "$tests" ]; then
+    for ws in $VITEST_WORKSPACES $NODE_TEST_WORKSPACES; do
+      mine=$(echo "$tests" | while read -r path; do owns_tests "$ws" "$path" && echo "$path"; done)
+      [ -n "$mine" ] || continue
+      ran_tests=1
+      if [ "$LIST" -eq 1 ]; then
+        echo "changed-tests: ${ws}: whole suite (test-file delta)"
+        echo "$mine" | sed 's/^/  /'
+        continue
+      fi
+      echo "changed-tests: ${ws}: whole suite (test-file delta: $(echo "$mine" | tr '\n' ' '))"
+      run_workspace_suite "$ws" || test_status=1
+    done
+    uncovered=$(echo "$tests" | while read -r path; do
+      owned=0
+      for ws in $VITEST_WORKSPACES $NODE_TEST_WORKSPACES; do owns_tests "$ws" "$path" && owned=1; done
+      [ "$owned" -eq 0 ] && echo "$path"
+    done)
+    if [ -n "$uncovered" ]; then
+      echo "changed-tests: not part of the gate (no workspace runs these):"
+      echo "$uncovered" | sed 's/^/  /'
+    fi
+  fi
+  if [ "$ran_tests" -eq 1 ]; then
+    [ "$LIST" -eq 1 ] && exit 0
+    exit "$test_status"
+  fi
+  echo "changed-tests: $(echo "$changed" | wc -l | tr -d ' ') changed path(s), none of them source or a covered test — running the smoke set"
   echo "$changed" | sed 's/^/  /'
   if [ "$LIST" -eq 1 ]; then
     echo "changed-tests: smoke = apps/web (whole node suite), apps/worker test/worker.test.ts test/assets.test.ts"
