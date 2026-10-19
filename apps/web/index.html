@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cloud Factory — agent canvas</title>
+    <meta name="description" content="Infinite canvas for wiring agents, event sources, memory hubs and action sinks." />
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Cloud Factory <span>canvas</span></h1>
+
+      <div class="toolbar" role="toolbar" aria-label="Canvas tools">
+        <button type="button" data-add="agent" class="button button--agent">+ Agent</button>
+        <button type="button" data-add="source" class="button button--source">+ Event source</button>
+        <button type="button" data-add="memory" class="button button--memory">+ Memory hub</button>
+        <button type="button" data-add="sink" class="button button--sink">+ Action sink</button>
+        <button type="button" id="connect-toggle" class="button button--ghost" aria-pressed="false">Connect</button>
+        <button type="button" id="export" class="button button--ghost">Export config</button>
+        <button type="button" id="clear" class="button button--danger">Clear</button>
+      </div>
+
+      <div class="zoom" role="group" aria-label="Zoom">
+        <button type="button" id="zoom-out" class="button button--icon" aria-label="Zoom out">−</button>
+        <output id="zoom-level" aria-live="off">100%</output>
+        <button type="button" id="zoom-in" class="button button--icon" aria-label="Zoom in">+</button>
+        <button type="button" id="fit" class="button button--icon" aria-label="Fit nodes in view">Fit</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <div
+        id="viewport"
+        class="viewport"
+        tabindex="0"
+        role="application"
+        aria-label="Infinite canvas. Drag the background to pan, wheel to zoom. Arrow keys move the selected node; Delete removes it."
+      >
+        <div id="world" class="world">
+          <svg id="edges" class="edges" width="1" height="1" aria-hidden="true">
+            <defs>
+              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
+              </marker>
+            </defs>
+            <g id="edge-layer"></g>
+          </svg>
+          <div id="node-layer" class="node-layer"></div>
+        </div>
+        <p class="hint" id="hint">
+          Drag to pan · wheel to zoom · drag a node to move it · <kbd>Connect</kbd> then click two nodes · <kbd>Delete</kbd> removes the selection
+        </p>
+      </div>
+
+      <aside id="inspector" class="inspector" aria-label="Inspector">
+        <h2>Inspector</h2>
+        <p id="inspector-empty" class="muted">Select a node to edit it.</p>
+        <form id="inspector-form" hidden>
+          <label class="field">
+            <span>Name</span>
+            <input id="field-label" type="text" maxlength="80" autocomplete="off" />
+          </label>
+          <div id="field-list" class="field-list"></div>
+          <div class="inspector-actions">
+            <button type="button" id="delete-node" class="button button--danger">Delete node</button>
+          </div>
+          <details class="connections" id="connections">
+            <summary>Connections</summary>
+            <ul id="connection-list"></ul>
+          </details>
+        </form>
+      </aside>
+    </main>
+
+    <dialog id="export-dialog" class="export-dialog" aria-label="Exported agent configuration">
+      <h2>Agent configuration</h2>
+      <p class="muted">This is what the control plane consumes — edges collapsed into the agent they belong to.</p>
+      <pre id="export-json"></pre>
+      <div class="dialog-actions">
+        <button type="button" id="export-copy" class="button button--ghost">Copy</button>
+        <button type="button" id="export-download" class="button button--ghost">Download .json</button>
+        <button type="button" id="export-close" class="button">Close</button>
+      </div>
+    </dialog>
+
+    <p id="status" class="sr-only" role="status" aria-live="polite"></p>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
