@@ -22,3 +22,15 @@ export {
   printHelp,
   type CliParsedArgs,
 } from './cli.ts';
+
+export {
+  runPrReview,
+  type PrReviewOptions,
+  type PrReviewResult,
+} from './dogfood/pr-reviewer.ts';
+
+export {
+  sendWebhook,
+  type WebhookSenderOptions,
+  type WebhookSenderResult,
+} from './dogfood/webhook-sender.ts';

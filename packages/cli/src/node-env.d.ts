@@ -65,3 +65,12 @@ declare module 'node:util' {
 declare module 'node:os' {
   export function tmpdir(): string;
 }
+
+declare module 'node:crypto' {
+  export interface Hmac {
+    update(data: string): this;
+    digest(encoding: string): string;
+  }
+  export function createHmac(algorithm: string, key: string): Hmac;
+  export function randomUUID(): string;
+}
