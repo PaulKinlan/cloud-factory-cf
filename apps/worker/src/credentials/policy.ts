@@ -21,6 +21,13 @@ export interface ServiceActionDefinition {
   headers?: Record<string, string>;
   /** Allow newlines and multiline content in body params (e.g. for PR review markdown). */
   allowMultiline?: boolean;
+  /**
+   * Builds the request body for an action whose payload is not a flat set of
+   * strings, such as a model call (`messages: [{role, content}]`). The action still
+   * declares every parameter it may read, so the closed-set property holds; the
+   * builder bounds its own values.
+   */
+  body?: (params: Readonly<Record<string, string | number>>) => Record<string, unknown>;
 }
 
 export interface ServiceDefinition {
@@ -92,6 +99,47 @@ export const SERVICES: Readonly<Record<string, ServiceDefinition>> = {
         method: "GET",
         route: "/repos/{repository}/pulls/{number}",
         pathParams: ["number"],
+      },
+    },
+  },
+  anthropic: {
+    // The review model. The key is the operator's; the agent only names the service,
+    // the action and a prompt, and the broker attaches the credential.
+    host: "api.anthropic.com",
+    credentialEnv: "ANTHROPIC_API_KEY",
+    headers: (credential) => ({
+      "x-api-key": credential,
+      "anthropic-version": "2023-06-01",
+    }),
+    repositoryEncoding: "slash",
+    actions: {
+      "messages.create": {
+        method: "POST",
+        route: "/v1/messages",
+        bodyParams: ["model", "max_tokens", "prompt"],
+        body: (params) => ({
+          model: String(params["model"] ?? ""),
+          max_tokens: Number(params["max_tokens"] ?? 0),
+          messages: [{ role: "user", content: String(params["prompt"] ?? "") }],
+        }),
+      },
+    },
+  },
+  openai: {
+    host: "api.openai.com",
+    credentialEnv: "OPENAI_API_KEY",
+    headers: (credential) => ({ authorization: `Bearer ${credential}` }),
+    repositoryEncoding: "slash",
+    actions: {
+      "chat.completions": {
+        method: "POST",
+        route: "/v1/chat/completions",
+        bodyParams: ["model", "max_tokens", "prompt"],
+        body: (params) => ({
+          model: String(params["model"] ?? ""),
+          max_tokens: Number(params["max_tokens"] ?? 0),
+          messages: [{ role: "user", content: String(params["prompt"] ?? "") }],
+        }),
       },
     },
   },
@@ -192,14 +240,32 @@ export function resolveRequest(input: ResolveInput): ResolvedRequest {
     pathValues[name] = String(parsed);
   }
 
-  const bodyValues: Record<string, unknown> = {};
-  for (const name of action.bodyParams ?? []) {
-    const value = params[name];
-    if (value === undefined) continue;
-    if (typeof value !== "string" || !isSafeBodyValue(value, action.allowMultiline ?? false)) {
-      return { ok: false, status: 400, reason: `parameter ${name} must be a safe string` };
+  let bodyValues: Record<string, unknown> = {};
+  if (action.body !== undefined) {
+    const built: Record<string, string | number> = {};
+    for (const name of action.bodyParams ?? []) {
+      const value = params[name];
+      if (value === undefined) continue;
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        built[name] = value;
+        continue;
+      }
+      if (typeof value === "string" && isSafeTextValue(value)) {
+        built[name] = value;
+        continue;
+      }
+      return { ok: false, status: 400, reason: `parameter ${name} is not a usable value` };
     }
-    bodyValues[name] = value;
+    bodyValues = action.body(built);
+  } else {
+    for (const name of action.bodyParams ?? []) {
+      const value = params[name];
+      if (value === undefined) continue;
+      if (typeof value !== "string" || !isSafeBodyValue(value, action.allowMultiline ?? false)) {
+        return { ok: false, status: 400, reason: `parameter ${name} must be a safe string` };
+      }
+      bodyValues[name] = value;
+    }
   }
 
   // Unknown parameters are refused rather than dropped: silently ignoring them
@@ -270,6 +336,18 @@ export function encodeRepository(repository: string, encoding: ServiceDefinition
   if (!match) return null;
   const value = `${match[1]}/${match[2]}`;
   return encoding === "url-encoded" ? encodeURIComponent(value) : value;
+}
+
+/** The ceiling for a builder-owned string param (a review prompt can be large). */
+const MAX_BUILT_BODY_CHARS = 400_000;
+
+/**
+ * A value a body builder may carry: newlines and tabs are fine (a prompt, a review),
+ * no other control characters are, and it stays bounded.
+ */
+function isSafeTextValue(value: string): boolean {
+  if (value.length > MAX_BUILT_BODY_CHARS) return false;
+  return !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
 }
 
 function isSafeBodyValue(value: string, allowMultiline = false): boolean {

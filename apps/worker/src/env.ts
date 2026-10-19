@@ -29,6 +29,13 @@ export interface FactoryEnv {
    */
   BROKER_REQUIRE_PROVISIONING?: string;
   /**
+   * The review model as `service/model` (`anthropic/claude-…`, `openai/gpt-…`).
+   * Unset keeps the SDK engine's deterministic heuristic synthesis; set it to have
+   * the reviewer call a model through the credential broker (cloud-factory-cf-7or).
+   * The service's key lives in the broker, never here.
+   */
+  REVIEW_MODEL?: string;
+  /**
    * Calls per (agent, service, action) per 60s window before the broker answers
    * 429. Unset means the default (60); "0" disables the quota.
    */

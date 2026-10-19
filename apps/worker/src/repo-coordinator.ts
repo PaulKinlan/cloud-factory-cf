@@ -1,5 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
+import { corePrReviewer, drainRepository } from "./pipeline";
+import { reviewRuntime } from "./review/model";
 import { CanvasStore, migrateCanvasTable } from "./canvas-store";
 import { MemoryHandler, migrateMemoryTable } from "./memory";
 import {
@@ -16,6 +18,7 @@ import {
   MAX_ATTEMPTS,
   DEFAULT_VISIBILITY_MS,
   safeDecode,
+  traceSink,
 } from "./events";
 import {
   deliveryIdFor,
@@ -30,6 +33,9 @@ import {
 } from "./webhooks";
 
 export { MAX_ATTEMPTS, DEFAULT_VISIBILITY_MS };
+
+/** After a drain that threw, wait this long before trying again (never "now"). */
+const AUTO_DRAIN_RETRY_MS = 30_000;
 
 /**
  * Per-repository Durable Object: the coordinator for one repo's event stream.
@@ -78,6 +84,16 @@ export class RepoCoordinator extends DurableObject<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
+    return this.route(request);
+  }
+
+  /**
+   * The coordinator's own request routing, callable in process. The alarm drains
+   * with this instead of a stub to itself: a Durable Object that awaits a fetch to
+   * itself deadlocks, because it cannot serve the inner request while the outer one
+   * is blocked on it.
+   */
+  private async route(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
     if (request.method === "POST" && url.pathname === "/events") {
@@ -244,10 +260,49 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
   }
 
-  /** Alarm entry point: hand expired leases back and re-arm for the next retry. */
+  /**
+   * Alarm entry point: free expired leases, drain whatever is due, then re-arm.
+   *
+   * This is what makes the factory a bot rather than a command-line tool: a webhook
+   * arms the alarm, the alarm runs the review, and the queue settles the event
+   * (cloud-factory-cf-7or.1).
+   */
   override async alarm(): Promise<void> {
     await this.eventQueue.requeueExpiredLeases();
+    try {
+      await this.autoDrain();
+    } catch {
+      // A drain that throws must not re-arm for "now": that is a hot loop. Wait out a
+      // backoff; the events stay queued for the next attempt.
+      this.ctx.storage.setAlarm(Date.now() + AUTO_DRAIN_RETRY_MS);
+      return;
+    }
     await this.eventQueue.armAlarm();
+  }
+
+  /** Runs due events through the pipeline, in this object's own context. */
+  private async autoDrain(): Promise<void> {
+    if (!this.eventQueue.hasDue()) return;
+    const repository = this.ctx.id.name ?? "";
+    const controlKey = this.env.BROKER_CONTROL_KEY;
+    // Without a control key no capability can be minted, so a drain would fail every
+    // event; leave the queue to POST /runs, which reports the misconfiguration.
+    if (repository.length === 0 || controlKey === undefined) return;
+
+    const coordinator = {
+      fetch: (input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+        this.route(input instanceof Request ? input : new Request(input, init)),
+    };
+    await drainRepository({
+      repository,
+      controlKey,
+      coordinator,
+      broker: this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(repository)),
+      onStep: traceSink(coordinator),
+      // The model-backed reviewer when the deployment configured one, otherwise the
+      // SDK engine's deterministic heuristic synthesis.
+      executionFn: reviewRuntime(this.env) ?? corePrReviewer,
+    });
   }
 
   private migrate(): void {
@@ -346,6 +401,10 @@ export class RepoCoordinator extends DurableObject<Env> {
     if (!enqueued) {
       return Response.json({ ok: true, duplicate: true, deliveryId }, { status: 200 });
     }
+
+    // A fresh delivery is due immediately, so arm the alarm that drains it: this is
+    // what lets a webhook alone produce a review (cloud-factory-cf-7or.1).
+    await this.eventQueue.armAlarm();
 
     return Response.json({ ok: true, queued: true, deliveryId }, { status: 202 });
   }
