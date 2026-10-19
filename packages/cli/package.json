@@ -1,0 +1,37 @@
+{
+  "name": "@factory-cloud/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Local CLI runner and dual-runtime agent executor for Cloud Factory CF",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "factory-cloud": "dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --experimental-strip-types tests/**/*.test.ts",
+    "test:changed": "node --test --experimental-strip-types tests/**/*.test.ts",
+    "test:file": "node --test --experimental-strip-types"
+  },
+  "dependencies": {
+    "@factory-cloud/sdk": "^0.1.0"
+  },
+  "keywords": [
+    "cloud-factory",
+    "cli",
+    "agent",
+    "dual-runtime",
+    "runner"
+  ],
+  "author": "Paul Kinlan",
+  "license": "Apache-2.0"
+}
