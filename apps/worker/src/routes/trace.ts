@@ -1,4 +1,5 @@
 import type { Env } from "../env";
+import { sameSecret } from "../secrets";
 
 /**
  * Public surface for the observability suite (cloud-factory-cf-2ng).
@@ -30,7 +31,9 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
   // A browser cannot set a header on a WebSocket handshake, so the socket accepts
   // the same key as a query parameter (over TLS) and nowhere else.
   const provided = request.headers.get("x-factory-control-key") ?? (operation === "socket" ? url.searchParams.get("key") : null);
-  if (provided !== controlKey) {
+  // Constant-time comparison, like every other control route: `!==` on a secret
+  // leaks how much of a guess matched (rev-obs1, cloud-factory-cf-9t2).
+  if (!(await sameSecret(controlKey, provided))) {
     return Response.json({ ok: false, error: "not authorised to read the execution trace" }, { status: 401 });
   }
   if (request.method !== "GET") {
@@ -42,8 +45,10 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
     // Hand the upgrade to the object and pass its 101 (and socket) straight back.
     // The object's own route is /trace/socket, so the public path is rewritten
     // rather than forwarded verbatim (a mismatch makes the handshake a 404).
+    const limit = url.searchParams.get("limit");
+    const forwarded = limit === null ? "" : `?limit=${encodeURIComponent(limit)}`;
     return stub.fetch(
-      new Request("https://repo-coordinator.internal/trace/socket", {
+      new Request(`https://repo-coordinator.internal/trace/socket${forwarded}`, {
         method: "GET",
         headers: request.headers,
       }),

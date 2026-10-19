@@ -167,6 +167,23 @@ describe("trace store", () => {
     socket!.close();
   });
 
+  it("sizes the hello frame by the viewer's limit", async () => {
+    const stub = coordinator("trace/limit");
+    for (let index = 0; index < 6; index += 1) {
+      await record("trace/limit", { deliveryId: `l-${index}`, step: "claimed", status: "info", detail: `step ${index}` });
+    }
+    const response = await stub.fetch(`${BASE}/trace/socket?limit=3`, { headers: { upgrade: "websocket" } });
+    expect(response.status).toBe(101);
+    const socket = response.webSocket!;
+    socket.accept();
+    const hello = await new Promise<{ type: string; steps: unknown[] }>((resolve) => {
+      socket.addEventListener("message", (event) => resolve(JSON.parse(String((event as MessageEvent).data))));
+    });
+    expect(hello.type).toBe("hello");
+    expect(hello.steps).toHaveLength(3);
+    socket.close();
+  });
+
   it("rejects a socket handshake that is not an upgrade", async () => {
     const stub = coordinator("trace/noop");
     const response = await stub.fetch(`${BASE}/trace/socket`);
@@ -202,6 +219,30 @@ describe("trace route guards", () => {
     );
     expect(allowed.status).toBe(200);
     expect(await allowed.json()).toMatchObject({ ok: true });
+
+    // A guess of the right length, and a guess sharing the real prefix, are both
+    // refused: the compare is the constant-time sameSecret, not a byte scan (9t2).
+    for (const guess of ["test-controlx", "test-contro"]) {
+      const refused = await call(
+        "/trace/acme/widget",
+        { "x-factory-control-key": guess },
+        { ...env, BROKER_CONTROL_KEY: controlKey } as never,
+      );
+      expect(refused.status).toBe(401);
+    }
+    const empty = await call("/trace/acme/widget", { "x-factory-control-key": "" }, { ...env, BROKER_CONTROL_KEY: controlKey } as never);
+    expect(empty.status).toBe(401);
+
+    // The socket takes the key as a query parameter (a browser cannot set a
+    // handshake header), and a real upgrade gets the 101 from the object.
+    const socket = await call(
+      `/trace/acme/widget/socket?key=${controlKey}`,
+      { upgrade: "websocket" },
+      { ...env, BROKER_CONTROL_KEY: controlKey } as never,
+    );
+    expect(socket.status).toBe(101);
+    socket.webSocket?.accept();
+    socket.webSocket?.close();
 
     // The webhook path is untouched by the new route.
     expect(env.REPO_COORDINATOR).toBe(worker);

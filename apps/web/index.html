@@ -104,7 +104,18 @@
               </label>
               <label class="field obs-field obs-field--limit">
                 <span>Limit</span>
-                <input type="number" class="field__control obs-limit" value="50" min="1" max="500" />
+                <!-- No min/max here on purpose: native constraints suppress submit for an
+                     out-of-range value, so the panel's clamp (1..200, written back into
+                     the field) would never run (cloud-factory-cf-2xp). -->
+                <input
+                  type="number"
+                  class="field__control obs-limit"
+                  value="50"
+                  step="1"
+                  inputmode="numeric"
+                  aria-describedby="obs-limit-hint"
+                />
+                <span id="obs-limit-hint" class="muted">1–200 steps</span>
               </label>
             </div>
             <div class="obs-form-actions">

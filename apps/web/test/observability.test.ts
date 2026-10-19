@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+// The panel's markup is part of its contract (see the native-constraints check below).
+import indexHtml from "../index.html?raw";
 import {
+  DEFAULT_LIMIT,
+  MAX_LIMIT,
+  MIN_LIMIT,
   ObservabilitySession,
+  clampLimit,
   actionRows,
   artifactPreview,
   clockTime,
@@ -147,12 +153,43 @@ describe("cost HUD", () => {
   });
 });
 
+describe("markup contract", () => {
+  it("keeps native constraints off the Limit field so the clamp can run", () => {
+    // cloud-factory-cf-2xp: min/max made an out-of-range value invalid, so the browser
+    // suppressed submit and the panel's clamp never executed.
+    const html = indexHtml;
+    const tag = /<input[^>]*obs-limit[^>]*>/.exec(html)?.[0] ?? "";
+    expect(tag).not.toBe("");
+    expect(tag).not.toMatch(/\bmin=/);
+    expect(tag).not.toMatch(/\bmax=/);
+    // The field and the clamp must agree on the bounds the hint states.
+    expect(html).toContain("1–200 steps");
+    expect(DEFAULT_LIMIT).toBeGreaterThanOrEqual(MIN_LIMIT);
+    expect(MAX_LIMIT).toBe(200);
+  });
+});
+
 describe("urls", () => {
+  it("clamps the limit to what the trace route accepts", () => {
+    expect(clampLimit(Number.NaN)).toBe(DEFAULT_LIMIT);
+    expect(clampLimit(0)).toBe(1);
+    expect(clampLimit(7.8)).toBe(7);
+    expect(clampLimit(10_000)).toBe(200);
+  });
+
+  it("asks the trace route for the limit it was given", () => {
+    // Regression (cloud-factory-cf-9t2): the panel's Limit field was read and dropped.
+    expect(traceUrls("https://factory.example", "acme", "widget", "k", 12).trace).toBe(
+      "https://factory.example/trace/acme/widget?limit=12",
+    );
+  });
+
   it("builds the three endpoints and encodes the key", () => {
     const urls = traceUrls("https://factory.example/", "acme", "widget", "a b");
     expect(urls.trace).toBe("https://factory.example/trace/acme/widget?limit=50");
     expect(urls.usage).toBe("https://factory.example/trace/acme/widget/usage");
-    expect(urls.socket).toBe("wss://factory.example/trace/acme/widget/socket?key=a%20b");
+    expect(urls.socket).toBe("wss://factory.example/trace/acme/widget/socket?key=a%20b&limit=50");
+    expect(traceUrls("https://factory.example", "acme", "widget", "k", 12).socket).toContain("&limit=12");
   });
 });
 
@@ -315,7 +352,7 @@ describe("session", () => {
         pollMs: 100000,
       });
       await session.connect();
-      expect(opened).toEqual(["wss://factory.example/trace/acme/widget/socket?key=k"]);
+      expect(opened).toEqual(["wss://factory.example/trace/acme/widget/socket?key=k&limit=50"]);
       expect(session.polling).toBe(false);
       socket.emit("open");
       expect(session.state.status).toBe("live");
@@ -323,6 +360,25 @@ describe("session", () => {
     } finally {
       (globalThis as { WebSocket?: unknown }).WebSocket = originalWebSocket;
     }
+  });
+
+  it("re-reads the trace with a reconfigured limit", async () => {
+    const seen: string[] = [];
+    const session = new ObservabilitySession({
+      base: "https://factory.example",
+      owner: "acme",
+      repo: "widget",
+      key: "k",
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        seen.push(String(input));
+        return jsonResponse({ ok: true, usage: null, steps: [] });
+      }) as unknown as typeof fetch,
+      pollMs: 100000,
+    });
+    session.reconfigure({ limit: 5 });
+    await session.connect();
+    expect(seen.some((url) => url.includes("?limit=5"))).toBe(true);
+    session.disconnect();
   });
 
   it("selects a step for the inspector", async () => {

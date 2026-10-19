@@ -173,8 +173,11 @@ export class RepoCoordinator extends DurableObject<Env> {
     const pair = new WebSocketPair();
     const server = pair[1];
     this.ctx.acceptWebSocket(server);
-    // Give the viewer the recent past immediately, then only new steps.
-    const recent = this.runTrace.recent(20);
+    // Give the viewer the recent past immediately, then only new steps. The page
+    // size is the viewer's: a panel asking for 12 must not be handed 20 (2ng.2).
+    const requested = new URL(request.url).searchParams.get("limit");
+    const limit = requested === null ? 20 : Math.min(200, Math.max(1, Number.parseInt(requested, 10) || 20));
+    const recent = this.runTrace.recent(limit);
     server.send(JSON.stringify({ type: "hello", repository: this.ctx.id.name ?? "", steps: recent }));
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
