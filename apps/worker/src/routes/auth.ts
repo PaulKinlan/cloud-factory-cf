@@ -5,6 +5,28 @@ export const AUTH_LOGIN_PATH = "/auth/github/login";
 export const AUTH_CALLBACK_PATH = "/auth/github/callback";
 export const API_REPOS_PATH = "/api/repos";
 
+async function signHmacSha256(secret: string, data: string): Promise<string> {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(data));
+  return Array.from(new Uint8Array(sig))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function getCookie(headers: Headers, name: string): string | null {
+  const cookie = headers.get("cookie");
+  if (!cookie) return null;
+  const match = cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+  return match ? decodeURIComponent(match[1]!) : null;
+}
+
 export async function handleAuth(
   request: Request,
   env: Env,
@@ -30,10 +52,23 @@ export async function handleGithubLogin(
   env: Env,
   url: URL,
 ): Promise<Response> {
+  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY ?? env.WEBHOOK_SECRET;
+  if (!signingKey) {
+    return Response.json({ ok: false, error: "broker signing key not configured" }, { status: 503 });
+  }
+
   const clientId = url.searchParams.get("client_id") ?? env.GITHUB_CLIENT_ID;
   const appSlug = url.searchParams.get("app_slug") ?? env.GITHUB_APP_SLUG;
-  const state = url.searchParams.get("state") ?? crypto.randomUUID().slice(0, 12);
+  const stateNonce = crypto.randomUUID().replace(/-/g, "");
   const redirectUri = url.searchParams.get("redirect_uri");
+
+  const exp = Math.floor(Date.now() / 1000) + 600; // 10 minutes
+  const dataToSign = `${stateNonce}.${exp}`;
+  const sig = await signHmacSha256(signingKey, dataToSign);
+  const cookieVal = `${dataToSign}.${sig}`;
+
+  const isSecure = url.protocol === "https:";
+  const stateCookie = `cf_oauth_state=${encodeURIComponent(cookieVal)}; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Path=/auth/github; Max-Age=600`;
 
   const callbackUrl = new URL(AUTH_CALLBACK_PATH, url.origin);
   if (redirectUri) {
@@ -43,8 +78,14 @@ export async function handleGithubLogin(
   // 1. If App installation flow is requested and slug is known, route to GitHub App install
   const flow = url.searchParams.get("flow");
   if (flow === "install" && appSlug) {
-    const installUrl = `https://github.com/apps/${encodeURIComponent(appSlug)}/installations/new?state=${encodeURIComponent(state)}`;
-    return Response.redirect(installUrl, 302);
+    const installUrl = `https://github.com/apps/${encodeURIComponent(appSlug)}/installations/new?state=${encodeURIComponent(stateNonce)}`;
+    return new Response(null, {
+      status: 302,
+      headers: {
+        location: installUrl,
+        "set-cookie": stateCookie,
+      },
+    });
   }
 
   // 2. Standard OAuth authorization flow
@@ -62,9 +103,15 @@ export async function handleGithubLogin(
   oauthUrl.searchParams.set("client_id", clientId);
   oauthUrl.searchParams.set("redirect_uri", callbackUrl.toString());
   oauthUrl.searchParams.set("scope", "repo,read:org");
-  oauthUrl.searchParams.set("state", state);
+  oauthUrl.searchParams.set("state", stateNonce);
 
-  return Response.redirect(oauthUrl.toString(), 302);
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: oauthUrl.toString(),
+      "set-cookie": stateCookie,
+    },
+  });
 }
 
 export async function handleGithubCallback(
@@ -72,15 +119,73 @@ export async function handleGithubCallback(
   env: Env,
   url: URL,
 ): Promise<Response> {
+  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY ?? env.WEBHOOK_SECRET;
+  if (!signingKey) {
+    return Response.json({ ok: false, error: "broker signing key not configured" }, { status: 503 });
+  }
+
+  const isSecure = url.protocol === "https:";
+  const clearCookie = `cf_oauth_state=; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Path=/auth/github; Max-Age=0`;
+
   const code = url.searchParams.get("code");
   const installationId = url.searchParams.get("installation_id");
-  const state = url.searchParams.get("state") ?? "";
+  const state = url.searchParams.get("state");
   const returnTo = url.searchParams.get("return_to") ?? "/";
+
+  // Verify OAuth state to prevent CSRF attacks
+  if (!state) {
+    return Response.json(
+      { ok: false, error: "Missing required OAuth state parameter" },
+      { status: 400, headers: { "set-cookie": clearCookie } },
+    );
+  }
+
+  const cookieVal = getCookie(request.headers, "cf_oauth_state");
+  if (!cookieVal) {
+    return Response.json(
+      { ok: false, error: "Missing OAuth state cookie" },
+      { status: 400, headers: { "set-cookie": clearCookie } },
+    );
+  }
+
+  const parts = cookieVal.split(".");
+  if (parts.length !== 3) {
+    return Response.json(
+      { ok: false, error: "Malformed OAuth state cookie" },
+      { status: 400, headers: { "set-cookie": clearCookie } },
+    );
+  }
+
+  const [cookieNonce, expStr, sig] = parts as [string, string, string];
+  const dataToSign = `${cookieNonce}.${expStr}`;
+  const expectedSig = await signHmacSha256(signingKey, dataToSign);
+
+  if (!(await sameSecret(expectedSig, sig))) {
+    return Response.json(
+      { ok: false, error: "Invalid OAuth state signature" },
+      { status: 400, headers: { "set-cookie": clearCookie } },
+    );
+  }
+
+  const exp = parseInt(expStr, 10);
+  if (isNaN(exp) || Math.floor(Date.now() / 1000) > exp) {
+    return Response.json(
+      { ok: false, error: "OAuth state expired" },
+      { status: 400, headers: { "set-cookie": clearCookie } },
+    );
+  }
+
+  if (!(await sameSecret(cookieNonce, state))) {
+    return Response.json(
+      { ok: false, error: "OAuth state mismatch (CSRF detected)" },
+      { status: 400, headers: { "set-cookie": clearCookie } },
+    );
+  }
 
   // If no code and no installationId, user cancelled or error
   if (!code && !installationId) {
     const errorDesc = url.searchParams.get("error_description") ?? "No authorization code provided";
-    return Response.json({ ok: false, error: errorDesc }, { status: 400 });
+    return Response.json({ ok: false, error: errorDesc }, { status: 400, headers: { "set-cookie": clearCookie } });
   }
 
   const clientId = url.searchParams.get("client_id") ?? env.GITHUB_CLIENT_ID ?? "github_app_client_id";
@@ -190,7 +295,13 @@ export async function handleGithubCallback(
     redirectUrl.searchParams.set("installation_id", installationId);
   }
 
-  return Response.redirect(redirectUrl.toString(), 302);
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: redirectUrl.toString(),
+      "set-cookie": clearCookie,
+    },
+  });
 }
 
 export async function handleApiRepos(

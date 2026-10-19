@@ -18,6 +18,9 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(location).toContain("https://github.com/login/oauth/authorize");
     expect(location).toContain("client_id=gh_test_client_id");
     expect(location).toContain("scope=repo%2Cread%3Aorg");
+    const setCookie = res.headers.get("set-cookie");
+    expect(setCookie).toBeDefined();
+    expect(setCookie).toContain("cf_oauth_state=");
   });
 
   it("/auth/github/login?flow=install: redirects to GitHub App installation", async () => {
@@ -30,6 +33,9 @@ describe("GitHub OAuth & App Install Flow", () => {
     const location = res.headers.get("location");
     expect(location).toBeDefined();
     expect(location).toContain("https://github.com/apps/cloud-factory-dev/installations/new");
+    const setCookie = res.headers.get("set-cookie");
+    expect(setCookie).toBeDefined();
+    expect(setCookie).toContain("cf_oauth_state=");
   });
 
   it("/auth/github/callback: exchanges code, queries GitHub, persists repos in OrgCoordinator, and redirects", async () => {
@@ -65,10 +71,76 @@ describe("GitHub OAuth & App Install Flow", () => {
       }) as unknown as typeof fetch,
     );
 
-    const callbackRes = await SELF.fetch(
+    // 1. Initiate login to obtain CSRF state and signed cookie
+    const loginRes = await SELF.fetch(
+      "https://example.com/auth/github/login?client_id=gh_test_client_id&redirect_uri=/",
+      {
+        method: "GET",
+        redirect: "manual",
+      },
+    );
+    expect(loginRes.status).toBe(302);
+    const loginLocation = loginRes.headers.get("location")!;
+    const state = new URL(loginLocation).searchParams.get("state")!;
+    expect(state).toBeDefined();
+    const setCookie = loginRes.headers.get("set-cookie")!;
+    expect(setCookie).toBeDefined();
+    const cookieHeader = setCookie.split(";")[0]!;
+
+    // 2. Reject callback without state parameter (missing state)
+    const missingStateRes = await SELF.fetch(
       "https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/",
       {
         method: "GET",
+        headers: { cookie: cookieHeader },
+      },
+    );
+    expect(missingStateRes.status).toBe(400);
+
+    // 3. Reject callback without state cookie (missing cookie)
+    const missingCookieRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/&state=${state}`,
+      {
+        method: "GET",
+      },
+    );
+    expect(missingCookieRes.status).toBe(400);
+
+    // 4. Reject callback with mismatched state (CSRF attack)
+    const mismatchRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/&state=attacker_state_123`,
+      {
+        method: "GET",
+        headers: { cookie: cookieHeader },
+      },
+    );
+    expect(mismatchRes.status).toBe(400);
+
+    // 4b. Reject callback with malformed or tampered state cookie
+    const malformedRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/&state=${state}`,
+      {
+        method: "GET",
+        headers: { cookie: "cf_oauth_state=not-a-valid-token" },
+      },
+    );
+    expect(malformedRes.status).toBe(400);
+
+    const tamperedRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/&state=${state}`,
+      {
+        method: "GET",
+        headers: { cookie: `cf_oauth_state=${state}.1700000000.badf00d` },
+      },
+    );
+    expect(tamperedRes.status).toBe(400);
+
+    // 5. Successful callback with matching state and valid signed cookie
+    const callbackRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/&state=${state}`,
+      {
+        method: "GET",
+        headers: { cookie: cookieHeader },
         redirect: "manual",
       },
     );
@@ -79,8 +151,10 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(location).toContain("connected=1");
     expect(location).toContain(`owner=${testUser}`);
     expect(location).toContain("installation_id=inst_456");
+    const clearCookie = callbackRes.headers.get("set-cookie");
+    expect(clearCookie).toContain("cf_oauth_state=;");
 
-    // 4. Verify /api/repos requires control-key authentication
+    // 6. Verify /api/repos requires control-key authentication
     const unauthRes = await SELF.fetch(`https://example.com/api/repos?owner=${testUser}`);
     expect(unauthRes.status).toBe(401);
     const unauthData = (await unauthRes.json()) as any;
