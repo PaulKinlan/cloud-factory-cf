@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  DEFAULT_LIMIT,
   ObservabilitySession,
+  clampLimit,
   actionRows,
   artifactPreview,
   clockTime,
@@ -148,6 +150,20 @@ describe("cost HUD", () => {
 });
 
 describe("urls", () => {
+  it("clamps the limit to what the trace route accepts", () => {
+    expect(clampLimit(Number.NaN)).toBe(DEFAULT_LIMIT);
+    expect(clampLimit(0)).toBe(1);
+    expect(clampLimit(7.8)).toBe(7);
+    expect(clampLimit(10_000)).toBe(200);
+  });
+
+  it("asks the trace route for the limit it was given", () => {
+    // Regression (cloud-factory-cf-9t2): the panel's Limit field was read and dropped.
+    expect(traceUrls("https://factory.example", "acme", "widget", "k", 12).trace).toBe(
+      "https://factory.example/trace/acme/widget?limit=12",
+    );
+  });
+
   it("builds the three endpoints and encodes the key", () => {
     const urls = traceUrls("https://factory.example/", "acme", "widget", "a b");
     expect(urls.trace).toBe("https://factory.example/trace/acme/widget?limit=50");
@@ -323,6 +339,25 @@ describe("session", () => {
     } finally {
       (globalThis as { WebSocket?: unknown }).WebSocket = originalWebSocket;
     }
+  });
+
+  it("re-reads the trace with a reconfigured limit", async () => {
+    const seen: string[] = [];
+    const session = new ObservabilitySession({
+      base: "https://factory.example",
+      owner: "acme",
+      repo: "widget",
+      key: "k",
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        seen.push(String(input));
+        return jsonResponse({ ok: true, usage: null, steps: [] });
+      }) as unknown as typeof fetch,
+      pollMs: 100000,
+    });
+    session.reconfigure({ limit: 5 });
+    await session.connect();
+    expect(seen.some((url) => url.includes("?limit=5"))).toBe(true);
+    session.disconnect();
   });
 
   it("selects a step for the inspector", async () => {

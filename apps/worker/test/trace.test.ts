@@ -203,6 +203,30 @@ describe("trace route guards", () => {
     expect(allowed.status).toBe(200);
     expect(await allowed.json()).toMatchObject({ ok: true });
 
+    // A guess of the right length, and a guess sharing the real prefix, are both
+    // refused: the compare is the constant-time sameSecret, not a byte scan (9t2).
+    for (const guess of ["test-controlx", "test-contro"]) {
+      const refused = await call(
+        "/trace/acme/widget",
+        { "x-factory-control-key": guess },
+        { ...env, BROKER_CONTROL_KEY: controlKey } as never,
+      );
+      expect(refused.status).toBe(401);
+    }
+    const empty = await call("/trace/acme/widget", { "x-factory-control-key": "" }, { ...env, BROKER_CONTROL_KEY: controlKey } as never);
+    expect(empty.status).toBe(401);
+
+    // The socket takes the key as a query parameter (a browser cannot set a
+    // handshake header), and a real upgrade gets the 101 from the object.
+    const socket = await call(
+      `/trace/acme/widget/socket?key=${controlKey}`,
+      { upgrade: "websocket" },
+      { ...env, BROKER_CONTROL_KEY: controlKey } as never,
+    );
+    expect(socket.status).toBe(101);
+    socket.webSocket?.accept();
+    socket.webSocket?.close();
+
     // The webhook path is untouched by the new route.
     expect(env.REPO_COORDINATOR).toBe(worker);
   });

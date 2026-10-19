@@ -40,6 +40,17 @@ export interface Usage {
   latestAt?: string | null;
 }
 
+/** The panel's default page of steps, and the range its Limit field allows. */
+export const DEFAULT_LIMIT = 50;
+export const MIN_LIMIT = 1;
+export const MAX_LIMIT = 200;
+
+/** Clamp a limit to what the trace route accepts, so a typo cannot 400 or flood. */
+export function clampLimit(limit: number): number {
+  if (!Number.isFinite(limit)) return DEFAULT_LIMIT;
+  return Math.min(MAX_LIMIT, Math.max(MIN_LIMIT, Math.trunc(limit)));
+}
+
 export interface TraceUrls {
   trace: string;
   usage: string;
@@ -124,11 +135,11 @@ export function actionRows(usage: Usage | null): HudRow[] {
     .map(([action, count]) => ({ label: action, value: String(count) }));
 }
 
-export function traceUrls(base: string, owner: string, repo: string, key: string): TraceUrls {
+export function traceUrls(base: string, owner: string, repo: string, key: string, limit = DEFAULT_LIMIT): TraceUrls {
   const root = `${base.replace(/\/+$/, "")}/trace/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   const socketBase = root.replace(/^http/, "ws");
   return {
-    trace: `${root}?limit=50`,
+    trace: `${root}?limit=${clampLimit(limit)}`,
     usage: `${root}/usage`,
     socket: `${socketBase}/socket?key=${encodeURIComponent(key)}`,
   };
@@ -160,6 +171,8 @@ export interface SessionOptions {
   onUpdate?: (state: SessionState) => void;
   pollMs?: number;
   stepCap?: number;
+  /** How many steps to ask the trace route for (the panel's Limit field). */
+  limit?: number;
 }
 
 /**
@@ -175,7 +188,7 @@ export class ObservabilitySession {
   private options: Required<Pick<SessionOptions, "pollMs" | "stepCap">> & SessionOptions;
 
   constructor(options: SessionOptions) {
-    this.options = { pollMs: 3000, stepCap: 200, ...options };
+    this.options = { pollMs: 3000, stepCap: 200, limit: DEFAULT_LIMIT, ...options };
   }
 
   private update(patch: Partial<SessionState>): void {
@@ -195,7 +208,7 @@ export class ObservabilitySession {
   async connect(): Promise<void> {
     this.disconnect();
     this.update({ status: "connecting", error: null });
-    const urls = traceUrls(this.options.base, this.options.owner, this.options.repo, this.options.key);
+    const urls = traceUrls(this.options.base, this.options.owner, this.options.repo, this.options.key, this.options.limit);
     const headers = { "x-factory-control-key": this.options.key };
     try {
       const [usageResponse, traceResponse] = await Promise.all([
@@ -265,7 +278,7 @@ export class ObservabilitySession {
   }
 
   /** Re-point the session at another repository (the panel's form). */
-  reconfigure(patch: Partial<Pick<SessionOptions, "owner" | "repo" | "key" | "base">>): void {
+  reconfigure(patch: Partial<Pick<SessionOptions, "owner" | "repo" | "key" | "base" | "limit">>): void {
     this.options = { ...this.options, ...patch };
   }
 
@@ -296,7 +309,7 @@ export class ObservabilitySession {
 
   /** Re-read the usage aggregates without disturbing the stream. */
   async refreshUsage(): Promise<void> {
-    const urls = traceUrls(this.options.base, this.options.owner, this.options.repo, this.options.key);
+    const urls = traceUrls(this.options.base, this.options.owner, this.options.repo, this.options.key, this.options.limit);
     try {
       const response = await this.fetchImpl(urls.usage, { headers: { "x-factory-control-key": this.options.key } });
       if (!response.ok) return;
@@ -319,7 +332,7 @@ export class ObservabilitySession {
   startPolling(): void {
     if (this.pollTimer !== null) return;
     this.update({ status: "polling" });
-    const urls = traceUrls(this.options.base, this.options.owner, this.options.repo, this.options.key);
+    const urls = traceUrls(this.options.base, this.options.owner, this.options.repo, this.options.key, this.options.limit);
     const headers = { "x-factory-control-key": this.options.key };
     const tick = async (): Promise<void> => {
       try {
@@ -569,8 +582,12 @@ export function initObservability(root: HTMLElement, options: MountOptions = {})
       return;
     }
     if (announcer) announcer.textContent = `Connecting to ${owner}/${repo}`;
+    // The Limit field used to be read and dropped (cloud-factory-cf-9t2): pass it on,
+    // clamped, so what the operator typed is what the trace route is asked for.
+    const limit = clampLimit(Number(limitInput?.value ?? DEFAULT_LIMIT));
+    if (limitInput) limitInput.value = String(limit);
     // The key lives in memory for this session only: never localStorage.
-    session.reconfigure({ owner, repo, key });
+    session.reconfigure({ owner, repo, key, limit });
     void session.connect().catch(() => {});
   });
 
