@@ -66,19 +66,48 @@ contract:
   asking for the delta would run nothing), and test files no workspace runs are
   named as "not part of the gate"; it never hard-FAILs on a test-only delta —
   that red means the *mapping* is wrong, not the change (bead `cloud-factory-cf-8f1`);
+- a test-file delta that removes **every** test file of a workspace is named as a no-op
+  ("no test files remain") instead of running a suite that can only answer
+  `No test files found` — vitest exits 1 for that, which would be a red for a mapping
+  reason, not a broken change (bead `cloud-factory-cf-u8k`). The no-op is reported by
+  `--list` too, the smoke set skips that workspace and names the removal, and still runs
+  the others; a genuinely failing test stays red. Test files are recognised by vitest's
+  own defaults, `*.test.*` and `*.spec.*` (bead `cloud-factory-cf-a5s`, `r0r`). A
+  deleted last test does **not** vouch for a source change beside it: with no test files
+  left in the workspace that source is named as a failure, not skipped. Source
+  validation runs before the selection report, so `--list` gives the same verdict as a
+  real run (bead `cloud-factory-cf-ryb`);
+- a test-file delta does **not** vouch for a source change in the same workspace, for
+  **every** runner: if the workspace's tests and sources reference that module nowhere,
+  the source still fails by name, because a whole-suite run cannot invent a test for it
+  (bead `cloud-factory-cf-9ef`; the vitest-only version of this check was itself a
+  finding, rev-gate6);
 - a delta with no source changes runs a fixed **smoke set** (`apps/web`'s node
   suite, `apps/worker`'s `worker`/`assets` tests) instead of nothing: a gate that
   executes no suite at all cannot be distinguished from one whose selection broke,
   which is exactly how the fleet gate reports `coverage UNKNOWN`;
+- workspaces are **discovered from the root `package.json`** `workspaces` globs and
+  each workspace's runner is read from its own `test` script (`vitest` → affected
+  files only, `node --test`/any other script → whole suite). Nothing in the gate
+  lists workspace names, so a new workspace is covered the day it lands: a source
+  change in a directory that is no workspace, or in a workspace with no `test`
+  script, is a **FAILURE named on stderr** (bead `cloud-factory-cf-9uu`);
+- tests and sources are decided **per workspace**: a test-file change in one
+  workspace still runs that workspace's suite when another workspace's source also
+  changed (the old gate only consulted test files when *no* source changed, so a
+  failing test delta rode in green behind an unrelated source edit);
+- for `vitest` workspaces it asks `vitest list --changed --filesOnly` what is
+  affected; `node:test` workspaces are seconds, so a change there runs their whole
+  suite;
 - a source delta that runs nothing exits non-zero rather than reporting green;
-- for `apps/web`/`apps/worker` it asks `vitest list --changed --filesOnly` what is
-  affected; the `node:test` packages (`sdk`, `cli`, `canvas-model`) are seconds, so
-  a change there runs their whole suite.
+- the gate's own logic has no workspace suite, so `scripts/changed-tests.selftest.sh`
+  (fake runners in a throwaway repo — no deps, ~5s) runs whenever the gate changes.
 
 Measured on an ordinary source-only delta it selects a handful of files instead of
 19; for a manifest change vitest conservatively selects the whole workspace, which
 is the honest answer rather than a guess. The merger's full gate remains the oracle
-for the merged union.
+for the merged union. Discovered workspaces also mean the gate no longer pays for a
+`vitest list` query in a workspace the delta never touched.
 
 ### Build each workspace once
 
