@@ -117,4 +117,30 @@ describe("canvas document store", () => {
     const response = await canvasFetch("", { method: "POST", body: { document } });
     expect(response.status).toBe(405);
   });
+
+  it("stores and retrieves documents with percent characters in the id without double-encoding (cloud-factory-cf-r8gn)", async () => {
+    const customId = "a%2Fb";
+    const encodedId = encodeURIComponent(customId); // "a%252Fb"
+
+    const created = await canvasFetch(`/${encodedId}`, {
+      method: "PUT",
+      body: { name: "Percent ID doc", document },
+    });
+    expect(created.status).toBe(201);
+    const createdPayload = (await created.json()) as any;
+    expect(createdPayload.ok).toBe(true);
+    expect(createdPayload.id).toBe(customId);
+
+    const fetched = await canvasFetch(`/${encodedId}`);
+    expect(fetched.status).toBe(200);
+    const fetchedPayload = (await fetched.json()) as any;
+    expect(fetchedPayload.ok).toBe(true);
+    expect(fetchedPayload.id).toBe(customId);
+
+    const listed = await canvasFetch("");
+    const listPayload = (await listed.json()) as any;
+    const item = listPayload.documents.find((d: any) => d.id === customId);
+    expect(item).toBeDefined();
+    expect(item.id).toBe(customId);
+  });
 });

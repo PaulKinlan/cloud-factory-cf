@@ -75,7 +75,15 @@ export async function routeCanvas(
   }
 
   const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`${owner}/${repo}`));
-  const target = id === undefined ? "/canvas" : `/canvas/${encodeURIComponent(id)}`;
+  let docId: string | undefined = id;
+  if (id !== undefined) {
+    try {
+      docId = decodeURIComponent(id);
+    } catch {
+      docId = id;
+    }
+  }
+  const target = docId === undefined ? "/canvas" : `/canvas/${encodeURIComponent(docId)}`;
   return stub.fetch(
     new Request(`https://repo-coordinator.internal${target}`, {
       method: request.method,
@@ -93,7 +101,13 @@ export async function handleCanvas(
   const canvasRun = CANVAS_RUN_PATH.exec(url.pathname);
   if (canvasRun?.groups) {
     const { owner, repo, id } = canvasRun.groups as { owner: string; repo: string; id: string };
-    return routeCanvasRun(request, env, owner, repo, id);
+    let docId = id;
+    try {
+      docId = decodeURIComponent(id);
+    } catch {
+      docId = id;
+    }
+    return routeCanvasRun(request, env, owner, repo, docId);
   }
 
   const canvas = CANVAS_PATH.exec(url.pathname);
