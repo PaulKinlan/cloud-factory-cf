@@ -1,4 +1,4 @@
-import { SELF } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 function setupDefaultFetch() {
@@ -673,6 +673,58 @@ describe("GitHub OAuth & App Install Flow", () => {
     // Must use env credentials, NOT query params
     expect(capturedBody.client_id).toBe("gh_test_client_id");
     expect(capturedBody.client_secret).toBe("gh_test_client_secret");
+
+    // 3. OrgCoordinator persistence returns 500 -> 502 (cloud-factory-cf-yp07)
+    const getSpy = vi.spyOn(env.ORG_COORDINATOR, "get").mockReturnValue({
+      fetch: vi.fn().mockResolvedValue(new Response("Internal Error", { status: 500 })),
+    } as any);
+
+    const persistFailRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=valid_code&state=${state}`,
+      { method: "GET", headers: { cookie: cookieHeader } },
+    );
+    expect(persistFailRes.status).toBe(502);
+    const persistFailJson = (await persistFailRes.json()) as any;
+    expect(persistFailJson.ok).toBe(false);
+    expect(persistFailJson.error).toContain("OrgCoordinator persistence failed with HTTP 500");
+
+    // OrgCoordinator fetch rejection -> 502
+    getSpy.mockReturnValue({
+      fetch: vi.fn().mockRejectedValue(new Error("DO connection lost")),
+    } as any);
+
+    const netFailRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=valid_code&state=${state}`,
+      { method: "GET", headers: { cookie: cookieHeader } },
+    );
+    expect(netFailRes.status).toBe(502);
+    const netFailJson = (await netFailRes.json()) as any;
+    expect(netFailJson.ok).toBe(false);
+    expect(netFailJson.error).toContain("Failed to reach OrgCoordinator: Error: DO connection lost");
+
+    getSpy.mockRestore();
+
+    // 4. Unset credentials returns 503 (cloud-factory-cf-yp07)
+    const origId = env.GITHUB_CLIENT_ID;
+    const origSecret = env.GITHUB_CLIENT_SECRET;
+    try {
+      (env as any).GITHUB_CLIENT_ID = "";
+      const noIdLoginRes = await SELF.fetch("https://example.com/auth/github/login");
+      expect(noIdLoginRes.status).toBe(503);
+      const noIdLoginJson = (await noIdLoginRes.json()) as any;
+      expect(noIdLoginJson.error).toContain("GitHub Client ID is not configured (set GITHUB_CLIENT_ID)");
+
+      const noIdCallbackRes = await SELF.fetch(
+        `https://example.com/auth/github/callback?code=valid_code&state=${state}`,
+        { method: "GET", headers: { cookie: cookieHeader } },
+      );
+      expect(noIdCallbackRes.status).toBe(503);
+      const noIdCallbackJson = (await noIdCallbackRes.json()) as any;
+      expect(noIdCallbackJson.error).toContain("GitHub OAuth credentials are not configured in environment");
+    } finally {
+      (env as any).GITHUB_CLIENT_ID = origId;
+      (env as any).GITHUB_CLIENT_SECRET = origSecret;
+    }
   });
 
   it("flow=install: rejects PAT with explicit error on App installation endpoints (cloud-factory-cf-egp6, cloud-factory-cf-kgr3)", async () => {

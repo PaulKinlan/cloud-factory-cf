@@ -152,7 +152,7 @@ export async function handleGithubLogin(
     return Response.json(
       {
         ok: false,
-        error: "GitHub Client ID is not configured (set GITHUB_CLIENT_ID or supply ?client_id=...)",
+        error: "GitHub Client ID is not configured (set GITHUB_CLIENT_ID)",
       },
       { status: 503 },
     );
