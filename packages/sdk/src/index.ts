@@ -97,6 +97,16 @@ export type {
   SimulationResult,
 } from './types/studio.ts';
 
+export type {
+  ReviewVerdict,
+  PullRequestInfo,
+  ReviewFinding,
+  DiffAnalysis,
+  LlmClient,
+  PrReviewerOptions,
+  ReviewResult,
+} from './review/types.ts';
+
 // Implementations
 export {
   createAgentContext,
@@ -168,3 +178,14 @@ export {
 export {
   STANDARD_SINK_TYPES,
 } from './types/studio.ts';
+
+export {
+  analyzeUnifiedDiff,
+} from './review/diff-analyzer.ts';
+
+export {
+  generatePrReview,
+  generatePrReviewPrompt,
+  buildReviewMarkdown,
+  createPrReviewerExecutionFn,
+} from './review/pr-reviewer.ts';

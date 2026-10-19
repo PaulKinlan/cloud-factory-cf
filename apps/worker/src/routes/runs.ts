@@ -1,5 +1,5 @@
 import type { Env } from "../env";
-import { drainRepository } from "../pipeline";
+import { corePrReviewer, drainRepository } from "../pipeline";
 import { traceSink } from "../events";
 import { sameSecret } from "../secrets";
 
@@ -28,8 +28,23 @@ export async function routeRun(
   }
 
   const repository = `${owner}/${repo}`;
-  const body = (await request.json().catch(() => ({}))) as { limit?: unknown };
+  const body = (await request.json().catch(() => ({}))) as {
+    limit?: unknown;
+    reviewer?: unknown;
+    agentId?: unknown;
+    agentPrompt?: unknown;
+  };
   const limit = typeof body.limit === "number" && Number.isFinite(body.limit) ? Math.trunc(body.limit) : undefined;
+  const agentPrompt = typeof body.agentPrompt === "string" ? body.agentPrompt : undefined;
+  const agentId = typeof body.agentId === "string" ? body.agentId : undefined;
+  const url = new URL(request.url);
+  const reviewerParam = url.searchParams.get("reviewer");
+  const useCoreReviewer =
+    body.reviewer === "llm" ||
+    body.reviewer === "core" ||
+    body.agentId === "pr-reviewer" ||
+    reviewerParam === "llm" ||
+    reviewerParam === "core";
 
   const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
   const report = await drainRepository(
@@ -39,9 +54,14 @@ export async function routeRun(
       coordinator,
       broker: env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository)),
       onStep: traceSink(coordinator),
+      ...(useCoreReviewer ? { executionFn: corePrReviewer } : {}),
       ...(env.TELEMETRY_ENDPOINT === undefined ? {} : { telemetryEndpoint: env.TELEMETRY_ENDPOINT }),
     },
-    ...(limit === undefined ? [] : [{ limit }]),
+    {
+      ...(limit === undefined ? {} : { limit }),
+      ...(agentPrompt === undefined ? {} : { agentPrompt }),
+      ...(agentId === undefined ? {} : { agentId }),
+    },
   );
 
   return Response.json({ ok: true, ...report });

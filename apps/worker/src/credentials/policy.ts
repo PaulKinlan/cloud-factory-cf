@@ -17,6 +17,10 @@ export interface ServiceActionDefinition {
   pathParams?: readonly string[];
   /** Parameters copied into the JSON request body. */
   bodyParams?: readonly string[];
+  /** Custom headers for this specific action (e.g. accept for diff). */
+  headers?: Record<string, string>;
+  /** Allow newlines and multiline content in body params (e.g. for PR review markdown). */
+  allowMultiline?: boolean;
 }
 
 export interface ServiceDefinition {
@@ -60,6 +64,7 @@ export const SERVICES: Readonly<Record<string, ServiceDefinition>> = {
         route: "/repos/{repository}/pulls/{number}/reviews",
         pathParams: ["number"],
         bodyParams: ["body", "event"],
+        allowMultiline: true,
       },
       "issue.create": {
         method: "POST",
@@ -71,6 +76,22 @@ export const SERVICES: Readonly<Record<string, ServiceDefinition>> = {
         route: "/repos/{repository}/issues/{number}/comments",
         pathParams: ["number"],
         bodyParams: ["body"],
+      },
+      "pr.diff": {
+        method: "GET",
+        route: "/repos/{repository}/pulls/{number}",
+        pathParams: ["number"],
+        headers: { accept: "application/vnd.github.v3.diff" },
+      },
+      "pr.files": {
+        method: "GET",
+        route: "/repos/{repository}/pulls/{number}/files",
+        pathParams: ["number"],
+      },
+      "pr.read": {
+        method: "GET",
+        route: "/repos/{repository}/pulls/{number}",
+        pathParams: ["number"],
       },
     },
   },
@@ -175,7 +196,7 @@ export function resolveRequest(input: ResolveInput): ResolvedRequest {
   for (const name of action.bodyParams ?? []) {
     const value = params[name];
     if (value === undefined) continue;
-    if (typeof value !== "string" || !isSafeBodyValue(value)) {
+    if (typeof value !== "string" || !isSafeBodyValue(value, action.allowMultiline ?? false)) {
       return { ok: false, status: 400, reason: `parameter ${name} must be a safe string` };
     }
     bodyValues[name] = value;
@@ -205,7 +226,10 @@ export function resolveRequest(input: ResolveInput): ResolvedRequest {
     ok: true,
     url: `https://${host}${route}`,
     method: action.method,
-    headers: hasBody ? { "content-type": "application/json" } : {},
+    headers: {
+      ...(hasBody ? { "content-type": "application/json" } : {}),
+      ...(action.headers ?? {}),
+    },
     body: hasBody ? JSON.stringify(bodyValues) : undefined,
     service: input.service,
     action: input.action,
@@ -248,8 +272,12 @@ export function encodeRepository(repository: string, encoding: ServiceDefinition
   return encoding === "url-encoded" ? encodeURIComponent(value) : value;
 }
 
-function isSafeBodyValue(value: string): boolean {
-  if (value.length > 8_000) return false;
+function isSafeBodyValue(value: string, allowMultiline = false): boolean {
+  const maxLen = allowMultiline ? 64_000 : 8_000;
+  if (value.length > maxLen) return false;
+  if (allowMultiline) {
+    return !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
+  }
   // No control characters (newline/CR are refused to keep header and log
   // injection impossible even after the value is echoed back).
   return !/[\u0000-\u0008\u000a-\u001f\u007f]/.test(value);

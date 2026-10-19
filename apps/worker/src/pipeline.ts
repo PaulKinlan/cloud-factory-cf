@@ -21,6 +21,7 @@ import {
   AgentRuntime,
   CoordinatorMemoryStore,
   createAgentContext,
+  createPrReviewerExecutionFn,
   type ActionSink,
   type AgentContext,
   type AgentExecutionFn,
@@ -444,6 +445,12 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
 
 // ------------------------------------------------------------------- pipeline
 
+/**
+ * Core PR Reviewer Bot execution function: fetches PR diff via CredentialBroker
+ * ('pr.diff'), synthesizes LLM / heuristic review, and emits GitHub review.
+ */
+export const corePrReviewer: AgentExecutionFn = createPrReviewerExecutionFn();
+
 export function defaultSinks(deps: SinkDeps = {}): ActionSink[] {
   const catalogue = allSinks(deps);
   return ["github-pr-review-sink", "github-issue-comment-sink"].map((name) => catalogue[name] as ActionSink);
@@ -487,6 +494,8 @@ export interface RunEventOptions {
   agentId?: string;
   /** Memory scope from the agent's wiring (`repo` unless a hub says otherwise). */
   memoryScope?: string;
+  /** Optional execution function override for this specific event or agent. */
+  executionFn?: AgentExecutionFn;
 }
 
 export function sinksFor(types: readonly string[] | undefined, deps: SinkDeps = {}): ActionSink[] {
@@ -582,7 +591,7 @@ export async function runEvent(
   options: RunEventOptions = {},
 ): Promise<RunOutcome> {
   const startedAt = Date.now();
-  const executionFn = deps.executionFn ?? ruleBasedReview;
+  const executionFn = options.executionFn ?? deps.executionFn ?? ruleBasedReview;
   const base: RunOutcome = {
     deliveryId: event.deliveryId,
     status: "failed",
@@ -890,7 +899,13 @@ export async function settleEvent(
 
 export async function drainRepository(
   deps: PipelineDeps,
-  options: { limit?: number; visibilityMs?: number } = {},
+  options: {
+    limit?: number;
+    visibilityMs?: number;
+    agentPrompt?: string;
+    agentId?: string;
+    sinks?: readonly string[];
+  } = {},
 ): Promise<RunReport> {
   const limit = Math.min(Math.max(options.limit ?? DEFAULT_RUN_BATCH, 1), 100);
   const visibilityMs = options.visibilityMs ?? DEFAULT_RUN_VISIBILITY_MS;
@@ -917,7 +932,11 @@ export async function drainRepository(
   };
 
   for (const event of claimed) {
-    const outcome = await runEvent(deps, event);
+    const outcome = await runEvent(deps, event, {
+      ...(options.agentPrompt === undefined ? {} : { agentPrompt: options.agentPrompt }),
+      ...(options.agentId === undefined ? {} : { agentId: options.agentId }),
+      ...(options.sinks === undefined ? {} : { sinks: options.sinks }),
+    });
 
     // An event another runner already delivered is handed back rather than
     // acknowledged: this drain has no work for it, but a canvas run still might

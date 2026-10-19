@@ -7,6 +7,33 @@ import {
 } from "../src/credentials/policy";
 
 describe("credential broker policy", () => {
+  it("resolves pr.diff with accept diff header and pr.files", () => {
+    const diff = resolveRequest({
+      service: "github",
+      action: "pr.diff",
+      repository: "acme/widgets",
+      params: { number: 42 },
+    });
+    expect(diff).toMatchObject({
+      ok: true,
+      method: "GET",
+      url: "https://api.github.com/repos/acme/widgets/pulls/42",
+      headers: { accept: "application/vnd.github.v3.diff" },
+    });
+
+    const files = resolveRequest({
+      service: "github",
+      action: "pr.files",
+      repository: "acme/widgets",
+      params: { number: 42 },
+    });
+    expect(files).toMatchObject({
+      ok: true,
+      method: "GET",
+      url: "https://api.github.com/repos/acme/widgets/pulls/42/files",
+    });
+  });
+
   it("permits only actions in the registry", () => {
     expect(hasPermission("github", "pr.comment")).toBe(true);
     expect(hasPermission("gitlab", "mr.comment")).toBe(true);
