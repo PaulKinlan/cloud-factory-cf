@@ -17,7 +17,8 @@
   },
   "dependencies": {
     "@cloudflare/computer": "^0.5.1",
-    "@factory-cloud/sdk": "^0.1.0"
+    "@factory-cloud/sdk": "^0.1.0",
+    "@factory-cloud/canvas-model": "^0.1.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.4.4",

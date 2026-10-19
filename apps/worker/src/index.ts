@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { runCanvasDocument } from "./canvas-runs";
 import { drainRepository } from "./pipeline";
 import { sameSecret } from "./secrets";
 import { MAX_WEBHOOK_BYTES } from "./webhooks";
@@ -13,6 +14,7 @@ export { RepoCoordinator } from "./repo-coordinator";
 
 const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
 const CANVAS_PATH = /^\/canvas\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/documents(?:\/(?<id>[^/]+))?$/;
+const CANVAS_RUN_PATH = /^\/canvas\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/documents\/(?<id>[^/]+)\/run$/;
 const RUN_PATH = /^\/runs\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
 const BROKER_PATH =
   /^\/broker\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>capabilities|permissions|provisioning|overrides|proxy|audit)$/;
@@ -65,6 +67,12 @@ export default {
         agentName?: string;
       };
       return routeStudio(request, env, owner, repo, operation, agentName);
+    }
+
+    const canvasRun = CANVAS_RUN_PATH.exec(url.pathname);
+    if (canvasRun?.groups) {
+      const { owner, repo, id } = canvasRun.groups as { owner: string; repo: string; id: string };
+      return routeCanvasRun(request, env, owner, repo, id);
     }
 
     const canvas = CANVAS_PATH.exec(url.pathname);
@@ -151,6 +159,49 @@ async function routeRun(request: Request, env: Env, owner: string, repo: string)
   );
 
   return Response.json({ ok: true, ...report });
+}
+
+/**
+ * Turns a stored canvas document into runs: the layout is the agent
+ * configuration, so this is control-plane work and needs the control key.
+ */
+async function routeCanvasRun(
+  request: Request,
+  env: Env,
+  owner: string,
+  repo: string,
+  id: string,
+): Promise<Response> {
+  const controlKey = env.BROKER_CONTROL_KEY;
+  if (!controlKey) {
+    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
+  }
+  if (!(await sameSecret(controlKey, request.headers.get("x-factory-control-key")))) {
+    return Response.json({ ok: false, error: "not authorised to run agents" }, { status: 401 });
+  }
+  if (request.method !== "POST") {
+    return new Response("method not allowed", { status: 405 });
+  }
+
+  const repository = `${owner}/${repo}`;
+  const body = (await request.json().catch(() => ({}))) as { limit?: unknown };
+  const limit = typeof body.limit === "number" && Number.isFinite(body.limit) ? Math.trunc(body.limit) : undefined;
+  const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+
+  const result = await runCanvasDocument(
+    {
+      repository,
+      controlKey,
+      coordinator,
+      broker: env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository)),
+    },
+    id,
+    limit === undefined ? {} : { limit },
+  );
+  if (!result.ok) {
+    return Response.json({ ok: false, error: result.error }, { status: 400 });
+  }
+  return Response.json({ ok: true, ...result.report });
 }
 
 /**
