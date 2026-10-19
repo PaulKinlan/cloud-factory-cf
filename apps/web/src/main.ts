@@ -1,4 +1,13 @@
 import {
+  describeShareFailure,
+  documentRequest,
+  listRequest,
+  parseDocumentList,
+  parseStoredDocument,
+  saveRequest,
+  type ShareTarget,
+} from "./sync";
+import {
   KIND_LABELS,
   NODE_HEIGHT,
   NODE_WIDTH,
@@ -38,6 +47,12 @@ const connectToggle = required<HTMLButtonElement>("connect-toggle");
 const clearButton = required<HTMLButtonElement>("clear");
 const exportDialog = required<HTMLDialogElement>("export-dialog");
 const exportJson = required<HTMLPreElement>("export-json");
+const shareDialog = required<HTMLDialogElement>("share-dialog");
+const shareRepository = required<HTMLInputElement>("share-repository");
+const shareKey = required<HTMLInputElement>("share-key");
+const shareName = required<HTMLInputElement>("share-name");
+const shareStatus = required<HTMLParagraphElement>("share-status");
+const shareList = required<HTMLUListElement>("share-list");
 
 const storedDoc = loadDoc();
 let doc: CanvasDoc = storedDoc ?? createSampleDoc();
@@ -46,6 +61,10 @@ let connectMode = false;
 let connectFrom: string | null = null;
 let clearArmed = false;
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
+// Repository name and the last saved id survive a reload of the tab; the control
+// key never leaves this variable.
+let shareId: string | null = null;
+const SHARE_HINT_KEY = "cloud-factory-canvas:share";
 
 const CONFIG_FIELDS: Record<NodeKind, Array<{ key: string; label: string; control: "text" | "textarea" | "select"; options?: string[] }>> = {
   agent: [
@@ -396,6 +415,150 @@ required<HTMLButtonElement>("export").addEventListener("click", () => {
 });
 
 required<HTMLButtonElement>("export-close").addEventListener("click", () => exportDialog.close());
+
+// ------------------------------------------------------------------- sharing
+
+function shareTarget(): ShareTarget {
+  return { repository: shareRepository.value.trim(), controlKey: shareKey.value };
+}
+
+function setShareStatus(message: string): void {
+  shareStatus.textContent = message;
+  announce(message);
+}
+
+function rememberShareTarget(): void {
+  try {
+    sessionStorage.setItem(SHARE_HINT_KEY, JSON.stringify({ repository: shareRepository.value.trim(), id: shareId }));
+  } catch {
+    // Session storage can be unavailable; sharing still works in this page.
+  }
+}
+
+required<HTMLButtonElement>("share").addEventListener("click", () => {
+  try {
+    const stored = sessionStorage.getItem(SHARE_HINT_KEY);
+    if (stored) {
+      const parsed = JSON.parse(stored) as { repository?: unknown; id?: unknown };
+      if (typeof parsed.repository === "string" && shareRepository.value.length === 0) {
+        shareRepository.value = parsed.repository;
+      }
+      if (typeof parsed.id === "string") shareId = parsed.id;
+    }
+  } catch {
+    // Ignore a corrupt hint: an empty form is fine.
+  }
+  shareStatus.textContent = "";
+  shareDialog.showModal();
+  void refreshDocumentList();
+});
+
+required<HTMLButtonElement>("share-close").addEventListener("click", () => shareDialog.close());
+
+async function sendShare(
+  request: { url: string; init: RequestInit } | { error: string },
+): Promise<{ status: number; payload: unknown } | null> {
+  if ("error" in request) {
+    setShareStatus(request.error);
+    return null;
+  }
+  try {
+    const response = await fetch(request.url, request.init);
+    const payload: unknown = await response.json().catch(() => null);
+    return { status: response.status, payload };
+  } catch {
+    setShareStatus("Could not reach the API — is the canvas being served by the Worker rather than Vite?");
+    return null;
+  }
+}
+
+required<HTMLButtonElement>("share-save").addEventListener("click", async () => {
+  setShareStatus("Saving…");
+  const result = await sendShare(
+    saveRequest(location.origin, shareTarget(), doc, {
+      ...(shareId === null ? {} : { id: shareId }),
+      name: shareName.value,
+    }),
+  );
+  if (!result) return;
+  if (result.status !== 200 && result.status !== 201) {
+    setShareStatus(describeShareFailure(result.status, result.payload));
+    return;
+  }
+  const body = result.payload as { id?: unknown; name?: unknown };
+  if (typeof body.id === "string") shareId = body.id;
+  rememberShareTarget();
+  setShareStatus(`Saved “${typeof body.name === "string" ? body.name : shareName.value}” (${shareId ?? "no id"})`);
+  void refreshDocumentList();
+});
+
+required<HTMLButtonElement>("share-refresh").addEventListener("click", () => {
+  void refreshDocumentList();
+});
+
+async function refreshDocumentList(): Promise<void> {
+  shareList.replaceChildren();
+  if (shareRepository.value.trim().length === 0 || shareKey.value.length === 0) {
+    return;
+  }
+  const result = await sendShare(listRequest(location.origin, shareTarget()));
+  if (!result) return;
+  if (result.status !== 200) {
+    setShareStatus(describeShareFailure(result.status, result.payload));
+    return;
+  }
+  const documents = parseDocumentList(result.payload);
+  if (documents === null) {
+    setShareStatus("The document list was not in the expected shape");
+    return;
+  }
+  if (documents.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "muted";
+    empty.textContent = "No documents stored for this repository yet.";
+    shareList.append(empty);
+    return;
+  }
+  for (const entry of documents) {
+    const item = document.createElement("li");
+    const load = document.createElement("button");
+    load.type = "button";
+    load.className = "button button--ghost";
+    load.textContent = `Load “${entry.name}”`;
+    load.addEventListener("click", () => {
+      void loadDocument(entry.id, entry.name);
+    });
+    const meta = document.createElement("span");
+    meta.className = "muted";
+    meta.textContent = entry.updatedAt.length > 0 ? new Date(entry.updatedAt).toLocaleString() : "";
+    item.append(load, meta);
+    shareList.append(item);
+  }
+}
+
+async function loadDocument(id: string, name: string): Promise<void> {
+  setShareStatus(`Loading “${name}”…`);
+  const result = await sendShare(documentRequest(location.origin, shareTarget(), id));
+  if (!result) return;
+  if (result.status !== 200) {
+    setShareStatus(describeShareFailure(result.status, result.payload));
+    return;
+  }
+  const stored = parseStoredDocument(result.payload);
+  if (!stored) {
+    setShareStatus("That document could not be read by this canvas version");
+    return;
+  }
+  doc = stored.document;
+  selectedId = doc.nodes[0]?.id ?? null;
+  connectFrom = null;
+  shareId = id;
+  shareName.value = stored.name;
+  persist();
+  render();
+  rememberShareTarget();
+  setShareStatus(`Loaded “${stored.name}” and replaced the current canvas`);
+}
 
 required<HTMLButtonElement>("export-copy").addEventListener("click", async () => {
   try {

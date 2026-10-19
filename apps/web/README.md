@@ -63,6 +63,27 @@ npm run preview -w @factory-cloud/web   # serve the built bundle on :4173
 npm test -w @factory-cloud/web          # model unit tests (Node, no browser)
 ```
 
+## Sharing a layout (repository documents)
+
+**Share…** stores the layout with a repository through the document API
+(`/canvas/:owner/:repo/documents`, see the root README). The form takes
+`owner/repo`, a control key and a document name:
+
+- **Save to repository** `PUT`s the exported document (creating on first save,
+  updating the same id after that), then refreshes the list.
+- **Refresh list** shows the repository's stored documents; **Load** replaces the
+  current canvas with one of them (validated through the same `parseDoc` the
+  local copy uses) and writes it back to `localStorage`.
+- The control key lives **in memory only** — it is never written to
+  `localStorage`, `sessionStorage` or the exported JSON. The repository name, the
+  last document id and the document name survive a reload in `sessionStorage`.
+- Failures are reported in the dialog (key rejected, no key on the deployment,
+  repository at its document limit, unreachable API) instead of the console, and
+  a failed load leaves the current canvas untouched.
+
+`src/sync.ts` holds the request builders and response parsers, so the wiring is
+unit-tested (7 tests) without a DOM.
+
 ## Serving it
 
 The canvas is served by the API Worker itself (`apps/worker/wrangler.jsonc`):

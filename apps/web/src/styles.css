@@ -459,6 +459,40 @@ textarea.field__control {
   font: 0.78rem/1.5 var(--mono);
 }
 
+.share-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0 12px;
+}
+
+.share-actions {
+  justify-content: flex-start;
+}
+
+.share-status {
+  min-height: 1.4em;
+  margin: 10px 0 6px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.share-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 30vh;
+  overflow-y: auto;
+  display: grid;
+  gap: 6px;
+}
+
+.share-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: space-between;
+}
+
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
