@@ -155,15 +155,68 @@ export class AgentStudio {
       };
     }
 
-    const manifestCapabilities = Array.isArray(request.manifest.capabilities)
-      ? request.manifest.capabilities
-      : [];
-    const manifestTools = Array.isArray(request.manifest.tools)
-      ? request.manifest.tools
-      : [];
-    const manifestSinks = Array.isArray(request.manifest.sinks)
-      ? request.manifest.sinks
-      : [];
+    if (
+      request.manifest.capabilities !== undefined &&
+      !Array.isArray(request.manifest.capabilities)
+    ) {
+      return {
+        runId,
+        status: 'failed',
+        logs,
+        toolCalls,
+        sinkActions,
+        memoryMutations,
+        permissionChecks,
+        error: 'Invalid manifest: field "capabilities" must be an array if provided',
+        durationMs: 0,
+      };
+    }
+    if (request.manifest.tools !== undefined && !Array.isArray(request.manifest.tools)) {
+      return {
+        runId,
+        status: 'failed',
+        logs,
+        toolCalls,
+        sinkActions,
+        memoryMutations,
+        permissionChecks,
+        error: 'Invalid manifest: field "tools" must be an array if provided',
+        durationMs: 0,
+      };
+    }
+    if (request.manifest.sinks !== undefined && !Array.isArray(request.manifest.sinks)) {
+      return {
+        runId,
+        status: 'failed',
+        logs,
+        toolCalls,
+        sinkActions,
+        memoryMutations,
+        permissionChecks,
+        error: 'Invalid manifest: field "sinks" must be an array if provided',
+        durationMs: 0,
+      };
+    }
+    if (
+      request.manifest.triggers !== undefined &&
+      !Array.isArray(request.manifest.triggers)
+    ) {
+      return {
+        runId,
+        status: 'failed',
+        logs,
+        toolCalls,
+        sinkActions,
+        memoryMutations,
+        permissionChecks,
+        error: 'Invalid manifest: field "triggers" must be an array if provided',
+        durationMs: 0,
+      };
+    }
+
+    const manifestCapabilities = request.manifest.capabilities ?? [];
+    const manifestTools = request.manifest.tools ?? [];
+    const manifestSinks = request.manifest.sinks ?? [];
 
     // 1. Build sandboxed memory tracking
     const innerMemory = options.memoryStore ?? new InMemoryHierarchicalMemoryStore();

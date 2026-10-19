@@ -218,6 +218,26 @@ test('runCli: studio author and test simulation', async () => {
     );
     assert.equal(invalidCode, 1);
     assert.ok(invalidErrors.some((e) => e.includes('missing required field "name"')));
+
+    // 7. Test studio test rejects wrong-type array fields (fixes cloud-factory-cf-gl6)
+    const wrongTypePath = path.join(tmpDir, 'wrong-type.json');
+    await fs.writeFile(
+      wrongTypePath,
+      JSON.stringify({
+        name: 'wrong-type',
+        version: '0.1.0',
+        prompt: 'test',
+        tools: 'read_file',
+      }),
+      'utf8',
+    );
+    const wrongTypeErrors: string[] = [];
+    const wrongTypeCode = await runCli(
+      ['studio', 'test', wrongTypePath, '--cwd', tmpDir],
+      { stdout: () => {}, stderr: (m) => wrongTypeErrors.push(m) },
+    );
+    assert.equal(wrongTypeCode, 1);
+    assert.ok(wrongTypeErrors.some((e) => e.includes('manifest field "tools" must be an array')));
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }

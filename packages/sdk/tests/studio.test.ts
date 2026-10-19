@@ -388,4 +388,17 @@ test('AgentStudio: author, simulate, install, load, and list', async () => {
   );
   assert.equal(failSinkSim.status, 'failed');
   assert.ok(failSinkSim.error?.includes('sink-failed'));
+
+  // 10. Test simulation rejection when array fields have wrong types (fixes cloud-factory-cf-gl6)
+  const wrongTypeSim = await studio.simulate({
+    manifest: {
+      name: 'wrong-type-agent',
+      version: '0.1.0',
+      description: 'test',
+      prompt: 'p',
+      capabilities: { service: 'github', action: 'admin.delete_all' } as any,
+    } as any,
+  });
+  assert.equal(wrongTypeSim.status, 'failed');
+  assert.ok(wrongTypeSim.error?.includes('field "capabilities" must be an array'));
 });
