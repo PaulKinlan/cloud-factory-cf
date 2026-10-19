@@ -72,9 +72,19 @@ export class RepoCoordinator extends DurableObject<Env> {
     if (request.method === "GET" && url.pathname === "/events") {
       return this.eventQueue.listEvents(url);
     }
+    if (request.method === "GET" && url.pathname === "/events/stats") {
+      return Response.json({
+        ok: true,
+        counts: this.eventQueue.statusCounts(),
+      });
+    }
     if (request.method === "GET" && url.pathname.startsWith("/events/") && url.pathname.endsWith("/payload")) {
       const deliveryId = decodeURIComponent(url.pathname.slice("/events/".length, -"/payload".length));
       return this.eventQueue.eventPayload(deliveryId);
+    }
+    if (request.method === "GET" && url.pathname.startsWith("/events/")) {
+      const deliveryId = decodeURIComponent(url.pathname.slice("/events/".length));
+      return this.eventDetail(deliveryId);
     }
     if (request.method === "POST" && url.pathname === "/claim") {
       return this.eventQueue.claim(await readJson(request));
@@ -237,6 +247,20 @@ export class RepoCoordinator extends DurableObject<Env> {
     if (!token) return { ok: false, status: 503, error: "gitlab token not configured" };
     const valid = await verifyGitlabToken(token, headers.get("x-gitlab-token"));
     return valid ? { ok: true } : { ok: false, status: 401, error: "invalid token" };
+  }
+
+  private eventDetail(deliveryId: string): Response {
+    const found = this.eventQueue.findEvent(deliveryId);
+    if (!found) {
+      return Response.json({ ok: false, error: "not found", deliveryId }, { status: 404 });
+    }
+    const deliveries = this.deliveryLedger.findDeliveries(deliveryId);
+    return Response.json({
+      ok: true,
+      repository: this.ctx.id.name ?? "unknown",
+      event: found,
+      deliveries,
+    });
   }
 
   private stats(): Response {

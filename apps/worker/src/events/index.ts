@@ -8,7 +8,9 @@ export {
   migrateEventQueueTable,
   MAX_ATTEMPTS,
   DEFAULT_VISIBILITY_MS,
+  toWireEvent,
   type AlarmScheduler,
+  type WireEvent,
 } from "./event-queue";
 
 export {

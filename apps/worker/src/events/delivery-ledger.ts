@@ -100,6 +100,22 @@ export class DeliveryLedger {
     return Response.json({ ok: true, deliveryId, agentId, status });
   }
 
+  findDeliveries(deliveryId: string): Array<{ agentId: string; status: string; attempts: number; updatedAt: string }> {
+    if (deliveryId.length === 0) return [];
+    return this.sql
+      .exec<{ agent_id: string; status: string; attempts: number; updated_at: string }>(
+        "SELECT agent_id, status, attempts, updated_at FROM event_deliveries WHERE delivery_id = ? ORDER BY agent_id",
+        deliveryId,
+      )
+      .toArray()
+      .map((row) => ({
+        agentId: row.agent_id,
+        status: row.status,
+        attempts: row.attempts,
+        updatedAt: row.updated_at,
+      }));
+  }
+
   list(url: URL): Response {
     const deliveryId = url.searchParams.get("deliveryId");
     if (deliveryId === null) {
