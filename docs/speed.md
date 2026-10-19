@@ -61,6 +61,11 @@ contract:
   Node like `apps/web/src/main.ts`—which is driven in Chrome via CDP—are explicitly
   listed in `DECLARED_UNVERIFIED` referencing `cloud-factory-cf-5e8`/`d8s`, and trigger
   the workspace smoke suite instead of failing);
+- a delta whose only changes are **test files** runs the owning workspace's whole
+  suite (a deleted or renamed test is never selected by `vitest --changed`, so
+  asking for the delta would run nothing), and test files no workspace runs are
+  named as "not part of the gate"; it never hard-FAILs on a test-only delta —
+  that red means the *mapping* is wrong, not the change (bead `cloud-factory-cf-8f1`);
 - a delta with no source changes runs a fixed **smoke set** (`apps/web`'s node
   suite, `apps/worker`'s `worker`/`assets` tests) instead of nothing: a gate that
   executes no suite at all cannot be distinguished from one whose selection broke,
