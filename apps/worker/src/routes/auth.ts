@@ -115,7 +115,7 @@ export async function handleGithubLogin(
     return Response.json({ ok: false, error: "broker signing key not configured" }, { status: 503 });
   }
 
-  const clientId = url.searchParams.get("client_id") ?? env.GITHUB_CLIENT_ID;
+  const clientId = env.GITHUB_CLIENT_ID;
   const appSlug = url.searchParams.get("app_slug") ?? env.GITHUB_APP_SLUG;
   const stateNonce = crypto.randomUUID().replace(/-/g, "");
   const redirectUri = url.searchParams.get("redirect_uri");
@@ -250,14 +250,22 @@ export async function handleGithubCallback(
     }
   }
 
-  const clientId = url.searchParams.get("client_id") ?? env.GITHUB_CLIENT_ID ?? "github_app_client_id";
-  const clientSecret = url.searchParams.get("client_secret") ?? env.GITHUB_CLIENT_SECRET ?? "github_app_client_secret";
+  const clientId = env.GITHUB_CLIENT_ID;
+  const clientSecret = env.GITHUB_CLIENT_SECRET;
   let accessToken: string | null = null;
 
   // 1. Exchange code for user access token if code is present
-  if (code && clientId && clientSecret) {
+  if (code) {
+    if (!clientId || !clientSecret) {
+      return Response.json(
+        { ok: false, error: "GitHub OAuth credentials are not configured in environment" },
+        { status: 503, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    let tokenRes: Response;
     try {
-      const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
+      tokenRes = await fetch("https://github.com/login/oauth/access_token", {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -270,51 +278,140 @@ export async function handleGithubCallback(
           code,
         }),
       });
-
-      if (tokenRes.ok) {
-        const tokenData = (await tokenRes.json().catch(() => ({}))) as Record<string, unknown>;
-        if (typeof tokenData["access_token"] === "string") {
-          accessToken = tokenData["access_token"];
-        }
-      }
-    } catch {
-      // Token exchange failed; proceed if installationId is present
+    } catch (err) {
+      return Response.json(
+        { ok: false, error: `Failed to reach GitHub token endpoint: ${String(err)}` },
+        { status: 502, headers: { "set-cookie": clearCookie } },
+      );
     }
+
+    if (!tokenRes.ok) {
+      return Response.json(
+        { ok: false, error: `GitHub token exchange failed with HTTP ${tokenRes.status}` },
+        { status: 502, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    const tokenData = (await tokenRes.json().catch(() => ({}))) as Record<string, unknown>;
+    if (typeof tokenData["error"] === "string") {
+      const errorDesc = typeof tokenData["error_description"] === "string" ? tokenData["error_description"] : tokenData["error"];
+      return Response.json(
+        { ok: false, error: `GitHub OAuth error: ${errorDesc}` },
+        { status: 400, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    if (typeof tokenData["access_token"] !== "string" || !tokenData["access_token"]) {
+      return Response.json(
+        { ok: false, error: "GitHub token exchange returned no access token" },
+        { status: 502, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    accessToken = tokenData["access_token"];
   }
 
   let accountLogin = "unknown";
   let accountType = "User";
   const discoveredRepos: Array<{ fullName: string; owner: string; name: string; private: boolean; defaultBranch: string }> = [];
 
-  // 2. If access token available, query GitHub API for user & repos
+  // 2a. If access token available, query GitHub API for user & repos
   if (accessToken) {
+    let userRes: Response;
     try {
-      const userRes = await fetch("https://api.github.com/user", {
+      userRes = await fetch("https://api.github.com/user", {
         headers: {
           authorization: `Bearer ${accessToken}`,
           accept: "application/vnd.github+json",
           "user-agent": "CloudFactory-Auth",
         },
       });
+    } catch (err) {
+      return Response.json(
+        { ok: false, error: `Failed to reach GitHub /user endpoint: ${String(err)}` },
+        { status: 502, headers: { "set-cookie": clearCookie } },
+      );
+    }
 
-      if (userRes.ok) {
-        const userData = (await userRes.json()) as any;
-        accountLogin = userData.login ?? "unknown";
-        accountType = userData.type ?? "User";
+    if (!userRes.ok) {
+      return Response.json(
+        { ok: false, error: `GitHub /user failed with HTTP ${userRes.status}` },
+        { status: 502, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    const userData = (await userRes.json()) as any;
+    accountLogin = userData.login ?? "unknown";
+    accountType = userData.type ?? "User";
+
+    let reposRes: Response;
+    try {
+      reposRes = await fetch("https://api.github.com/user/repos?per_page=100&sort=updated", {
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          accept: "application/vnd.github+json",
+          "user-agent": "CloudFactory-Auth",
+        },
+      });
+    } catch (err) {
+      return Response.json(
+        { ok: false, error: `Failed to reach GitHub /user/repos endpoint: ${String(err)}` },
+        { status: 502, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    if (!reposRes.ok) {
+      return Response.json(
+        { ok: false, error: `GitHub /user/repos failed with HTTP ${reposRes.status}` },
+        { status: 502, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    const reposData = (await reposRes.json()) as any[];
+    if (Array.isArray(reposData)) {
+      for (const r of reposData) {
+        if (r.full_name) {
+          discoveredRepos.push({
+            fullName: r.full_name,
+            owner: r.owner?.login ?? accountLogin,
+            name: r.name,
+            private: Boolean(r.private),
+            defaultBranch: r.default_branch ?? "main",
+          });
+        }
       }
+    }
+  } else if (installationId) {
+    // 2b. Install-only callback without OAuth code: query installation details & repos
+    const token = env.GITHUB_TOKEN;
+    if (token) {
+      try {
+        const instRes = await fetch(`https://api.github.com/app/installations/${installationId}`, {
+          headers: {
+            authorization: `Bearer ${token}`,
+            accept: "application/vnd.github+json",
+            "user-agent": "CloudFactory-Auth",
+          },
+        });
+        if (instRes.ok) {
+          const instData = (await instRes.json()) as any;
+          if (instData.account?.login) {
+            accountLogin = instData.account.login;
+            accountType = instData.account.type ?? "User";
+          }
+        }
 
-      const reposRes = await fetch("https://api.github.com/user/repos?per_page=100&sort=updated", {
-        headers: {
-          authorization: `Bearer ${accessToken}`,
-          accept: "application/vnd.github+json",
-          "user-agent": "CloudFactory-Auth",
-        },
-      });
-
-      if (reposRes.ok) {
-        const reposData = (await reposRes.json()) as any[];
-        if (Array.isArray(reposData)) {
-          for (const r of reposData) {
+        const instReposRes = await fetch(`https://api.github.com/installation/repositories?per_page=100`, {
+          headers: {
+            authorization: `Bearer ${token}`,
+            accept: "application/vnd.github+json",
+            "user-agent": "CloudFactory-Auth",
+          },
+        });
+        if (instReposRes.ok) {
+          const instReposData = (await instReposRes.json()) as any;
+          const list = Array.isArray(instReposData?.repositories) ? instReposData.repositories : (Array.isArray(instReposData) ? instReposData : []);
+          for (const r of list) {
             if (r.full_name) {
               discoveredRepos.push({
                 fullName: r.full_name,
@@ -326,25 +423,61 @@ export async function handleGithubCallback(
             }
           }
         }
+      } catch {
+        // Fall back to state if API query failed
       }
-    } catch {
-      // Upstream GitHub fetch error
+    }
+
+    // If API query didn't yield an account login, check state parameter for owner/repo
+    if (accountLogin === "unknown" && state) {
+      if (state.includes("/")) {
+        const [stateOwner, stateRepo] = state.split("/");
+        if (stateOwner) {
+          accountLogin = stateOwner;
+          if (stateRepo && discoveredRepos.length === 0) {
+            discoveredRepos.push({
+              fullName: `${stateOwner}/${stateRepo}`,
+              owner: stateOwner,
+              name: stateRepo,
+              private: false,
+              defaultBranch: "main",
+            });
+          }
+        }
+      } else if (!state.includes(".")) {
+        accountLogin = state;
+      }
     }
   }
 
   // 3. Persist authorized repositories into OrgCoordinator DO
   if (accountLogin !== "unknown" && env.ORG_COORDINATOR) {
     const orgCoordinator = env.ORG_COORDINATOR.get(env.ORG_COORDINATOR.idFromName(accountLogin));
-    await orgCoordinator.fetch("https://org-coordinator.internal/installations", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        installationId: installationId || undefined,
-        accountLogin,
-        accountType,
-        repos: discoveredRepos,
-      }),
-    });
+    let persistRes: Response;
+    try {
+      persistRes = await orgCoordinator.fetch("https://org-coordinator.internal/installations", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          installationId: installationId || undefined,
+          accountLogin,
+          accountType,
+          repos: discoveredRepos,
+        }),
+      });
+    } catch (err) {
+      return Response.json(
+        { ok: false, error: `Failed to reach OrgCoordinator: ${String(err)}` },
+        { status: 502, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    if (!persistRes.ok) {
+      return Response.json(
+        { ok: false, error: `OrgCoordinator persistence failed with HTTP ${persistRes.status}` },
+        { status: 502, headers: { "set-cookie": clearCookie } },
+      );
+    }
   }
 
   // 4. Redirect user back to the application canvas
@@ -353,6 +486,7 @@ export async function handleGithubCallback(
     redirectUrl.href = new URL("/", url.origin).href;
   }
   redirectUrl.searchParams.set("connected", "1");
+  redirectUrl.searchParams.set("count", String(discoveredRepos.length));
   if (accountLogin !== "unknown") {
     redirectUrl.searchParams.set("owner", accountLogin);
   }

@@ -264,7 +264,7 @@ describe("GitHub OAuth & App Install Flow", () => {
     const cookieHeader = validLogin.headers.get("set-cookie")!.split(";")[0]!;
 
     const evilCallback = await SELF.fetch(
-      `https://example.com/auth/github/callback?code=mock_code_123&state=${validState}&return_to=https://evil.example/steal`,
+      `https://example.com/auth/github/callback?installation_id=inst_456&setup_action=install&state=${validState}&return_to=https://evil.example/steal`,
       { method: "GET", headers: { cookie: cookieHeader }, redirect: "manual" },
     );
     expect(evilCallback.status).toBe(302);
@@ -276,7 +276,7 @@ describe("GitHub OAuth & App Install Flow", () => {
 
     // 4. Protocol-relative and backslash direct injection in callback
     const protoCallback = await SELF.fetch(
-      `https://example.com/auth/github/callback?code=mock_code_123&state=${validState}&return_to=//evil.example/steal`,
+      `https://example.com/auth/github/callback?installation_id=inst_456&setup_action=install&state=${validState}&return_to=//evil.example/steal`,
       { method: "GET", headers: { cookie: cookieHeader }, redirect: "manual" },
     );
     expect(protoCallback.status).toBe(302);
@@ -285,7 +285,7 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(protoTarget.pathname).toBe("/");
 
     const backslashCallback = await SELF.fetch(
-      `https://example.com/auth/github/callback?code=mock_code_123&state=${validState}&return_to=/\\\\evil.example/steal`,
+      `https://example.com/auth/github/callback?installation_id=inst_456&setup_action=install&state=${validState}&return_to=/\\\\evil.example/steal`,
       { method: "GET", headers: { cookie: cookieHeader }, redirect: "manual" },
     );
     expect(backslashCallback.status).toBe(302);
@@ -356,5 +356,138 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(loc4).toContain("connected=1");
     expect(loc4).toContain("installation_id=inst_789");
     expect(installWithLeftoverNoState.headers.get("set-cookie")).toContain("cf_oauth_state=;");
+  });
+
+  it("/auth/github/callback: surfaces distinct errors when token exchange or upstream APIs fail (cloud-factory-cf-b1a)", async () => {
+    // Obtain valid state and cookie
+    const loginRes = await SELF.fetch("https://example.com/auth/github/login?client_id=gh_test_client_id", {
+      method: "GET",
+      redirect: "manual",
+    });
+    const state = new URL(loginRes.headers.get("location")!).searchParams.get("state")!;
+    const cookieHeader = loginRes.headers.get("set-cookie")!.split(";")[0]!;
+
+    // 1. GitHub returns OAuth error (e.g. bad_verification_code) -> 400
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://github.com/login/oauth/access_token") {
+          return new Response(JSON.stringify({ error: "bad_verification_code", error_description: "The code passed is incorrect or has expired." }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const badCodeRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=expired_code&state=${state}`,
+      { method: "GET", headers: { cookie: cookieHeader } },
+    );
+    expect(badCodeRes.status).toBe(400);
+    const badCodeJson = (await badCodeRes.json()) as any;
+    expect(badCodeJson.ok).toBe(false);
+    expect(badCodeJson.error).toContain("GitHub OAuth error");
+
+    // 2. GitHub token endpoint returns 500 -> 502
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://github.com/login/oauth/access_token") {
+          return new Response("Internal Server Error", { status: 500 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const serverErrRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=bad_code&state=${state}`,
+      { method: "GET", headers: { cookie: cookieHeader } },
+    );
+    expect(serverErrRes.status).toBe(502);
+
+    // 3. GitHub /user fails with 500 -> 502
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://github.com/login/oauth/access_token") {
+          return new Response(JSON.stringify({ access_token: "gho_valid_token" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url === "https://api.github.com/user") {
+          return new Response("Service Unavailable", { status: 503 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const userErrRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=valid_code&state=${state}`,
+      { method: "GET", headers: { cookie: cookieHeader } },
+    );
+    expect(userErrRes.status).toBe(502);
+    const userErrJson = (await userErrRes.json()) as any;
+    expect(userErrJson.ok).toBe(false);
+    expect(userErrJson.error).toContain("GitHub /user failed");
+  });
+
+  it("flow=install: App install callback queries GitHub App installation/repos and persists to OrgCoordinator (cloud-factory-cf-tvg)", async () => {
+    const installOwner = "orgdev";
+    const installRepos = [
+      { id: 101, full_name: "orgdev/service-a", name: "service-a", private: true, default_branch: "main", owner: { login: installOwner } },
+      { id: 102, full_name: "orgdev/service-b", name: "service-b", private: false, default_branch: "main", owner: { login: installOwner } },
+    ];
+
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/app/installations/inst_app_888")) {
+          return new Response(JSON.stringify({ id: 888, account: { login: installOwner, type: "Organization" } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.includes("/installation/repositories")) {
+          return new Response(JSON.stringify({ total_count: 2, repositories: installRepos }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const installCallbackRes = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=inst_app_888&setup_action=install&return_to=/",
+      {
+        method: "GET",
+        redirect: "manual",
+      },
+    );
+
+    expect(installCallbackRes.status).toBe(302);
+    const loc = installCallbackRes.headers.get("location")!;
+    expect(loc).toContain("connected=1");
+    expect(loc).toContain(`owner=${installOwner}`);
+    expect(loc).toContain("installation_id=inst_app_888");
+    expect(loc).toContain("count=2");
+
+    // Verify repositories are stored in OrgCoordinator
+    const orgReposRes = await SELF.fetch(`https://example.com/api/repos?owner=${installOwner}`, {
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(orgReposRes.status).toBe(200);
+    const orgReposData = (await orgReposRes.json()) as any;
+    expect(orgReposData.ok).toBe(true);
+    expect(orgReposData.count).toBe(2);
+    expect(orgReposData.repositories[0].fullName).toBe("orgdev/service-a");
+    expect(orgReposData.repositories[0].isPrivate).toBe(true);
   });
 });

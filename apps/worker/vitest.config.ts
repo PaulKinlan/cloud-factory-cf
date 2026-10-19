@@ -23,6 +23,9 @@ export default defineConfig({
           // end to end without any real service.
           BEADS_API_HOST: "beads.test",
           BEADS_TOKEN: "test-beads-token",
+          // GitHub OAuth app test credentials
+          GITHUB_CLIENT_ID: "gh_test_client_id",
+          GITHUB_CLIENT_SECRET: "gh_test_client_secret",
           // Alternate installation credential used by the per-repository
           // override tests.
           GITHUB_TOKEN_INSTALL_2: "ghp_test_github_install_2",
