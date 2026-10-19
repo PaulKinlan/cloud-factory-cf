@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { CoordinatorMemoryStore } from "@factory-cloud/sdk";
 
@@ -193,5 +193,39 @@ describe("Hierarchical Central Memory Store", () => {
     expect(resPercent.status).toBe(200);
     const dataPercent = (await resPercent.json()) as { keys: string[] };
     expect(dataPercent.keys).toEqual(["team%1"]);
+  });
+
+  it("returns raw string fallback when stored memory value or metadata is non-JSON (fixes cloud-factory-cf-iuo)", async () => {
+    const repoName = "acme-corp/raw-memory";
+    const repoStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repoName));
+
+    // Directly insert raw non-JSON text into SQLite memory table
+    await runInDurableObject(repoStub, (_instance, state) => {
+      const now = new Date().toISOString();
+      state.storage.sql.exec(
+        "INSERT INTO memory (key, value, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        "plain-text-key",
+        "raw-unquoted-string",
+        "raw-unquoted-metadata",
+        now,
+        now,
+      );
+    });
+
+    const getRes = await repoStub.fetch("https://repo-coordinator.internal/memory/plain-text-key");
+    expect(getRes.status).toBe(200);
+    const data = (await getRes.json()) as { ok: boolean; key: string; value: unknown; metadata: unknown };
+    expect(data.ok).toBe(true);
+    expect(data.value).toBe("raw-unquoted-string");
+    expect(data.metadata).toBe("raw-unquoted-metadata");
+
+    // Also verify listing returns raw string fallback
+    const listRes = await repoStub.fetch("https://repo-coordinator.internal/memory?prefix=plain");
+    expect(listRes.status).toBe(200);
+    const listData = (await listRes.json()) as { ok: boolean; entries: Array<{ key: string; value: unknown; metadata: unknown }> };
+    expect(listData.ok).toBe(true);
+    const entry = listData.entries.find((e) => e.key === "plain-text-key");
+    expect(entry?.value).toBe("raw-unquoted-string");
+    expect(entry?.metadata).toBe("raw-unquoted-metadata");
   });
 });
