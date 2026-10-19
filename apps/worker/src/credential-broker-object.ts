@@ -87,6 +87,9 @@ export class CredentialBroker extends DurableObject<Env> {
     if (url.pathname === "/overrides") {
       return this.overrides(request);
     }
+    if (url.pathname === "/settings") {
+      return this.handleSettings(request);
+    }
     if (request.method === "POST" && url.pathname === "/proxy") {
       return this.proxy(request);
     }
@@ -158,6 +161,14 @@ export class CredentialBroker extends DurableObject<Env> {
         action TEXT NOT NULL,
         created_at TEXT NOT NULL,
         PRIMARY KEY (agent, service, action)
+      );
+    `);
+    // Repository-level configuration & admin settings (GitHub App, BYOK AI keys, Webhooks).
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS repo_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
     `);
   }
@@ -760,6 +771,208 @@ export class CredentialBroker extends DurableObject<Env> {
     );
     return cursor.one().id;
   }
+
+  // ------------------------------------------------------------- admin settings
+
+  private async handleSettings(request: Request): Promise<Response> {
+    const provisioningKey = this.env.BROKER_CONTROL_KEY;
+    if (!provisioningKey) {
+      return Response.json({ ok: false, error: "broker control key not configured" }, { status: 503 });
+    }
+    const presented = request.headers.get("x-factory-control-key");
+    const authorised = await sameSecret(provisioningKey, presented);
+    if (!authorised) {
+      return Response.json({ ok: false, error: "not authorised to manage settings" }, { status: 401 });
+    }
+
+    if (request.method === "GET") {
+      const rows = this.sql
+        .exec<{ key: string; value: string; updated_at: string }>(
+          `SELECT key, value, updated_at FROM repo_settings`
+        )
+        .toArray();
+      const settingsMap = new Map<string, string>();
+      for (const row of rows) {
+        settingsMap.set(row.key, row.value);
+      }
+
+      const appId = settingsMap.get("github.app_id") ?? "";
+      const clientId = settingsMap.get("github.client_id") ?? "";
+      const clientSecret = settingsMap.get("github.client_secret") ?? "";
+      const privateKey = settingsMap.get("github.private_key") ?? "";
+
+      const anthropicKey = settingsMap.get("ai.anthropic_key") ?? "";
+      const openaiKey = settingsMap.get("ai.openai_key") ?? "";
+      const deepseekKey = settingsMap.get("ai.deepseek_key") ?? "";
+      const geminiKey = settingsMap.get("ai.gemini_key") ?? "";
+
+      const webhookSecret = settingsMap.get("webhook.secret") ?? this.env.WEBHOOK_SECRET ?? "";
+
+      return Response.json({
+        ok: true,
+        repository: this.repository,
+        githubApp: {
+          appId,
+          clientId,
+          hasClientSecret: clientSecret.length > 0,
+          clientSecretMasked: maskSecret(clientSecret),
+          hasPrivateKey: privateKey.length > 0,
+          privateKeyFingerprint: privateKey ? computePemFingerprint(privateKey) : null,
+        },
+        aiProviders: {
+          anthropic: {
+            configured: anthropicKey.length > 0,
+            maskedKey: maskSecret(anthropicKey),
+            model: settingsMap.get("ai.anthropic_model") ?? "claude-3-7-sonnet-20250219",
+          },
+          openai: {
+            configured: openaiKey.length > 0,
+            maskedKey: maskSecret(openaiKey),
+            model: settingsMap.get("ai.openai_model") ?? "gpt-4o",
+          },
+          deepseek: {
+            configured: deepseekKey.length > 0,
+            maskedKey: maskSecret(deepseekKey),
+            model: settingsMap.get("ai.deepseek_model") ?? "deepseek-chat",
+          },
+          gemini: {
+            configured: geminiKey.length > 0,
+            maskedKey: maskSecret(geminiKey),
+            model: settingsMap.get("ai.gemini_model") ?? "gemini-2.0-flash",
+          },
+        },
+        webhook: {
+          configured: webhookSecret.length > 0,
+          secretMasked: maskSecret(webhookSecret),
+          url: `/webhooks/github/${this.repository}`,
+        },
+      });
+    }
+
+    if (request.method === "POST") {
+      const body = (await readJson(request)) as Record<string, any>;
+      const now = new Date().toISOString();
+      const updatedKeys: string[] = [];
+
+      if (body.githubApp && typeof body.githubApp === "object") {
+        const { appId, clientId, clientSecret, privateKey } = body.githubApp;
+        if (typeof appId === "string") {
+          this.setSetting("github.app_id", appId.trim(), now);
+          updatedKeys.push("github.app_id");
+        }
+        if (typeof clientId === "string") {
+          this.setSetting("github.client_id", clientId.trim(), now);
+          updatedKeys.push("github.client_id");
+        }
+        if (typeof clientSecret === "string" && clientSecret.trim().length > 0) {
+          this.setSetting("github.client_secret", clientSecret.trim(), now);
+          updatedKeys.push("github.client_secret");
+        }
+        if (typeof privateKey === "string" && privateKey.trim().length > 0) {
+          if (!isValidPem(privateKey)) {
+            return Response.json(
+              {
+                ok: false,
+                error: "Invalid PEM private key format: must start with -----BEGIN ... PRIVATE KEY----- and end with -----END ... PRIVATE KEY-----",
+              },
+              { status: 400 },
+            );
+          }
+          this.setSetting("github.private_key", privateKey.trim(), now);
+          updatedKeys.push("github.private_key");
+        }
+      }
+
+      if (body.aiProviders && typeof body.aiProviders === "object") {
+        const { anthropic, openai, deepseek, gemini } = body.aiProviders;
+        if (typeof anthropic?.key === "string" && anthropic.key.trim().length > 0) {
+          this.setSetting("ai.anthropic_key", anthropic.key.trim(), now);
+          updatedKeys.push("ai.anthropic_key");
+        }
+        if (typeof anthropic?.model === "string") {
+          this.setSetting("ai.anthropic_model", anthropic.model.trim(), now);
+          updatedKeys.push("ai.anthropic_model");
+        }
+        if (typeof openai?.key === "string" && openai.key.trim().length > 0) {
+          this.setSetting("ai.openai_key", openai.key.trim(), now);
+          updatedKeys.push("ai.openai_key");
+        }
+        if (typeof openai?.model === "string") {
+          this.setSetting("ai.openai_model", openai.model.trim(), now);
+          updatedKeys.push("ai.openai_model");
+        }
+        if (typeof deepseek?.key === "string" && deepseek.key.trim().length > 0) {
+          this.setSetting("ai.deepseek_key", deepseek.key.trim(), now);
+          updatedKeys.push("ai.deepseek_key");
+        }
+        if (typeof deepseek?.model === "string") {
+          this.setSetting("ai.deepseek_model", deepseek.model.trim(), now);
+          updatedKeys.push("ai.deepseek_model");
+        }
+        if (typeof gemini?.key === "string" && gemini.key.trim().length > 0) {
+          this.setSetting("ai.gemini_key", gemini.key.trim(), now);
+          updatedKeys.push("ai.gemini_key");
+        }
+        if (typeof gemini?.model === "string") {
+          this.setSetting("ai.gemini_model", gemini.model.trim(), now);
+          updatedKeys.push("ai.gemini_model");
+        }
+      }
+
+      if (typeof body.webhookSecret === "string" && body.webhookSecret.trim().length > 0) {
+        this.setSetting("webhook.secret", body.webhookSecret.trim(), now);
+        updatedKeys.push("webhook.secret");
+      }
+
+      return Response.json({ ok: true, updated: updatedKeys });
+    }
+
+    if (request.method === "DELETE") {
+      const url = new URL(request.url);
+      const key = url.searchParams.get("key");
+      if (key) {
+        this.sql.exec(`DELETE FROM repo_settings WHERE key = ?`, key);
+      } else {
+        this.sql.exec(`DELETE FROM repo_settings`);
+      }
+      return Response.json({ ok: true, deleted: key ?? "all" });
+    }
+
+    return new Response("method not allowed", { status: 405 });
+  }
+
+  private setSetting(key: string, value: string, now: string): void {
+    this.sql.exec(
+      `INSERT INTO repo_settings (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      key,
+      value,
+      now,
+    );
+  }
+}
+
+export function maskSecret(secret: string): string {
+  if (!secret) return "";
+  if (secret.length <= 8) return "••••••••";
+  const start = secret.slice(0, 4);
+  const end = secret.slice(-4);
+  return `${start}••••••••${end}`;
+}
+
+export function computePemFingerprint(pem: string): string {
+  const clean = pem.replace(/-----[A-Z ]*-----/g, "").replace(/\s+/g, "");
+  if (!clean) return "unknown";
+  return `sha256:${clean.slice(0, 8)}...${clean.slice(-8)}`;
+}
+
+export function isValidPem(pem: string): boolean {
+  const trimmed = pem.trim();
+  return (
+    trimmed.startsWith("-----BEGIN ") &&
+    trimmed.includes("PRIVATE KEY-----") &&
+    trimmed.includes("-----END ")
+  );
 }
 
 type OverrideKind = "credential_binding" | "allowed_actions";

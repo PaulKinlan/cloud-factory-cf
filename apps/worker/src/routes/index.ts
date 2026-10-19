@@ -1,4 +1,5 @@
 export * from "./broker";
+export * from "./admin";
 export * from "./studio";
 export * from "./canvas";
 export * from "./runs";

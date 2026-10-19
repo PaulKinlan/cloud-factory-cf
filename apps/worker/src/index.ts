@@ -1,5 +1,6 @@
 import type { Env } from "./env";
 import { handleBroker } from "./routes/broker";
+import { handleAdmin } from "./routes/admin";
 import { handleStudio } from "./routes/studio";
 import { handleCanvas } from "./routes/canvas";
 import { handleRuns } from "./routes/runs";
@@ -31,6 +32,9 @@ export default {
 
     const brokerResponse = await handleBroker(request, env, url);
     if (brokerResponse) return brokerResponse;
+
+    const adminResponse = await handleAdmin(request, env, url);
+    if (adminResponse) return adminResponse;
 
     const studioResponse = await handleStudio(request, env, url);
     if (studioResponse) return studioResponse;
