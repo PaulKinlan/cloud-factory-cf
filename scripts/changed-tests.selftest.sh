@@ -64,6 +64,10 @@ SH
     for f in worker assets; do
       printf 'export {};\n' > "apps/worker/test/$f.test.ts"
     done
+    mkdir -p packages/specp/tests packages/specp/src
+    printf '{ "name": "specp", "scripts": { "test": "node --test tests/**/*.spec.ts" } }\n' > packages/specp/package.json
+    printf 'export const sp = 1;\n' > packages/specp/src/s.ts
+    printf 'import { test } from "node:test";\ntest("sp", () => {});\n' > packages/specp/tests/x.spec.ts
     mkdir -p packages/nodep/tests packages/nodep/src packages/plain/src
     printf '{ "name": "nodep", "scripts": { "test": "node --test tests/**/*.test.ts" } }\n' > packages/nodep/package.json
     printf 'export const n = 1;\n' > packages/nodep/src/n.ts
@@ -189,6 +193,20 @@ reset_tree
 rm -rf "$FIX/apps/web/test"
 run_gate
 check "deleting a workspace's only tests is a named no-op, not a red" 'test "$RC" -eq 0 && out_has "apps/web: no test files remain" && out_has "skipped in the smoke set"'
+check "the smoke fallback names the removed tests, not 'outside every runnable workspace'" 'out_has "test files removed from apps/web" && out_lacks "outside every runnable workspace"'
+run_gate --list
+check "--list names the deleted tests instead of claiming a whole-suite run" 'test "$RC" -eq 0 && out_has "no test files remain" && out_lacks "whole suite (test-file delta)"'
+reset_tree
+
+# 9c. r0r: a workspace on vitest's other default convention (*.spec.*) is classified
+#     and no-op-protected like any other test file.
+printf '\n// edit\n' >> "$FIX/packages/specp/tests/x.spec.ts"
+run_gate
+check "a *.spec.* delta is a test-file delta" 'test "$RC" -eq 0 && out_has "packages/specp: whole suite (test-file delta" && out_has "FAKE npm test in specp"'
+reset_tree
+rm "$FIX/packages/specp/tests/x.spec.ts"
+run_gate
+check "deleting a *.spec.* workspace's only tests is a named no-op" 'test "$RC" -eq 0 && out_has "packages/specp: no test files remain"'
 reset_tree
 
 # 10. --list on an affected-source delta reports the selection and stays green (it runs

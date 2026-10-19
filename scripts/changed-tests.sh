@@ -50,7 +50,7 @@ is_source() { case "$1" in apps/*/src/*|packages/*/src/*) return 0 ;; *) return 
 is_test() {
   case "$1" in
     */src/*) return 1 ;;
-    *.test.ts) case "$1" in apps/*/*|packages/*/*) return 0 ;; esac ;;
+    *.test.*|*.spec.*) case "$1" in apps/*/*|packages/*/*) return 0 ;; esac ;;
   esac
   return 1
 }
@@ -169,7 +169,7 @@ source_is_referenced() { # <workspace> <source path>
 }
 
 has_test_files() { # <workspace> — is there anything for its runner to pick up?
-  [ -n "$(find "$1" -type f -name '*.test.*' -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ]
+  [ -n "$(find "$1" -type f \( -name '*.test.*' -o -name '*.spec.*' \) -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ]
 }
 
 run_smoke() { # <reason>
@@ -223,6 +223,7 @@ fi
 
 status=0
 ran=0
+noop_ws=""   # workspaces whose test files this delta removed (a5s)
 
 # A source file in a directory that is no workspace, or in a workspace with no test
 # script, maps to no suite: that is the unmapped-source false green, named on stderr.
@@ -257,6 +258,13 @@ for ws in "${WS_ORDER[@]}"; do
   [ -n "$ws_tests" ] || [ -n "$ws_sources" ] || continue
 
   if [ -n "$ws_tests" ]; then
+    # Checked before the --list report: a workspace whose tests were just deleted is a
+    # no-op, not a "whole suite" run that has nothing to pick up (cloud-factory-cf-a5s).
+    if ! has_test_files "$ws"; then
+      echo "changed-tests: ${ws}: no test files remain — nothing to run (this delta removes the workspace's only coverage; say why on the bead)"
+      noop_ws+=" ${ws}"
+      continue
+    fi
     # Whole suite: a deleted or renamed test is never selected by `vitest --changed`,
     # so asking for the delta would run nothing (cloud-factory-cf-8f1).
     if [ "$LIST" -eq 1 ]; then
@@ -283,10 +291,6 @@ for ws in "${WS_ORDER[@]}"; do
         status=1
       fi
     fi
-    if ! has_test_files "$ws"; then
-      echo "changed-tests: ${ws}: no test files remain — nothing to run (this delta removes the workspace's only coverage; say why on the bead)"
-      continue
-    fi
     ran=$((ran + 1))
     if [ "$kind" = "vitest" ]; then (cd "$ws" && npx vitest run) || status=1
     else (cd "$ws" && npm test --silent) || status=1; fi
@@ -295,7 +299,7 @@ for ws in "${WS_ORDER[@]}"; do
 
   # Source-only delta for this workspace.
   if [ "$kind" = "vitest" ]; then
-    selected=$( (cd "$ws" && npx vitest list --changed "$BASE" --filesOnly 2>/dev/null) | grep -cE '\.test\.ts$' || true)
+    selected=$( (cd "$ws" && npx vitest list --changed "$BASE" --filesOnly 2>/dev/null) | grep -cE '\.(test|spec)\.[cm]?[jt]sx?$' || true)
   else
     selected=1   # node:test packages run their whole suite, so a source change is covered
   fi
@@ -351,9 +355,14 @@ fi
 # --list only reports; it never runs a suite, so "ran nothing" is not a failure there.
 if [ "$ran" -eq 0 ] && [ "$status" -eq 0 ] && [ "$LIST" -eq 0 ]; then
   if [ "$sources_n" -eq 0 ]; then
-    # Only test files, and none of them belong to a runnable workspace: name them and
-    # run the smoke set rather than hard-failing on a mapping detail.
-    run_smoke "test-file delta outside every runnable workspace"
+    # Only test files ran nothing: either they belong to no runnable workspace, or the
+    # delta removed the only tests a workspace had. Name which, then run the smoke set
+    # rather than hard-failing on a mapping detail (cloud-factory-cf-8f1, a5s).
+    if [ -n "$noop_ws" ]; then
+      run_smoke "test files removed from${noop_ws}"
+    else
+      run_smoke "test-file delta outside every runnable workspace"
+    fi
     exit $?
   fi
   echo "changed-tests: no suite covers this delta — say why on the bead" >&2

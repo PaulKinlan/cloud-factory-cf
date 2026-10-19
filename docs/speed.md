@@ -69,8 +69,10 @@ contract:
 - a test-file delta that removes **every** test file of a workspace is named as a no-op
   ("no test files remain") instead of running a suite that can only answer
   `No test files found` — vitest exits 1 for that, which would be a red for a mapping
-  reason, not a broken change (bead `cloud-factory-cf-u8k`). The smoke set skips such a
-  workspace and still runs the others; a genuinely failing test stays red;
+  reason, not a broken change (bead `cloud-factory-cf-u8k`). The no-op is reported by
+  `--list` too, the smoke set skips that workspace and names the removal, and still runs
+  the others; a genuinely failing test stays red. Test files are recognised by vitest's
+  own defaults, `*.test.*` and `*.spec.*` (bead `cloud-factory-cf-a5s`, `r0r`);
 - a test-file delta does **not** vouch for a source change in the same workspace: if the
   workspace's tests and sources reference that module nowhere, the source still fails by
   name, because a whole-suite run cannot invent a test for it (bead `cloud-factory-cf-9ef`);
