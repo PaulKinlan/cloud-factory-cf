@@ -103,6 +103,11 @@ an event that any agent already delivered and hands it back to the queue
 (`release`) — it neither re-posts a review nor acknowledges a failure belonging to
 a canvas agent.
 
+The same at-most-once stance applies one level down: if an *action's* ledger write
+is rejected after the provider accepted it, the run reports that action in
+`deliveryError` and the event is settled rather than retried — including by the
+`/runs` drain — because a retry would create the issue or task a second time.
+
 If the ledger cannot record a run after the side effects happened (a rejected or
 unreachable write), the run is retried three times; if it still fails the outcome
 carries `deliveryError` and the event is acknowledged anyway. That choice is

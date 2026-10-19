@@ -391,7 +391,15 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
     }
     const emitted = await ctx.sinks.emit(decision, ctx);
     const failed = emitted.some((result) => !result.success) || emitted.length === 0;
-    await ledger?.complete(decision.type, failed ? "failed" : "delivered");
+    const completionError = await ledger?.complete(decision.type, failed ? "failed" : "delivered");
+    if (completionError !== null && completionError !== undefined) {
+      // The side effect happened but could not be recorded: retrying would repeat
+      // it, so the gap is reported and the run is settled rather than retried
+      // (findings cloud-factory-cf-lbi / -835).
+      const errors = (ctx.state["actionDeliveryErrors"] as string[] | undefined) ?? [];
+      errors.push(`${decision.type}: ${completionError}`);
+      ctx.state["actionDeliveryErrors"] = errors;
+    }
     results.push(...emitted);
   }
   if (results.length === 0) {
@@ -628,12 +636,16 @@ export async function runEvent(
     } satisfies ActionLedger;
     const summary = await runtime.runAgent(prompt, ctx, executionFn);
 
-    const deliveryError = await completeDelivery(
+    const pairDeliveryError = await completeDelivery(
       deps,
       event.deliveryId,
       agentKey,
       summary.status === "success" ? "delivered" : "failed",
     );
+    const actionErrors = (ctx.state["actionDeliveryErrors"] as string[] | undefined) ?? [];
+    const deliveryError =
+      [pairDeliveryError, ...actionErrors].filter((entry): entry is string => typeof entry === "string").join("; ") ||
+      null;
     if (summary.status === "failure") {
       return {
         ...base,
@@ -814,6 +826,22 @@ export async function drainRepository(
       }
       report.runs.push(outcome);
       report.skipped += 1;
+      if (!outcome.settled) report.unsettled += 1;
+      continue;
+    }
+
+    // A run whose provider side effect happened but could not be recorded must
+    // not be retried: that repeats the side effect. Acknowledge it and let the
+    // report carry the gap (same stance as chooseSettlement for fan-out).
+    if (outcome.deliveryError !== undefined) {
+      const settledAnyway = await settleEvent(deps, event, { ...outcome, status: "succeeded" });
+      if (!settledAnyway.ok) {
+        outcome.settled = false;
+        outcome.settlementError = settledAnyway.error;
+      }
+      report.runs.push(outcome);
+      if (outcome.status === "failed") report.failed += 1;
+      else report.succeeded += 1;
       if (!outcome.settled) report.unsettled += 1;
       continue;
     }

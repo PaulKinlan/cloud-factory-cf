@@ -599,3 +599,95 @@ describe("per-action idempotency for a multi-sink agent (cloud-factory-cf-j1y)",
     expect(emitted).toEqual([]);
   });
 });
+
+describe("a rejected action-ledger write is reported, not retried (cloud-factory-cf-835)", () => {
+  const facts = {
+    deliveryId: "evt-835",
+    provider: "github",
+    event: "issues",
+    action: "opened",
+    repository: "acme/action-write",
+    actor: "octocat",
+    attempts: 1,
+    leaseId: "lease-1",
+    number: 11,
+    title: "Completion rejected",
+    prNumber: null,
+  } as never;
+
+  it("carries the gap on the run context so the event is settled, not repeated", async () => {
+    const emitted: string[] = [];
+    const ctx = {
+      state: {
+        event: facts,
+        wiredSinks: ["github-issue-create"],
+        actionLedger: {
+          claim: async () => "run",
+          // The provider accepted the issue, but the ledger rejects the write.
+          complete: async () => "delivery ledger rejected the completion (503)",
+        },
+      },
+      memory: { get: async () => undefined, set: async () => {} },
+      sinks: {
+        emit: async (action: { type: string }) => {
+          emitted.push(action.type);
+          return [{ sinkName: "s", actionId: "a", actionType: action.type, success: true, durationMs: 0 }];
+        },
+      },
+    } as never;
+
+    const result = await ruleBasedReview({ runId: "r835", prompt: "p", tools: [], ctx });
+    expect(result.status).toBe("success");
+    expect(emitted).toEqual(["github:issue:create"]);
+    const state = (ctx as unknown as { state: Record<string, unknown> }).state;
+    expect(state["actionDeliveryErrors"]).toEqual([
+      "github:issue:create: delivery ledger rejected the completion (503)",
+    ]);
+  });
+});
+
+describe("the drain acknowledges a run it could not record (cloud-factory-cf-835)", () => {
+  it("acks instead of failing the event when the side effect is unrecorded", async () => {
+    const claimedEvent = {
+      deliveryId: "evt-835-drain",
+      provider: "github",
+      event: "issues",
+      action: "opened",
+      repository: "acme/action-write-drain",
+      actor: "octocat",
+      attempts: 1,
+      leaseId: "lease-1",
+    };
+    const paths: string[] = [];
+    const coordinator = {
+      fetch: async (input: RequestInfo | URL) => {
+        const path = new URL(String(input)).pathname;
+        paths.push(path);
+        if (path === "/claim") return Response.json({ ok: true, claimed: [claimedEvent], leaseUntil: "later" });
+        if (path === "/events/evt-835-drain/payload") {
+          return Response.json({ ok: true, payload: { number: 12, title: "T", issue: { number: 12 } } });
+        }
+        if (path === "/deliveries/claim") return Response.json({ ok: true, run: true });
+        if (path === "/deliveries/complete") return Response.json({ ok: false, error: "nope" }, { status: 503 });
+        if (path === "/ack" || path === "/fail" || path === "/release") return Response.json({ ok: true });
+        return Response.json({ ok: false, error: `unexpected ${path}` }, { status: 500 });
+      },
+    };
+
+    const report = await drainRepository({
+      repository: "acme/action-write-drain",
+      controlKey: "k",
+      coordinator,
+      broker: { fetch: async () => Response.json({ ok: true }) },
+      executionFn: async () => ({ status: "failure", error: "provider said no", toolCallsCount: 0 }),
+    });
+
+    expect(report.runs[0]?.deliveryError ?? "").toContain("delivery ledger rejected the completion");
+    // The event is acknowledged (a retry would repeat the provider call), and the
+    // failure is still counted in the report.
+    expect(paths).toContain("/ack");
+    expect(paths).not.toContain("/fail");
+    expect(report.failed).toBe(1);
+    expect(report.unsettled).toBe(0);
+  });
+});
