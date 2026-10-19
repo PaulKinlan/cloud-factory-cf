@@ -20,7 +20,14 @@ export interface ServiceActionDefinition {
 }
 
 export interface ServiceDefinition {
+  /** Fixed upstream host. */
   host: string;
+  /**
+   * Env binding that names the host instead, for a service whose deployment
+   * address is configuration rather than a constant. The host still comes from
+   * the operator, never from the agent, so the closed-set property holds.
+   */
+  hostEnv?: string;
   /** Env binding that holds the real credential. Never returned to the agent. */
   credentialEnv: string;
   /** How the credential is presented upstream. */
@@ -54,11 +61,41 @@ export const SERVICES: Readonly<Record<string, ServiceDefinition>> = {
         pathParams: ["number"],
         bodyParams: ["body", "event"],
       },
+      "issue.create": {
+        method: "POST",
+        route: "/repos/{repository}/issues",
+        bodyParams: ["title", "body"],
+      },
       "pr.comment": {
         method: "POST",
         route: "/repos/{repository}/issues/{number}/comments",
         pathParams: ["number"],
         bodyParams: ["body"],
+      },
+    },
+  },
+  beads: {
+    // The deployment's beads endpoint; absent means the service is unavailable,
+    // which the broker reports instead of guessing a host.
+    host: "",
+    hostEnv: "BEADS_API_HOST",
+    credentialEnv: "BEADS_TOKEN",
+    headers: (credential) => ({
+      authorization: `Bearer ${credential}`,
+      accept: "application/json",
+    }),
+    repositoryEncoding: "slash",
+    actions: {
+      "task.create": {
+        method: "POST",
+        route: "/repos/{repository}/tasks",
+        bodyParams: ["title", "description", "priority", "assignee", "status"],
+      },
+      "task.update": {
+        method: "PATCH",
+        route: "/repos/{repository}/tasks/{taskId}",
+        pathParams: ["taskId"],
+        bodyParams: ["title", "description", "priority", "assignee", "status"],
       },
     },
   },
@@ -89,6 +126,8 @@ export interface ResolveInput {
   /** From the verified capability - never from the caller's request body. */
   repository: string;
   params?: Record<string, unknown>;
+  /** Deployment configuration, used only to resolve a `hostEnv` service. */
+  env?: Readonly<Record<string, unknown>>;
 }
 
 export type ResolvedRequest =
@@ -101,11 +140,20 @@ export type ResolvedRequest =
       service: string;
       action: string;
     }
-  | { ok: false; status: 400 | 403; reason: string };
+  | { ok: false; status: 400 | 403 | 503; reason: string };
 
 export function resolveRequest(input: ResolveInput): ResolvedRequest {
   const service = SERVICES[input.service];
   if (!service) return { ok: false, status: 403, reason: "unknown service" };
+
+  let host = service.host;
+  if (service.hostEnv !== undefined) {
+    const configured = input.env?.[service.hostEnv];
+    host = typeof configured === "string" ? configured.trim() : "";
+    if (host.length === 0) {
+      return { ok: false, status: 503, reason: `${input.service} is not configured on this deployment` };
+    }
+  }
 
   const action = service.actions[input.action];
   if (!action) return { ok: false, status: 403, reason: "action not permitted" };
@@ -155,7 +203,7 @@ export function resolveRequest(input: ResolveInput): ResolvedRequest {
   const hasBody = Object.keys(bodyValues).length > 0;
   return {
     ok: true,
-    url: `https://${service.host}${route}`,
+    url: `https://${host}${route}`,
     method: action.method,
     headers: hasBody ? { "content-type": "application/json" } : {},
     body: hasBody ? JSON.stringify(bodyValues) : undefined,

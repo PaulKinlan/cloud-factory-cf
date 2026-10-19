@@ -36,6 +36,7 @@ export async function routeRun(
       controlKey,
       coordinator: env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository)),
       broker: env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository)),
+      ...(env.TELEMETRY_ENDPOINT === undefined ? {} : { telemetryEndpoint: env.TELEMETRY_ENDPOINT }),
     },
     ...(limit === undefined ? [] : [{ limit }]),
   );

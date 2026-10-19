@@ -84,6 +84,12 @@ Response: `{ ok, documentId, name, ran, events, failed, agents: [{ agentId, name
 `events` counts the events claimed and settled, and `deduped` counts agent
 executions skipped because that pair had already delivered.
 
+Delivery is idempotent **per action**, not only per agent: an agent wired to two
+sinks (an issue and a beads task, say) records `delivered` for the action that
+succeeded, so a retry caused by the other sink failing re-runs only that one
+(`agentId#actionType` rows in the same ledger). Without that, a partially failed
+multi-sink run created the issue twice (finding `cloud-factory-cf-j1y`).
+
 The delivery ledger is `event_deliveries` in the repository's coordinator
 (`POST /deliveries/claim`, `POST /deliveries/complete`, `GET /deliveries?deliveryId=`).
 A pair is `started` while a run is in flight, then `delivered`, `failed` (which
@@ -96,6 +102,16 @@ handler. The drain has no agent identity of its own, so it asks the ledger to sk
 an event that any agent already delivered and hands it back to the queue
 (`release`) — it neither re-posts a review nor acknowledges a failure belonging to
 a canvas agent.
+
+The same at-most-once stance applies one level down, but **only to actions the
+provider accepted**: if an action's ledger write is rejected after the provider
+accepted it, the run reports that action in `deliveryError` and the event is
+settled rather than retried — including by the `/runs` drain — because a retry
+would create the issue or task a second time. When the provider *rejected* the
+action, a rejected ledger write is not a gap: nothing was delivered, so the event
+must stay retryable and the failure is reported as an ordinary failure. The same
+holds for the pair-level row: a rejected pair write after a **failed** run is not
+a gap either — only a successful run's unrecorded write is.
 
 If the ledger cannot record a run after the side effects happened (a rejected or
 unreachable write), the run is retried three times; if it still fails the outcome

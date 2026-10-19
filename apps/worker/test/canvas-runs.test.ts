@@ -337,7 +337,7 @@ describe("canvas findings (xkg, mj7, olu)", () => {
     const repository = "acme/canvas-no-sink";
     await provision(repository, "pr.review");
     // Wiring names a sink type the worker does not implement.
-    const documentId = await storeDocument(repository, wiredLayout({ sink: "beads-task" }), "Unsupported sink");
+    const documentId = await storeDocument(repository, wiredLayout({ sink: "slack-message" }), "Unsupported sink");
     await enqueue(repository, "nosink-1", pullRequest(repository, 31));
     const { calls } = stubUpstream();
 
@@ -346,12 +346,17 @@ describe("canvas findings (xkg, mj7, olu)", () => {
       agents: Array<{ status: string; error?: string; runs: Array<{ error?: string }> }>;
     };
     expect(report.failed).toBe(1);
-    expect(report.agents[0]?.error ?? "").toContain("no sink accepted");
+    // Loud and specific: the layout named a sink type this worker cannot serve.
+    expect(report.agents[0]?.error ?? "").toContain("no sink in the wiring is one this worker can serve: slack-message");
     // Nothing reached the provider: the layout never wired a provider sink.
     expect(calls).toHaveLength(0);
     expect(sinksFor([])).toHaveLength(0);
-    expect(sinksFor(["beads-task"])).toHaveLength(0);
+    expect(sinksFor(["slack-message"])).toHaveLength(0);
     expect(sinksFor(undefined).map((sink) => sink.name)).toEqual(["github-pr-review-sink", "github-issue-comment-sink"]);
+    // Types the worker does serve are selected by name.
+    expect(sinksFor(["beads-task"]).map((sink) => sink.name)).toEqual(["beads-task-sink"]);
+    expect(sinksFor(["telemetry"]).map((sink) => sink.name)).toEqual(["cloud-telemetry-sink"]);
+    expect(sinksFor(["github-issue-create"]).map((sink) => sink.name)).toEqual(["github-issue-create-sink"]);
   });
 
   it("claims only what the run will process, so nothing sits on a lease", async () => {
@@ -562,10 +567,17 @@ describe("idempotent delivery across fan-out retries (cloud-factory-cf-eu3)", ()
     expect(firstReport.agents.find((agent) => agent.agentId === "n-reviewer")?.status).toBe("ran");
     expect(firstReport.agents.find((agent) => agent.agentId === "n-docs")?.status).toBe("failed");
     expect(first.calls).toHaveLength(1);
-    expect(await ledger(repository, "retry-1")).toEqual([
+    // Pair-level rows (no `#`) say what each agent did; `agent#action` rows record
+    // each action so a partial failure retries only what failed (j1y).
+    const retryRows = await ledger(repository, "retry-1");
+    expect(retryRows.filter((row) => !row.agentId.includes("#"))).toEqual([
       { agentId: "n-docs", status: "failed", attempts: 1, updatedAt: expect.any(String) },
       { agentId: "n-reviewer", status: "delivered", attempts: 1, updatedAt: expect.any(String) },
     ]);
+    expect(retryRows.find((row) => row.agentId === "n-reviewer#github:pr:review")).toMatchObject({
+      status: "delivered",
+      attempts: 1,
+    });
 
     // The failed event comes back after its backoff; the reviewer must not post
     // a second review, and the docs agent retries.
@@ -653,7 +665,8 @@ describe("one ledger for every runner (cloud-factory-cf-7wj, cloud-factory-cf-lb
     // acknowledging the docs agent's failure.
     expect(second.calls).toHaveLength(0);
     expect(drained.skipped).toBe(1);
-    expect(await ledger(repository, "drain-1")).toEqual([
+    const drainRows = await ledger(repository, "drain-1");
+    expect(drainRows.filter((row) => !row.agentId.includes("#"))).toEqual([
       { agentId: "n-docs", status: "failed", attempts: 1, updatedAt: expect.any(String) },
       { agentId: "n-reviewer", status: "delivered", attempts: 1, updatedAt: expect.any(String) },
     ]);
@@ -693,6 +706,17 @@ describe("fan-out settlement when a ledger write is lost (cloud-factory-cf-lbi)"
     const chosen = chooseSettlement([
       outcome({ deliveryError: "delivery ledger rejected the completion (503)" }),
       outcome({ status: "failed" }),
+    ]);
+    expect(chosen.retry).toBe(false);
+    expect(chosen.outcome.status).toBe("succeeded");
+    expect(chosen.ledgerErrors).toEqual(["delivery ledger rejected the completion (503)"]);
+  });
+
+  it("acknowledges a single failed outcome that carries a ledger gap (ww9)", () => {
+    // One agent: the provider call happened, the ledger write was rejected and the
+    // run also failed. Settling as failed would retry and repeat the provider call.
+    const chosen = chooseSettlement([
+      outcome({ status: "failed", deliveryError: "delivery ledger rejected the completion (503)" }),
     ]);
     expect(chosen.retry).toBe(false);
     expect(chosen.outcome.status).toBe("succeeded");

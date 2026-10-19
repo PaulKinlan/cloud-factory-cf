@@ -17,6 +17,10 @@ export default defineConfig({
           BROKER_QUOTA_PER_MINUTE: "4",
           GITHUB_TOKEN: "ghp_test_github_credential",
           GITLAB_TOKEN: "glpat_test_gitlab_credential",
+          // Beads sink: a test host + token so the broker path can be exercised
+          // end to end without any real service.
+          BEADS_API_HOST: "beads.test",
+          BEADS_TOKEN: "test-beads-token",
           // Alternate installation credential used by the per-repository
           // override tests.
           GITHUB_TOKEN_INSTALL_2: "ghp_test_github_install_2",

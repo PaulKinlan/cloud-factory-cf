@@ -36,6 +36,11 @@ export interface FactoryEnv {
   /** Upstream credentials the broker may attach - one binding per service. */
   GITHUB_TOKEN?: string;
   GITLAB_TOKEN?: string;
+  /** Beads API host and token: unset means the beads sink reports the service as unconfigured. */
+  BEADS_API_HOST?: string;
+  BEADS_TOKEN?: string;
+  /** Where the telemetry sink exports; unset means the structured log. */
+  TELEMETRY_ENDPOINT?: string;
   ENVIRONMENT: string;
 }
 

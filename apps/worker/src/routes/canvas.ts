@@ -38,6 +38,7 @@ export async function routeCanvasRun(
       controlKey,
       coordinator,
       broker: env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository)),
+      ...(env.TELEMETRY_ENDPOINT === undefined ? {} : { telemetryEndpoint: env.TELEMETRY_ENDPOINT }),
     },
     id,
     limit === undefined ? {} : { limit },
