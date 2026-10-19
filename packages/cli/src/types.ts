@@ -33,7 +33,7 @@ export interface CliIo {
 
 export interface CommandContext {
   cwd: string;
-  owner: string;
-  name: string;
+  owner?: string;
+  name?: string;
   io: CliIo;
 }
