@@ -76,8 +76,12 @@ for the merged union.
 chain:
 
 ```
-canvas-model → sdk → web → worker
+canvas-model → sdk → cli → web → worker
 ```
+
+Every workspace that ships a `dist/` is on that chain, because `--workspaces` is no
+longer the sweep: a package missing from it silently has no `dist/` after a clean
+build (the `cloud-factory-cf-cn8` review caught `@factory-cloud/cli`).
 
 Measured (`npm run build`, same VM, alternating runs): **8.3–9.0s → 5.2–7.7s**, one
 vite build instead of three. A consequence worth knowing: `npm test` on its own no
