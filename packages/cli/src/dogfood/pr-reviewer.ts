@@ -129,45 +129,41 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
       await execAsync('git rev-parse --is-inside-work-tree', { cwd });
       gitSucceeded = true;
 
-      // Gather committed diff against base branch (or HEAD~1) running from rootDir
-      const diffCmd = `git -c core.quotepath=false diff --name-only origin/${baseRef}...HEAD 2>/dev/null || git -c core.quotepath=false diff --name-only HEAD~1 2>/dev/null || true`;
-      // Also gather uncommitted/staged/untracked working tree modifications without collapsing untracked dirs
-      const statusCmd = `git -c core.quotepath=false status --porcelain -uall 2>/dev/null || true`;
+      // Gather committed diff against base branch (or HEAD~1) running from rootDir with -z
+      const diffCmd = `git diff --name-only -z origin/${baseRef}...HEAD 2>/dev/null || git diff --name-only -z HEAD~1 2>/dev/null || true`;
+      // Also gather uncommitted/staged/untracked working tree modifications without collapsing untracked dirs with -z
+      const statusCmd = `git status --porcelain -z -uall 2>/dev/null || true`;
 
       const [diffRes, statusRes] = await Promise.all([
         execAsync(diffCmd, { cwd: rootDir }),
         execAsync(statusCmd, { cwd: rootDir }),
       ]);
 
-      const parseEntry = (p: string): string[] => {
-        let clean = p.trim().replace(/^[MADRCU?! ]{1,2}\s+/, '');
-        if (!clean) return [];
-
-        // Handle rename records: 'src/config.ts -> src/app-config.ts' or '"old name" -> "new name"'
-        if (clean.includes(' -> ')) {
-          const parts = clean.split(' -> ').map((s) => {
-            let part = s.trim();
-            if (part.startsWith('"') && part.endsWith('"')) {
-              part = part.slice(1, -1);
-            }
-            return part;
-          });
-          return parts.filter((x) => x.length > 0);
-        }
-
-        if (clean.startsWith('"') && clean.endsWith('"')) {
-          clean = clean.slice(1, -1);
-        }
-        return [clean];
-      };
-
       const diffFiles = diffRes.stdout
-        .split('\n')
-        .flatMap(parseEntry);
+        .split('\0')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
 
-      const statusFiles = statusRes.stdout
-        .split('\n')
-        .flatMap(parseEntry);
+      const statusFiles: string[] = [];
+      const parts = statusRes.stdout.split('\0');
+      let idx = 0;
+      while (idx < parts.length) {
+        const item = parts[idx];
+        if (!item) {
+          idx++;
+          continue;
+        }
+        const status = item.slice(0, 2);
+        const filePath = item.slice(3).trim();
+        if (filePath) {
+          statusFiles.push(filePath);
+        }
+        // In porcelain -z, rename (R) and copy (C) records are followed by origPath in the next NUL field
+        if (status.includes('R') || status.includes('C')) {
+          idx++;
+        }
+        idx++;
+      }
 
       const rawCandidateFiles = [...diffFiles, ...statusFiles];
 
