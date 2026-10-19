@@ -345,6 +345,59 @@ test('runPrReview: empty git diff reports 0 files and APPROVE without whole-repo
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
+test('runPrReview: inspects uncommitted and untracked files on a dirty worktree (fixes cloud-factory-cf-e33)', async () => {
+  const { exec } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execAsync = promisify(exec);
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-dirty-diff-'));
+  await execAsync('git init -q -b main . && git config user.email "test@example.com" && git config user.name "Test"', { cwd: tmpDir });
+  await fs.mkdir(path.join(tmpDir, 'src'), { recursive: true });
+  await fs.writeFile(path.join(tmpDir, 'src', 'a.ts'), 'export const a = 1;\n', 'utf8');
+  await execAsync('git add -A && git commit -qm "init"', { cwd: tmpDir });
+  await execAsync('git update-ref refs/remotes/origin/main HEAD', { cwd: tmpDir });
+
+  // Add untracked dirty file containing a token pattern
+  await fs.writeFile(
+    path.join(tmpDir, 'src', 'new-feature.ts'),
+    'export const token = "ghp_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";\n',
+    'utf8',
+  );
+
+  const result = await runPrReview({
+    cwd: tmpDir,
+    dryRun: true,
+    io: { stdout: () => {}, stderr: () => {} },
+  });
+
+  assert.ok(result.changedFiles.some((f) => f.includes('new-feature.ts')));
+  assert.equal(result.verdict, 'REQUEST_CHANGES');
+  assert.ok(result.findings.some((f) => f.includes('Potential credential detected')));
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
+test('runPrReview: degrades to step summary without failing when GitHub API review POST is non-ok (fixes cloud-factory-cf-e2c)', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-readonly-token-'));
+  await fs.writeFile(path.join(tmpDir, 'README.md'), '# hi\n', 'utf8');
+
+  const logs: string[] = [];
+  // Run with an invalid token against real or mock API
+  const result = await runPrReview({
+    cwd: tmpDir,
+    githubToken: 'ghp_dummy_token_that_returns_401',
+    dryRun: false,
+    io: { stdout: (m) => logs.push(m), stderr: (m) => logs.push(m) },
+  });
+
+  // Should not throw, should set posted to false, and preserve review body
+  assert.equal(result.posted, false);
+  assert.ok(result.body.includes('Cloud Factory Dogfood Review'));
+  assert.ok(logs.some((l) => l.includes('Degraded to step summary output')));
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
 test('runCli: review command runs and succeeds with 0 exit code', async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-review-'));
   const eventFilePath = path.join(tmpDir, 'event.json');

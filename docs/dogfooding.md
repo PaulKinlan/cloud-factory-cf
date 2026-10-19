@@ -61,7 +61,6 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  issues: write
 
 jobs:
   dogfood-review:
@@ -91,8 +90,7 @@ jobs:
         run: |
           node packages/cli/dist/bin.js review \
             --event "$GITHUB_EVENT_PATH" \
-            --out "$GITHUB_STEP_SUMMARY" \
-            --dry-run
+            --out "$GITHUB_STEP_SUMMARY"
 ```
 
 ---

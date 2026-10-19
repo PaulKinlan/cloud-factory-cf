@@ -119,15 +119,31 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
   if (changedFiles.length === 0 && !options.changedFiles) {
     let gitSucceeded = false;
     try {
-      const { stdout } = await execAsync(
-        `git diff --name-only origin/${baseRef}...HEAD 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || git status --porcelain`,
-        { cwd },
-      );
+      // Gather committed diff against base branch (or HEAD~1)
+      const diffCmd = `git diff --name-only origin/${baseRef}...HEAD 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || true`;
+      // Also gather uncommitted/staged/untracked working tree modifications
+      const statusCmd = `git status --porcelain 2>/dev/null || true`;
+
+      const [diffRes, statusRes] = await Promise.all([
+        execAsync(diffCmd, { cwd }),
+        execAsync(statusCmd, { cwd }),
+      ]);
+
+      // Check if git is actually functional in this directory
+      await execAsync('git rev-parse --is-inside-work-tree', { cwd });
       gitSucceeded = true;
-      changedFiles = stdout
+
+      const diffFiles = diffRes.stdout
         .split('\n')
-        .map((l) => l.trim().replace(/^[MADRCU?!]{1,2}\s+/, ''))
+        .map((l) => l.trim())
         .filter((l) => l.length > 0);
+
+      const statusFiles = statusRes.stdout
+        .split('\n')
+        .map((l) => l.trim().replace(/^[MADRCU?! ]{1,2}\s+/, ''))
+        .filter((l) => l.length > 0);
+
+      changedFiles = [...diffFiles, ...statusFiles];
     } catch {
       gitSucceeded = false;
     }
@@ -244,7 +260,9 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
 
       if (!res.ok) {
         const errorText = await res.text().catch(() => '');
-        throw new Error(`GitHub API review submission failed (${res.status}): ${errorText}`);
+        io.stderr(`[dogfood review] Warning: GitHub API review submission failed (${res.status}): ${errorText}`);
+        io.stdout(`[dogfood review] Degraded to step summary output (review not posted to GitHub API).`);
+        return { posted: false, status: res.status, error: errorText };
       }
 
       const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
