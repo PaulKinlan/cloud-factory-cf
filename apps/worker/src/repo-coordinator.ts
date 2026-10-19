@@ -79,6 +79,15 @@ export class RepoCoordinator extends DurableObject<Env> {
     if (request.method === "POST" && url.pathname === "/drain") {
       return this.drain();
     }
+    if (request.method === "POST" && url.pathname === "/release") {
+      return this.release(await readJson(request));
+    }
+    if (request.method === "POST" && url.pathname === "/runs/audit") {
+      return this.recordRunAudit(await readJson(request));
+    }
+    if (request.method === "GET" && url.pathname === "/runs/audit") {
+      return this.listRunAudit(url);
+    }
     if (request.method === "POST" && url.pathname === "/requeue-expired") {
       const requeued = await this.requeueExpiredLeases();
       return Response.json({ ok: true, requeued });
@@ -139,6 +148,19 @@ export class RepoCoordinator extends DurableObject<Env> {
     } catch {
       // Column already exists
     }
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS run_audit (
+        id TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        agents INTEGER NOT NULL,
+        detail TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS run_audit_document_idx ON run_audit (document_id, created_at);
+    `);
   }
 
   // ---------------------------------------------------------------- ingestion
@@ -315,6 +337,90 @@ export class RepoCoordinator extends DurableObject<Env> {
       repository: row.repository,
       payload: safeParseJson(row.payload),
     });
+  }
+
+  /**
+   * Returns claimed events to the queue without counting an attempt: used when a
+   * run planned for one agent claims events that belong to another agent.
+   */
+  private async release(payload: unknown): Promise<Response> {
+    const claims = claimsFrom(payload);
+    if (claims.length === 0) {
+      return Response.json({ ok: false, error: "no deliveryIds" }, { status: 400 });
+    }
+    const now = new Date().toISOString();
+    let released = 0;
+    for (const claim of claims) {
+      if (!claim.leaseId) {
+        return Response.json({ ok: false, error: "missing leaseId", deliveryId: claim.deliveryId }, { status: 400 });
+      }
+      const changed = this.sql.exec(
+        `UPDATE events
+         SET status = 'pending', lease_id = NULL, available_at = ?, attempts = MAX(attempts - 1, 0)
+         WHERE delivery_id = ? AND lease_id = ? AND status = 'processing'`,
+        now,
+        claim.deliveryId,
+        claim.leaseId,
+      );
+      // `rowsWritten` counts more than the row we just changed, so re-read the
+      // row to report exactly what was released.
+      const after = this.sql
+        .exec<{ status: string; lease_id: string | null }>("SELECT status, lease_id FROM events WHERE delivery_id = ?", claim.deliveryId)
+        .toArray()[0];
+      if (changed && after?.status === "pending" && after.lease_id === null) released += 1;
+    }
+    return Response.json({ ok: true, released });
+  }
+
+  /** Records that a stored canvas document was turned into runs. */
+  private recordRunAudit(payload: unknown): Response {
+    const body = asRecord(payload);
+    if (!body) return Response.json({ ok: false, error: "invalid body" }, { status: 400 });
+    const documentId = typeof body["documentId"] === "string" ? body["documentId"] : "";
+    if (documentId.length === 0) {
+      return Response.json({ ok: false, error: "documentId is required" }, { status: 400 });
+    }
+    const name = typeof body["name"] === "string" ? body["name"].slice(0, 120) : "";
+    const agents = Array.isArray(body["agents"]) ? body["agents"].length : 0;
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    this.sql.exec(
+      `INSERT INTO run_audit (id, document_id, name, agents, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      id,
+      documentId,
+      name,
+      agents,
+      JSON.stringify(body["agents"] ?? []).slice(0, 8192),
+      createdAt,
+    );
+    return Response.json({ ok: true, id, createdAt }, { status: 201 });
+  }
+
+  private listRunAudit(url: URL): Response {
+    const limit = clampInt(url.searchParams.get("limit"), 1, 100, 20);
+    const documentId = url.searchParams.get("documentId");
+    const rows = (
+      documentId === null
+        ? this.sql.exec(
+            `SELECT id, document_id, name, agents, detail, created_at FROM run_audit ORDER BY created_at DESC, id LIMIT ?`,
+            limit,
+          )
+        : this.sql.exec(
+            `SELECT id, document_id, name, agents, detail, created_at FROM run_audit WHERE document_id = ? ORDER BY created_at DESC, id LIMIT ?`,
+            documentId,
+            limit,
+          )
+    )
+      .toArray()
+      .map((row) => ({
+        id: String(row["id"] ?? ""),
+        documentId: String(row["document_id"] ?? ""),
+        name: String(row["name"] ?? ""),
+        agents: Number(row["agents"] ?? 0),
+        detail: safeParseJson(String(row["detail"] ?? "[]")),
+        createdAt: String(row["created_at"] ?? ""),
+      }));
+    return Response.json({ ok: true, count: rows.length, runs: rows });
   }
 
   private async ack(payload: unknown): Promise<Response> {

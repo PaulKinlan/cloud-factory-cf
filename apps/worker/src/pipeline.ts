@@ -21,6 +21,7 @@ import {
   type AgentExecutionFn,
   type CredentialBroker,
   type CredentialCapabilityRequest,
+  type MemoryScope,
 } from "@factory-cloud/sdk";
 
 /** How many events one drain handles, and how long a claim is held. */
@@ -248,6 +249,10 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
   if (!facts) {
     return { status: "failure", error: "no event facts in the run context", toolCallsCount: 0 };
   }
+  // A canvas agent supplies the instruction; the deterministic runtime keeps the
+  // decision rules but records the instruction it acted under.
+  const agentPrompt = ctx.state["agentPrompt"];
+  const instruction = typeof agentPrompt === "string" && agentPrompt.trim().length > 0 ? agentPrompt.trim() : null;
 
   const decision = decideAction(facts);
   if (!decision) {
@@ -257,9 +262,10 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
   // The counter is the number of reviews that actually reached the provider; it
   // is read before the emit and written only after it succeeds, so a failed run
   // that is retried reports the same number instead of skipping one.
+  const memoryScope: MemoryScope = ctx.state["memoryScope"] === "org" ? "org" : "repo";
   let reviewCount = 0;
   if (facts.event === "pull_request") {
-    const previous = await ctx.memory.get("repo", "review-count");
+    const previous = await ctx.memory.get(memoryScope, "review-count");
     reviewCount = typeof previous === "number" ? previous + 1 : 1;
     decision.payload["body"] = reviewBody(facts, reviewCount);
   }
@@ -277,9 +283,13 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
     };
   }
   if (reviewCount > 0) {
-    await ctx.memory.set("repo", "review-count", reviewCount, { event: facts.deliveryId });
+    await ctx.memory.set(memoryScope, "review-count", reviewCount, { event: facts.deliveryId });
   }
-  return { status: "success", output: prompt, toolCallsCount: 0 };
+  return {
+    status: "success",
+    output: instruction === null ? prompt : `${instruction}\n\n${prompt}`,
+    toolCallsCount: 0,
+  };
 };
 
 // ------------------------------------------------------------------- pipeline
@@ -351,7 +361,12 @@ function issueCommentSink(): ActionSink {
   };
 }
 
-export function buildContext(deps: PipelineDeps, facts: EventFacts, runtime: AgentRuntime): AgentContext {
+export function buildContext(
+  deps: PipelineDeps,
+  facts: EventFacts,
+  runtime: AgentRuntime,
+  options: RunEventOptions = {},
+): AgentContext {
   const [owner, name] = facts.repository.split("/");
   const ctx = createAgentContext({
     id: `run:${facts.deliveryId}`,
@@ -361,13 +376,54 @@ export function buildContext(deps: PipelineDeps, facts: EventFacts, runtime: Age
     memory: new CoordinatorMemoryStore(deps.coordinator),
     credentials: new BrokerCredentialBroker(deps.broker, deps.controlKey, deps.repository),
     sinks: runtime.sinks,
-    state: { event: facts },
+    state: {
+      event: facts,
+      ...(options.agentId === undefined ? {} : { agentId: options.agentId }),
+      ...(options.agentPrompt === undefined ? {} : { agentPrompt: options.agentPrompt }),
+      ...(options.memoryScope === undefined ? {} : { memoryScope: options.memoryScope }),
+    },
   });
   return ctx;
 }
 
+/** Which sinks a run may use, and the agent it belongs to. */
+export interface RunEventOptions {
+  /** Canvas sink types wired to the agent; omitted means the default set. */
+  sinks?: readonly string[];
+  agentPrompt?: string;
+  agentId?: string;
+  /** Memory scope from the agent's wiring (`repo` unless a hub says otherwise). */
+  memoryScope?: string;
+}
+
+/**
+ * Maps a canvas sink type to the sink that implements it. Unknown types are
+ * ignored rather than invented, so a layout cannot name a sink the worker does
+ * not have.
+ */
+const SINK_TYPES: Record<string, string> = {
+  "github-pr-review": "github-pr-review-sink",
+  "github-issue-comment": "github-issue-comment-sink",
+};
+
+export function sinksFor(types: readonly string[] | undefined): ActionSink[] {
+  const all = defaultSinks();
+  // No wiring at all means "the default agent" (the queue route), which uses the
+  // standard sinks. Wiring that names sinks means only those: if none of the
+  // names is one we implement, the agent gets no sink and the run fails loudly
+  // instead of quietly posting to a provider the layout never asked for
+  // (finding cloud-factory-cf-xkg).
+  if (types === undefined) return all;
+  const names = new Set(types.map((type) => SINK_TYPES[type]).filter((name): name is string => name !== undefined));
+  return all.filter((sink) => names.has(sink.name));
+}
+
 /** Runs one agent invocation for a claimed event; never throws. */
-export async function runEvent(deps: PipelineDeps, event: ClaimedEvent): Promise<RunOutcome> {
+export async function runEvent(
+  deps: PipelineDeps,
+  event: ClaimedEvent,
+  options: RunEventOptions = {},
+): Promise<RunOutcome> {
   const startedAt = Date.now();
   const executionFn = deps.executionFn ?? ruleBasedReview;
   const base: RunOutcome = {
@@ -383,10 +439,10 @@ export async function runEvent(deps: PipelineDeps, event: ClaimedEvent): Promise
     const facts = await loadFacts(deps.coordinator, event);
     const emitted: string[] = [];
     const runtime = new AgentRuntime();
-    for (const sink of recordingSinks(deps.sinks ?? defaultSinks(), emitted)) {
+    for (const sink of recordingSinks(deps.sinks ?? sinksFor(options.sinks), emitted)) {
       runtime.registerSink(sink);
     }
-    const ctx = buildContext(deps, facts, runtime);
+    const ctx = buildContext(deps, facts, runtime, options);
     const prompt = promptFor(facts);
 
     const summary = await runtime.runAgent(prompt, ctx, executionFn);
@@ -482,7 +538,7 @@ export function titleFrom(payload: Record<string, unknown>): string | null {
  * Acks a finished run, or fails it when the run itself failed. A non-2xx answer
  * is reported, never swallowed (the event is still leased and will come back).
  */
-async function settle(
+export async function settleEvent(
   deps: PipelineDeps,
   event: ClaimedEvent,
   outcome: RunOutcome,
@@ -548,7 +604,7 @@ export async function drainRepository(
     // The run's own result and the queue's settlement are separate facts: a
     // rejected ack/fail means the event will be redelivered, so the report must
     // not present it as a clean success.
-    const settlement = await settle(deps, event, outcome);
+    const settlement = await settleEvent(deps, event, outcome);
     if (!settlement.ok) {
       outcome.settled = false;
       outcome.settlementError = settlement.error;
