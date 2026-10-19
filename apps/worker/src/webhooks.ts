@@ -19,7 +19,14 @@
  * rules are unit-testable and reused by the coordinator.
  */
 
-import { adapterFor, devPlatformAdapters, type DevPlatform, type HeaderReader } from "@factory-cloud/sdk";
+import {
+  adapterFor,
+  devPlatformAdapters,
+  type DevPlatform,
+  type HeaderReader,
+  type SdlcAction,
+  type SdlcKind,
+} from "@factory-cloud/sdk";
 import { asRecord } from "./events/helpers";
 
 export type Provider = DevPlatform;
@@ -38,6 +45,10 @@ export interface NormalisedEvent {
   repository: string;
   /** Login of whoever triggered the event, when the payload names one. */
   actor: string | null;
+  /** Canonical SDLC kind, from the platform adapter (ADR 003). */
+  kind: SdlcKind;
+  /** The provider action folded onto the portable vocabulary. */
+  canonicalAction: SdlcAction;
 }
 
 export function isProvider(value: string): value is Provider {
@@ -145,13 +156,22 @@ export function eventNameFor(provider: Provider, headers: Headers): string {
 export function normaliseEvent(provider: Provider, payload: unknown, headers: HeaderReader): NormalisedEvent {
   const event = adapterFor(provider)?.normalise(payload, headers) ?? null;
   if (event === null) {
-    return { payloadEvent: null, action: null, repository: "unknown", actor: null };
+    return {
+      payloadEvent: null,
+      action: null,
+      repository: "unknown",
+      actor: null,
+      kind: "unknown",
+      canonicalAction: null,
+    };
   }
   return {
     payloadEvent: event.rawEvent === "unknown" ? null : event.rawEvent,
     action: event.action,
     repository: event.repository,
     actor: event.actor,
+    kind: event.kind,
+    canonicalAction: event.canonicalAction,
   };
 }
 

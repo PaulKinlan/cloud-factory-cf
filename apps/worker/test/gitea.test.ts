@@ -54,6 +54,10 @@ describe("gitea webhooks", () => {
       provider: "gitea",
       event: "pull_request",
       action: "opened",
+      // The canonical event travels with the row: a consumer cannot re-derive it,
+      // because the adapters need the request headers, which are not stored (06p).
+      kind: "merge_request",
+      canonicalAction: "opened",
       repository: "forge/repo",
       actor: "forge-user",
       status: "pending",

@@ -325,6 +325,8 @@ export class RepoCoordinator extends DurableObject<Env> {
       provider,
       eventName,
       normalised.action,
+      normalised.kind,
+      normalised.canonicalAction,
       repository,
       normalised.actor,
       body,

@@ -41,8 +41,11 @@ Slices:
 2. **Done (6to.2):** `POST /webhooks/:platform/:repository` accepts `gitea`, the
    hook secret is verified as `X-Gitea-Signature` (HMAC-SHA256) or `X-Gitea-Token`,
    and the worker's delivery-id/event/normalisation now come from the adapters
-   instead of a third provider branch. The canonical `kind` is not duplicated into
-   the queue: the raw body is stored, so `kind` stays derivable by whoever consumes it.
+   instead of a third provider branch. The queue row carries the canonical `kind` and
+   `canonicalAction` as columns: they are **not** derivable later, because the
+   adapters read the delivery id and event name from request headers, which are not
+   stored (review finding `06p`). Rows written before the columns exist read back with
+   `kind: null`.
 3. DO addressing: prefix `RepoCoordinator` names with the platform and migrate the
    existing `owner/repo` rows.
 4. Sinks: speak `SdlcEvent` rather than provider payloads.

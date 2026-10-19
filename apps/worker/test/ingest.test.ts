@@ -16,6 +16,8 @@ describe("webhook ingestion", () => {
       provider: "gitlab",
       event: "Merge Request Hook",
       action: "open",
+      kind: "merge_request",
+      canonicalAction: "opened",
       repository: "acme/ingest-repo",
       actor: "tanuki",
       status: "pending",
