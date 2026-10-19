@@ -11,6 +11,21 @@ const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab)\/(?<owner>[^/]+)\/
 const BROKER_PATH =
   /^\/broker\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>capabilities|permissions|proxy|audit)$/;
 
+/**
+ * Serves the built canvas from the ASSETS binding. Unknown paths stay a 404 (the
+ * canvas is a single route at "/", so there is no SPA fallback to lean on) and
+ * writes are refused for assets: only GET/HEAD pass through.
+ */
+async function serveAsset(request: Request, env: Env): Promise<Response> {
+  if (!env.ASSETS) return new Response("not found", { status: 404 });
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response("method not allowed", { status: 405 });
+  }
+  const asset = await env.ASSETS.fetch(request);
+  if (asset.status === 404) return new Response("not found", { status: 404 });
+  return asset;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -35,7 +50,7 @@ export default {
 
     const match = WEBHOOK_PATH.exec(url.pathname);
     if (!match?.groups) {
-      return new Response("not found", { status: 404 });
+      return serveAsset(request, env);
     }
     if (request.method !== "POST") {
       return new Response("method not allowed", { status: 405 });

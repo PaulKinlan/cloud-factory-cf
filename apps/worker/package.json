@@ -8,8 +8,10 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "prebuild": "npm run build --prefix ../web",
     "build": "wrangler deploy --dry-run --outdir dist",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "pretest": "npm run build --prefix ../web",
     "test": "vitest run",
     "test:file": "vitest run"
   },

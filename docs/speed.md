@@ -9,14 +9,23 @@ served by `fleet-deps`.
 
 | Command | What it does | Measured |
 | --- | --- | --- |
-| `npm run build` | `wrangler deploy --dry-run` — bundles the Worker, validates `wrangler.jsonc`, DO bindings and migrations | 1.9s |
-| `npm run typecheck` | `tsc --noEmit` per workspace | 4.0s |
-| `npm test` | `vitest run` inside workerd (`@cloudflare/vitest-plugin`) | 7.4s |
-| `npm run ci` | build + typecheck + test | 13–15s |
+| `npm run build` | `vite build` for `apps/web`, then `wrangler deploy --dry-run` — bundles the Worker, validates `wrangler.jsonc`, DO bindings, migrations and the `ASSETS` directory | 2.0–2.3s |
+| `npm run typecheck` | `tsc --noEmit` per workspace (sdk, cli, worker, web) | 4.0–4.4s |
+| `npm test` | `vitest run` inside workerd (`@cloudflare/vitest-plugin`) + node-mode model tests for `apps/web` | 7.5–9s |
+| `npm run ci` | build + typecheck + test | 14–17s idle VM; 45s+ when the VM is loaded |
 | `npm run test:file -- test/<file>.test.ts` | one workerd test file | 2–3s |
+| `npm run test -w @factory-cloud/web` | one node-mode test file set (canvas model) | 0.9s |
 | `vitest run --changed` | dev-loop only, **not a gate** — see below | selects 0 tests in a committed worktree |
 
-Per file (inside the 7.4s suite): `test/computer-dependency.test.ts` ≈ 1.0s
+`apps/web` is in those numbers: its unit tests run in plain Node (≈0.2s) and its
+build is a 0.1s `vite build`. `apps/worker` builds the canvas before its own
+dry-run deploy and before its tests (`prebuild`/`pretest`), which is what keeps
+`ASSETS` pointing at a directory that exists; the cost is that `vite build` runs
+twice per `npm run ci` (≈0.2s total). Measured 2026-10-19: the assets binding
+itself adds no measurable test time (15.12s with `assets` vs 14.98s without, same
+loaded machine — the earlier 7.4s figure was a quiet VM).
+
+Per file (inside the workerd suite): `test/computer-dependency.test.ts` ≈ 1.0s
 (it imports the 11 MB `@cloudflare/computer` bundle, which is the point of the
 test), `test/queue.test.ts` ≈ 0.6s, `test/ingest.test.ts` ≈ 0.2s,
 `test/worker.test.ts` ≈ 0.2s, `test/repo-coordinator.test.ts` ≈ 0.1s. The rest
@@ -40,7 +49,7 @@ pays the full gate. The gate is small enough that a second command set buys
 little, so the proposal is the same command for both tiers:
 
 ```conf
-CHECK_CMD="npm run ci"          # ~13-15s
+CHECK_CMD="npm run ci"          # ~14-17s idle, longer when the VM is loaded
 CHECK_FAST_CMD="npm run ci"     # same: the whole gate is already "fast"
 CHECK_TIMEOUT=300
 CHECK_FAST_TIMEOUT=180
