@@ -141,7 +141,7 @@ export function traceUrls(base: string, owner: string, repo: string, key: string
   return {
     trace: `${root}?limit=${clampLimit(limit)}`,
     usage: `${root}/usage`,
-    socket: `${socketBase}/socket?key=${encodeURIComponent(key)}`,
+    socket: `${socketBase}/socket?key=${encodeURIComponent(key)}&limit=${clampLimit(limit)}`,
   };
 }
 
@@ -569,6 +569,17 @@ export function initObservability(root: HTMLElement, options: MountOptions = {})
     }
   }
 
+  // Clamp as soon as the field is edited too, not only on submit: the field shows
+  // what will actually be requested (cloud-factory-cf-2xp).
+  const applyLimit = (): number => {
+    const limit = clampLimit(Number(limitInput?.value ?? DEFAULT_LIMIT));
+    if (limitInput) limitInput.value = String(limit);
+    return limit;
+  };
+  limitInput?.addEventListener("change", () => {
+    applyLimit();
+  });
+
   form?.addEventListener("submit", (event) => {
     event.preventDefault();
     const owner = ownerInput?.value.trim() ?? "";
@@ -584,8 +595,9 @@ export function initObservability(root: HTMLElement, options: MountOptions = {})
     if (announcer) announcer.textContent = `Connecting to ${owner}/${repo}`;
     // The Limit field used to be read and dropped (cloud-factory-cf-9t2): pass it on,
     // clamped, so what the operator typed is what the trace route is asked for.
-    const limit = clampLimit(Number(limitInput?.value ?? DEFAULT_LIMIT));
-    if (limitInput) limitInput.value = String(limit);
+    const typed = Number(limitInput?.value ?? DEFAULT_LIMIT);
+    const limit = applyLimit();
+    if (announcer && typed !== limit) announcer.textContent = `Limit clamped to ${limit}`;
     // The key lives in memory for this session only: never localStorage.
     session.reconfigure({ owner, repo, key, limit });
     void session.connect().catch(() => {});

@@ -45,8 +45,10 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
     // Hand the upgrade to the object and pass its 101 (and socket) straight back.
     // The object's own route is /trace/socket, so the public path is rewritten
     // rather than forwarded verbatim (a mismatch makes the handshake a 404).
+    const limit = url.searchParams.get("limit");
+    const forwarded = limit === null ? "" : `?limit=${encodeURIComponent(limit)}`;
     return stub.fetch(
-      new Request("https://repo-coordinator.internal/trace/socket", {
+      new Request(`https://repo-coordinator.internal/trace/socket${forwarded}`, {
         method: "GET",
         headers: request.headers,
       }),
