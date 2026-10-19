@@ -13,6 +13,8 @@ export default defineConfig({
           GITLAB_WEBHOOK_TOKEN: "test-gitlab-token",
           BROKER_SIGNING_KEY: "test-broker-signing-key",
           BROKER_CONTROL_KEY: "test-control-key",
+          // Small window so the 429 path is exercised without 60 calls.
+          BROKER_QUOTA_PER_MINUTE: "4",
           GITHUB_TOKEN: "ghp_test_github_credential",
           GITLAB_TOKEN: "glpat_test_gitlab_credential",
         },

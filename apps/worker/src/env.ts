@@ -17,6 +17,11 @@ export interface FactoryEnv {
   BROKER_SIGNING_KEY?: string;
   /** Control-plane key required to issue a capability. Never committed. */
   BROKER_CONTROL_KEY?: string;
+  /**
+   * Calls per (agent, service, action) per 60s window before the broker answers
+   * 429. Unset means the default (60); "0" disables the quota.
+   */
+  BROKER_QUOTA_PER_MINUTE?: string;
   /** Upstream credentials the broker may attach - one binding per service. */
   GITHUB_TOKEN?: string;
   GITLAB_TOKEN?: string;

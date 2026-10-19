@@ -77,9 +77,28 @@ control key because the metadata names agents and actions.
 
 ## Known limits (follow-ups, not hidden)
 
-- No per-agent rate limit or quota yet; a valid capability can be replayed until
-  it expires (bounded by `MAX_CAPABILITY_TTL_SECONDS = 900`).
+- Per-agent quota is enforced (see below); nothing yet stops a *holder of the
+  control key* from issuing many capabilities, which is the next hardening bead
+  (`cloud-factory-cf-2j3`, provisioning records).
 - Capability issuance trusts the control key alone: there is no per-agent
   provisioning record, so any holder can mint a capability for any agent id.
 - The policy table is static; per-repo overrides would need a config surface.
 - One upstream credential per service, not per installation.
+
+## Quota (per agent, service and action)
+
+A valid capability is replayable until it expires, so the broker also rate-limits
+the calls it will make on an agent's behalf:
+
+- Sliding window of 60s per `(agent, service, action)` inside the repository's
+  broker object. `BROKER_QUOTA_PER_MINUTE` sets the limit (default `60`; `0`
+  disables it). Tests bind it to `4`.
+- The slot is spent **after** the capability, repository, action and policy
+  checks (a denied request costs nothing) and **before** the upstream call (a
+  failing upstream call still costs a slot, so failures cannot be used to bypass
+  the limit).
+- Over the limit the broker answers `429` with `retry-after`, `limit` and
+  `windowSeconds`, and writes an audit row with outcome `quota_exceeded` and
+  status `429` — no upstream request is made.
+- Expired rows are pruned on every check, so the table is bounded by the quota
+  itself rather than by traffic history.
