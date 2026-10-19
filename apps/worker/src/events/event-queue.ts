@@ -1,0 +1,526 @@
+import type { Provider } from "../webhooks";
+
+/** An event that keeps failing is dead-lettered instead of retried forever. */
+export const MAX_ATTEMPTS = 5;
+/** How long a runner may hold a claimed event before it is handed back. */
+export const DEFAULT_VISIBILITY_MS = 60_000;
+/** Exponential-ish backoff between attempts: attempt * this, capped below. */
+const RETRY_BACKOFF_MS = 2_000;
+const RETRY_BACKOFF_CAP_MS = 60_000;
+
+export interface AlarmScheduler {
+  setAlarm(timestamp: number): Promise<void>;
+  deleteAlarm(): Promise<void>;
+}
+
+export function migrateEventQueueTable(sql: SqlStorage): void {
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS events (
+      delivery_id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      event TEXT NOT NULL,
+      action TEXT,
+      repository TEXT NOT NULL,
+      actor TEXT,
+      received_at TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      available_at TEXT NOT NULL,
+      last_error TEXT,
+      lease_id TEXT
+    );
+  `);
+  sql.exec(`
+    CREATE INDEX IF NOT EXISTS events_queue_idx ON events (status, available_at, received_at);
+  `);
+  try {
+    sql.exec("ALTER TABLE events ADD COLUMN lease_id TEXT;");
+  } catch {
+    // Column already exists
+  }
+}
+
+/**
+ * Manages the durable event queue state machine (enqueue, claim, ack, fail, release,
+ * dead-lettering, and lease pruning).
+ */
+export class EventQueue {
+  constructor(
+    private sql: SqlStorage,
+    private alarmScheduler?: AlarmScheduler,
+  ) {}
+
+  /**
+   * Enqueues an ingested event. Returns false if delivery_id was already present (duplicate).
+   */
+  enqueue(
+    deliveryId: string,
+    provider: Provider,
+    event: string,
+    action: string | null,
+    repository: string,
+    actor: string | null,
+    body: string,
+    now: string,
+  ): boolean {
+    const existing = this.sql
+      .exec<{ delivery_id: string }>(
+        "SELECT delivery_id FROM events WHERE delivery_id = ?",
+        deliveryId,
+      )
+      .toArray();
+    if (existing.length > 0) {
+      return false;
+    }
+
+    this.sql.exec(
+      `INSERT INTO events (
+         delivery_id, provider, event, action, repository, actor,
+         received_at, payload, status, attempts, available_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)`,
+      deliveryId,
+      provider,
+      event,
+      action,
+      repository,
+      actor,
+      now,
+      body,
+      now,
+    );
+    return true;
+  }
+
+  async claim(payload: unknown): Promise<Response> {
+    await this.requeueExpiredLeases();
+    const body = asRecord(payload);
+    const limit = clampInt(body?.["limit"], 1, 100, 10);
+    const visibilityMs = clampInt(body?.["visibilityMs"], 0, 3_600_000, DEFAULT_VISIBILITY_MS);
+    const now = new Date().toISOString();
+
+    const due = this.sql
+      .exec<{ delivery_id: string }>(
+        `SELECT delivery_id FROM events
+         WHERE status = 'pending' AND available_at <= ?
+         ORDER BY received_at, delivery_id LIMIT ?`,
+        now,
+        limit,
+      )
+      .toArray();
+
+    if (due.length === 0) return Response.json({ ok: true, claimed: [] });
+
+    const leaseUntil = new Date(Date.now() + visibilityMs).toISOString();
+    for (const row of due) {
+      const leaseId = crypto.randomUUID();
+      this.sql.exec(
+        `UPDATE events
+         SET status = 'processing', attempts = attempts + 1, available_at = ?, lease_id = ?
+         WHERE delivery_id = ?`,
+        leaseUntil,
+        leaseId,
+        row.delivery_id,
+      );
+    }
+
+    const placeholders = due.map(() => "?").join(", ");
+    const claimed = this.sql
+      .exec<EventRow>(
+        `SELECT ${EVENT_COLUMNS} FROM events WHERE delivery_id IN (${placeholders})
+         ORDER BY received_at, delivery_id`,
+        ...due.map((row) => row.delivery_id),
+      )
+      .toArray()
+      .map(toWireEvent);
+
+    await this.armAlarm();
+
+    return Response.json({ ok: true, claimed, leaseUntil });
+  }
+
+  /** Full provider payload for one event; the runner fetches it after claiming. */
+  eventPayload(deliveryId: string): Response {
+    if (deliveryId.length === 0) {
+      return Response.json({ ok: false, error: "missing deliveryId" }, { status: 400 });
+    }
+    const rows = this.sql
+      .exec<{ delivery_id: string; provider: string; event: string; action: string | null; repository: string; payload: string }>(
+        `SELECT delivery_id, provider, event, action, repository, payload FROM events WHERE delivery_id = ?`,
+        deliveryId,
+      )
+      .toArray();
+    const row = rows[0];
+    if (!row) return Response.json({ ok: false, error: "not found", deliveryId }, { status: 404 });
+    return Response.json({
+      ok: true,
+      deliveryId: row.delivery_id,
+      provider: row.provider,
+      event: row.event,
+      action: row.action,
+      repository: row.repository,
+      payload: safeParseJson(row.payload),
+    });
+  }
+
+  /**
+   * Returns claimed events to the queue without counting an attempt: used when a
+   * run planned for one agent claims events that belong to another agent.
+   */
+  async release(payload: unknown): Promise<Response> {
+    const claims = claimsFrom(payload);
+    if (claims.length === 0) {
+      return Response.json({ ok: false, error: "no deliveryIds" }, { status: 400 });
+    }
+    const now = new Date().toISOString();
+    let released = 0;
+    for (const claim of claims) {
+      if (!claim.leaseId) {
+        return Response.json({ ok: false, error: "missing leaseId", deliveryId: claim.deliveryId }, { status: 400 });
+      }
+      const changed = this.sql.exec(
+        `UPDATE events
+         SET status = 'pending', lease_id = NULL, available_at = ?, attempts = MAX(attempts - 1, 0)
+         WHERE delivery_id = ? AND lease_id = ? AND status = 'processing'`,
+        now,
+        claim.deliveryId,
+        claim.leaseId,
+      );
+      // `rowsWritten` counts more than the row we just changed, so re-read the
+      // row to report exactly what was released.
+      const after = this.sql
+        .exec<{ status: string; lease_id: string | null }>("SELECT status, lease_id FROM events WHERE delivery_id = ?", claim.deliveryId)
+        .toArray()[0];
+      if (changed && after?.status === "pending" && after.lease_id === null) released += 1;
+    }
+    return Response.json({ ok: true, released });
+  }
+
+  async ack(payload: unknown): Promise<Response> {
+    const claims = claimsFrom(payload);
+    if (claims.length === 0) {
+      return Response.json({ ok: false, error: "no deliveryIds" }, { status: 400 });
+    }
+
+    const now = new Date().toISOString();
+    // Pass 1: validate every claim in the batch before mutating any rows (fixes cloud-factory-cf-010)
+    const toAcknowledge: string[] = [];
+    for (const claim of claims) {
+      if (!claim.leaseId) {
+        return Response.json(
+          { ok: false, error: "missing leaseId", deliveryId: claim.deliveryId },
+          { status: 400 },
+        );
+      }
+
+      const row = this.sql
+        .exec<{ status: string; lease_id: string | null; available_at: string }>(
+          "SELECT status, lease_id, available_at FROM events WHERE delivery_id = ?",
+          claim.deliveryId,
+        )
+        .toArray()[0];
+
+      if (!row) {
+        return Response.json(
+          { ok: false, error: "not found", deliveryId: claim.deliveryId },
+          { status: 404 },
+        );
+      }
+
+      // If already processed, allow idempotent retry only if lease matches (fixes cloud-factory-cf-wa8)
+      if (row.status === "processed") {
+        if (row.lease_id === claim.leaseId) {
+          continue;
+        }
+        return Response.json(
+          { ok: false, error: "lease conflict", deliveryId: claim.deliveryId },
+          { status: 409 },
+        );
+      }
+
+      // Conflict: status changed, lease mismatch, or lease expired (fixes cloud-factory-cf-xh7)
+      if (row.status !== "processing" || row.lease_id !== claim.leaseId || row.available_at <= now) {
+        return Response.json(
+          { ok: false, error: "lease conflict", deliveryId: claim.deliveryId },
+          { status: 409 },
+        );
+      }
+
+      toAcknowledge.push(claim.deliveryId);
+    }
+
+    // Pass 2: mutate state only after the whole batch passed validation
+    for (const deliveryId of toAcknowledge) {
+      this.sql.exec(
+        `UPDATE events SET status = 'processed', last_error = NULL
+         WHERE delivery_id = ?`,
+        deliveryId,
+      );
+    }
+
+    return Response.json({ ok: true, acknowledged: claims.length });
+  }
+
+  async fail(payload: unknown): Promise<Response> {
+    const body = asRecord(payload);
+    const claims = claimsFrom(payload);
+    if (claims.length === 0) {
+      return Response.json({ ok: false, error: "no deliveryIds" }, { status: 400 });
+    }
+    const reason = typeof body?.["error"] === "string" ? (body["error"] as string) : "unknown error";
+
+    const now = new Date().toISOString();
+    // Pass 1: validate every claim in the batch before mutating any rows (fixes cloud-factory-cf-010)
+    interface ValidatedFail {
+      deliveryId: string;
+      attempts: number;
+    }
+    const toFail: ValidatedFail[] = [];
+
+    for (const claim of claims) {
+      if (!claim.leaseId) {
+        return Response.json(
+          { ok: false, error: "missing leaseId", deliveryId: claim.deliveryId },
+          { status: 400 },
+        );
+      }
+
+      const row = this.sql
+        .exec<{ attempts: number; status: string; lease_id: string | null; available_at: string }>(
+          "SELECT attempts, status, lease_id, available_at FROM events WHERE delivery_id = ?",
+          claim.deliveryId,
+        )
+        .toArray()[0];
+
+      if (!row) {
+        return Response.json(
+          { ok: false, error: "not found", deliveryId: claim.deliveryId },
+          { status: 404 },
+        );
+      }
+
+      // Conflict: status changed, lease mismatch, or lease expired (fixes cloud-factory-cf-xh7)
+      if (row.status !== "processing" || row.lease_id !== claim.leaseId || row.available_at <= now) {
+        return Response.json(
+          { ok: false, error: "lease conflict", deliveryId: claim.deliveryId },
+          { status: 409 },
+        );
+      }
+
+      toFail.push({ deliveryId: claim.deliveryId, attempts: row.attempts });
+    }
+
+    // Pass 2: execute state changes only after whole batch is validated
+    let retried = 0;
+    let deadLettered = 0;
+    for (const { deliveryId, attempts } of toFail) {
+      if (attempts >= MAX_ATTEMPTS) {
+        this.sql.exec(
+          "UPDATE events SET status = 'failed', last_error = ?, lease_id = NULL WHERE delivery_id = ?",
+          reason,
+          deliveryId,
+        );
+        deadLettered += 1;
+        continue;
+      }
+
+      const backoff = Math.min(RETRY_BACKOFF_MS * Math.max(attempts, 1), RETRY_BACKOFF_CAP_MS);
+      this.sql.exec(
+        `UPDATE events SET status = 'pending', last_error = ?, available_at = ?, lease_id = NULL
+         WHERE delivery_id = ?`,
+        reason,
+        new Date(Date.now() + backoff).toISOString(),
+        deliveryId,
+      );
+      retried += 1;
+    }
+
+    await this.armAlarm();
+
+    return Response.json({ ok: true, retried, deadLettered });
+  }
+
+  /** Convenience path for tests/tools: process everything that is due right now. */
+  async drain(): Promise<Response> {
+    const now = new Date().toISOString();
+    const due = this.sql
+      .exec<{ delivery_id: string }>(
+        "SELECT delivery_id FROM events WHERE status = 'pending' AND available_at <= ?",
+        now,
+      )
+      .toArray();
+
+    if (due.length > 0) {
+      this.sql.exec(
+        "UPDATE events SET status = 'processed', lease_id = NULL WHERE status = 'pending' AND available_at <= ?",
+        now,
+      );
+    }
+
+    return Response.json({ ok: true, drained: due.length });
+  }
+
+  listEvents(url: URL): Response {
+    const limit = clampInt(url.searchParams.get("limit"), 1, 200, 50);
+    const status = url.searchParams.get("status");
+    const rows = status
+      ? this.sql
+          .exec<EventRow>(
+            `SELECT ${EVENT_COLUMNS} FROM events WHERE status = ?
+             ORDER BY received_at DESC LIMIT ?`,
+            status,
+            limit,
+          )
+          .toArray()
+      : this.sql
+          .exec<EventRow>(
+            `SELECT ${EVENT_COLUMNS} FROM events ORDER BY received_at DESC LIMIT ?`,
+            limit,
+          )
+          .toArray();
+
+    return Response.json({
+      ok: true,
+      count: rows.length,
+      events: rows.map(toWireEvent),
+    });
+  }
+
+  statusCounts(): Record<string, number> {
+    const counts = this.sql
+      .exec<{ status: string; total: number }>(
+        "SELECT status, count(*) AS total FROM events GROUP BY status",
+      )
+      .toArray();
+    return Object.fromEntries(counts.map((row) => [row.status, row.total]));
+  }
+
+  async requeueExpiredLeases(): Promise<number> {
+    const now = new Date().toISOString();
+    const expired = this.sql
+      .exec<{ total: number }>(
+        "SELECT count(*) AS total FROM events WHERE status = 'processing' AND available_at <= ?",
+        now,
+      )
+      .one().total;
+
+    if (expired > 0) {
+      this.sql.exec(
+        "UPDATE events SET status = 'pending', lease_id = NULL WHERE status = 'processing' AND available_at <= ?",
+        now,
+      );
+    }
+    return expired;
+  }
+
+  /**
+   * Schedule a wake-up for the next lease expiry or retry backoff. Rows that are
+   * already due are left to the runner: arming an alarm for "now" would spin.
+   */
+  async armAlarm(): Promise<void> {
+    if (!this.alarmScheduler) return;
+
+    const now = new Date().toISOString();
+    const next = this.sql
+      .exec<{ next: string | null }>(
+        `SELECT MIN(available_at) AS next FROM events
+         WHERE status IN ('pending', 'processing') AND available_at > ?`,
+        now,
+      )
+      .one().next;
+
+    if (next) {
+      await this.alarmScheduler.setAlarm(Date.parse(next) + 1_000);
+    } else {
+      await this.alarmScheduler.deleteAlarm();
+    }
+  }
+}
+
+const EVENT_COLUMNS =
+  "delivery_id, provider, event, action, repository, actor, received_at, status, attempts, available_at, last_error, lease_id";
+
+interface EventRow extends Record<string, SqlStorageValue> {
+  delivery_id: string;
+  provider: string;
+  event: string;
+  action: string | null;
+  repository: string;
+  actor: string | null;
+  received_at: string;
+  status: string;
+  attempts: number;
+  available_at: string;
+  last_error: string | null;
+  lease_id: string | null;
+}
+
+function toWireEvent(row: EventRow) {
+  return {
+    deliveryId: row.delivery_id,
+    provider: row.provider,
+    event: row.event,
+    action: row.action,
+    repository: row.repository,
+    actor: row.actor,
+    receivedAt: row.received_at,
+    status: row.status,
+    attempts: row.attempts,
+    availableAt: row.available_at,
+    lastError: row.last_error,
+    leaseId: row.lease_id,
+  };
+}
+
+interface ClaimToken {
+  deliveryId: string;
+  leaseId?: string;
+}
+
+function claimsFrom(payload: unknown): ClaimToken[] {
+  const body = asRecord(payload);
+  if (!body) return [];
+
+  if (Array.isArray(body["claims"])) {
+    return body["claims"]
+      .map((item) => asRecord(item))
+      .filter((rec): rec is Record<string, unknown> => rec !== null)
+      .map((rec) => ({
+        deliveryId: String(rec["deliveryId"] ?? rec["delivery_id"] ?? ""),
+        leaseId:
+          typeof (rec["leaseId"] ?? rec["lease_id"]) === "string"
+            ? String(rec["leaseId"] ?? rec["lease_id"])
+            : undefined,
+      }))
+      .filter((c) => c.deliveryId.length > 0);
+  }
+
+  const defaultLease =
+    typeof (body["leaseId"] ?? body["lease_id"]) === "string"
+      ? String(body["leaseId"] ?? body["lease_id"])
+      : undefined;
+
+  const raw = body["deliveryIds"] ?? body["deliveryId"] ?? body["delivery_id"];
+  const list = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw];
+  return list
+    .filter((id): id is string => typeof id === "string" && id.length > 0)
+    .map((id) => ({ deliveryId: id, leaseId: defaultLease }));
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function clampInt(value: unknown, min: number, max: number, fallback: number): number {
+  const parsed = typeof value === "string" ? Number.parseInt(value, 10) : value;
+  if (typeof parsed !== "number" || !Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(Math.trunc(parsed), min), max);
+}
+
+function safeParseJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
