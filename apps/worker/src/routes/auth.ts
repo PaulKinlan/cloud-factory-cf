@@ -27,6 +27,43 @@ function getCookie(headers: Headers, name: string): string | null {
   return match ? decodeURIComponent(match[1]!) : null;
 }
 
+/**
+ * Ensures return_to / redirect_uri is strictly a relative path on the same origin.
+ * Rejects off-origin targets, protocol-relative URLs (//...), and backslashes,
+ * falling back to "/" on any mismatch or malformed target.
+ */
+export function sanitizeReturnTo(target: string | null | undefined, origin: string): string {
+  if (!target || typeof target !== "string") {
+    return "/";
+  }
+
+  const trimmed = target.trim();
+  if (trimmed.startsWith("//") || trimmed.startsWith("/\\") || trimmed.includes("\\")) {
+    return "/";
+  }
+
+  if (trimmed.startsWith("/")) {
+    try {
+      const parsed = new URL(trimmed, origin);
+      if (parsed.origin !== origin) return "/";
+      return parsed.pathname + parsed.search + parsed.hash;
+    } catch {
+      return "/";
+    }
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.origin === origin) {
+      return parsed.pathname + parsed.search + parsed.hash;
+    }
+  } catch {
+    // Malformed URL
+  }
+
+  return "/";
+}
+
 export async function handleAuth(
   request: Request,
   env: Env,
@@ -72,7 +109,8 @@ export async function handleGithubLogin(
 
   const callbackUrl = new URL(AUTH_CALLBACK_PATH, url.origin);
   if (redirectUri) {
-    callbackUrl.searchParams.set("return_to", redirectUri);
+    const safeReturnTo = sanitizeReturnTo(redirectUri, url.origin);
+    callbackUrl.searchParams.set("return_to", safeReturnTo);
   }
 
   // 1. If App installation flow is requested and slug is known, route to GitHub App install
@@ -130,7 +168,7 @@ export async function handleGithubCallback(
   const code = url.searchParams.get("code");
   const installationId = url.searchParams.get("installation_id");
   const state = url.searchParams.get("state");
-  const returnTo = url.searchParams.get("return_to") ?? "/";
+  const returnTo = sanitizeReturnTo(url.searchParams.get("return_to"), url.origin);
 
   // Verify OAuth state to prevent CSRF attacks
   if (!state) {
@@ -287,6 +325,9 @@ export async function handleGithubCallback(
 
   // 4. Redirect user back to the application canvas
   const redirectUrl = new URL(returnTo, url.origin);
+  if (redirectUrl.origin !== url.origin) {
+    redirectUrl.href = new URL("/", url.origin).href;
+  }
   redirectUrl.searchParams.set("connected", "1");
   if (accountLogin !== "unknown") {
     redirectUrl.searchParams.set("owner", accountLogin);

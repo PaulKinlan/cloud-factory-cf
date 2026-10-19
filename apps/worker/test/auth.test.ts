@@ -209,4 +209,47 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(missingOwnerJson.ok).toBe(false);
     expect(missingOwnerJson.error).toContain("Missing required query parameter ?owner");
   });
+
+  it("/auth/github/login & callback: sanitizes redirect_uri and return_to to prevent open redirects", async () => {
+    // 1. Off-origin redirect_uri in login is neutralized to return_to=/
+    const evilLogin = await SELF.fetch(
+      "https://example.com/auth/github/login?client_id=gh_test_client_id&redirect_uri=https://evil.example/steal",
+      { method: "GET", redirect: "manual" },
+    );
+    expect(evilLogin.status).toBe(302);
+    const evilLocation = evilLogin.headers.get("location")!;
+    expect(evilLocation).toContain("redirect_uri=");
+    const parsedRedirectUri = new URL(new URL(evilLocation).searchParams.get("redirect_uri")!);
+    expect(parsedRedirectUri.searchParams.get("return_to")).toBe("/");
+
+    // 2. Protocol-relative URL is neutralized
+    const protoLogin = await SELF.fetch(
+      "https://example.com/auth/github/login?client_id=gh_test_client_id&redirect_uri=//evil.example/steal",
+      { method: "GET", redirect: "manual" },
+    );
+    expect(protoLogin.status).toBe(302);
+    const protoLocation = protoLogin.headers.get("location")!;
+    const parsedProtoUri = new URL(new URL(protoLocation).searchParams.get("redirect_uri")!);
+    expect(parsedProtoUri.searchParams.get("return_to")).toBe("/");
+
+    // 3. Off-origin return_to in callback is neutralized and never redirects off-site
+    const validLogin = await SELF.fetch(
+      "https://example.com/auth/github/login?client_id=gh_test_client_id",
+      { method: "GET", redirect: "manual" },
+    );
+    const validLocation = validLogin.headers.get("location")!;
+    const validState = new URL(validLocation).searchParams.get("state")!;
+    const cookieHeader = validLogin.headers.get("set-cookie")!.split(";")[0]!;
+
+    const evilCallback = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&state=${validState}&return_to=https://evil.example/steal`,
+      { method: "GET", headers: { cookie: cookieHeader }, redirect: "manual" },
+    );
+    expect(evilCallback.status).toBe(302);
+    const callbackTarget = evilCallback.headers.get("location")!;
+    const parsedTarget = new URL(callbackTarget);
+    expect(parsedTarget.origin).toBe("https://example.com");
+    expect(parsedTarget.pathname).toBe("/");
+    expect(parsedTarget.searchParams.get("connected")).toBe("1");
+  });
 });
