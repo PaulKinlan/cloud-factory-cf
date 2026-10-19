@@ -384,70 +384,107 @@ export async function handleGithubCallback(
   } else if (installationId) {
     // 2b. Install-only callback without OAuth code: query installation details & repos
     const token = env.GITHUB_TOKEN;
-    if (token) {
-      try {
-        const instRes = await fetch(`https://api.github.com/app/installations/${installationId}`, {
+    if (!token) {
+      return Response.json(
+        { ok: false, error: "GitHub App installation resolution credentials (GITHUB_TOKEN) are not configured" },
+        { status: 503, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    let instRes: Response;
+    try {
+      instRes = await fetch(`https://api.github.com/app/installations/${installationId}`, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "user-agent": "CloudFactory-Auth",
+        },
+      });
+      if (!instRes.ok && token.startsWith("ghp_")) {
+        instRes = await fetch(`https://api.github.com/user/installations/${installationId}`, {
           headers: {
             authorization: `Bearer ${token}`,
             accept: "application/vnd.github+json",
             "user-agent": "CloudFactory-Auth",
           },
         });
-        if (instRes.ok) {
-          const instData = (await instRes.json()) as any;
-          if (instData.account?.login) {
-            accountLogin = instData.account.login;
-            accountType = instData.account.type ?? "User";
-          }
-        }
+      }
+    } catch (err) {
+      return Response.json(
+        { ok: false, error: `Failed to reach GitHub App installation endpoint: ${String(err)}` },
+        { status: 502, headers: { "set-cookie": clearCookie } },
+      );
+    }
 
-        const instReposRes = await fetch(`https://api.github.com/installation/repositories?per_page=100`, {
+    if (!instRes.ok) {
+      return Response.json(
+        { ok: false, error: `GitHub installation endpoint failed with HTTP ${instRes.status}` },
+        { status: 502, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    const instData = (await instRes.json().catch(() => ({}))) as any;
+    const account = instData.account ?? instData.installation?.account;
+    if (!account?.login) {
+      return Response.json(
+        { ok: false, error: "GitHub App installation response contains no valid account login" },
+        { status: 502, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    accountLogin = account.login;
+    accountType = account.type ?? "User";
+
+    let instReposRes: Response;
+    try {
+      instReposRes = await fetch(`https://api.github.com/installation/repositories?per_page=100`, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "user-agent": "CloudFactory-Auth",
+        },
+      });
+      if (!instReposRes.ok && token.startsWith("ghp_")) {
+        instReposRes = await fetch(`https://api.github.com/user/installations/${installationId}/repositories?per_page=100`, {
           headers: {
             authorization: `Bearer ${token}`,
             accept: "application/vnd.github+json",
             "user-agent": "CloudFactory-Auth",
           },
         });
-        if (instReposRes.ok) {
-          const instReposData = (await instReposRes.json()) as any;
-          const list = Array.isArray(instReposData?.repositories) ? instReposData.repositories : (Array.isArray(instReposData) ? instReposData : []);
-          for (const r of list) {
-            if (r.full_name) {
-              discoveredRepos.push({
-                fullName: r.full_name,
-                owner: r.owner?.login ?? accountLogin,
-                name: r.name,
-                private: Boolean(r.private),
-                defaultBranch: r.default_branch ?? "main",
-              });
-            }
-          }
-        }
-      } catch {
-        // Fall back to state if API query failed
       }
+    } catch (err) {
+      return Response.json(
+        { ok: false, error: `Failed to reach GitHub installation repositories endpoint: ${String(err)}` },
+        { status: 502, headers: { "set-cookie": clearCookie } },
+      );
     }
 
-    // If API query didn't yield an account login, check state parameter for owner/repo
-    if (accountLogin === "unknown" && state) {
-      if (state.includes("/")) {
-        const [stateOwner, stateRepo] = state.split("/");
-        if (stateOwner) {
-          accountLogin = stateOwner;
-          if (stateRepo && discoveredRepos.length === 0) {
-            discoveredRepos.push({
-              fullName: `${stateOwner}/${stateRepo}`,
-              owner: stateOwner,
-              name: stateRepo,
-              private: false,
-              defaultBranch: "main",
-            });
-          }
-        }
-      } else if (!state.includes(".")) {
-        accountLogin = state;
+    if (!instReposRes.ok) {
+      return Response.json(
+        { ok: false, error: `GitHub installation repositories failed with HTTP ${instReposRes.status}` },
+        { status: 502, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    const instReposData = (await instReposRes.json().catch(() => ({}))) as any;
+    const list = Array.isArray(instReposData?.repositories) ? instReposData.repositories : (Array.isArray(instReposData) ? instReposData : []);
+    for (const r of list) {
+      if (r.full_name) {
+        discoveredRepos.push({
+          fullName: r.full_name,
+          owner: r.owner?.login ?? accountLogin,
+          name: r.name,
+          private: Boolean(r.private),
+          defaultBranch: r.default_branch ?? "main",
+        });
       }
     }
+  } else {
+    return Response.json(
+      { ok: false, error: "Missing required authorization code or installation_id" },
+      { status: 400, headers: { "set-cookie": clearCookie } },
+    );
   }
 
   // 3. Persist authorized repositories into OrgCoordinator DO

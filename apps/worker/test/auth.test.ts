@@ -1,5 +1,77 @@
 import { SELF } from "cloudflare:test";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+function setupDefaultFetch() {
+  vi.stubGlobal(
+    "fetch",
+    (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://github.com/login/oauth/access_token") {
+        return new Response(JSON.stringify({ access_token: "gho_test_user_token_123" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url === "https://api.github.com/user") {
+        return new Response(JSON.stringify({ login: "octodev", type: "User" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.includes("/api.github.com/user/repos")) {
+        return new Response(
+          JSON.stringify([
+            { id: 1, full_name: "octodev/widget-service", name: "widget-service", private: false, default_branch: "main", owner: { login: "octodev" } },
+            { id: 2, full_name: "octodev/secret-project", name: "secret-project", private: true, default_branch: "trunk", owner: { login: "octodev" } },
+          ]),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+      if (url.includes("/api.github.com/app/installations/") || url.includes("/api.github.com/user/installations/")) {
+        if (url.includes("/repositories")) {
+          return new Response(
+            JSON.stringify({
+              total_count: 1,
+              repositories: [
+                { id: 10, full_name: "acme/widget", name: "widget", private: false, default_branch: "main", owner: { login: "acme" } },
+              ],
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+        return new Response(JSON.stringify({ id: 789, account: { login: "acme", type: "Organization" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.includes("/api.github.com/installation/repositories")) {
+        return new Response(
+          JSON.stringify({
+            total_count: 1,
+            repositories: [
+              { id: 10, full_name: "acme/widget", name: "widget", private: false, default_branch: "main", owner: { login: "acme" } },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+      return new Response("Not found", { status: 404 });
+    }) as unknown as typeof fetch,
+  );
+}
+
+beforeEach(() => {
+  setupDefaultFetch();
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -489,5 +561,131 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(orgReposData.count).toBe(2);
     expect(orgReposData.repositories[0].fullName).toBe("orgdev/service-a");
     expect(orgReposData.repositories[0].isPrivate).toBe(true);
+  });
+
+  it("install callback: rejects unauthenticated state injection and fails visibly on API failure (cloud-factory-cf-lpmz, cloud-factory-cf-jmlv)", async () => {
+    // 1. Unauthenticated request with state=victimorg/evil-repo where GitHub API 401s
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/installations/") || url.includes("/installation/repositories")) {
+          return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const evilInstallRes = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=inst_attacker&setup_action=install&state=victimorg/evil-repo",
+      { method: "GET", redirect: "manual" },
+    );
+    // Must return 502 and NOT redirect with connected=1
+    expect(evilInstallRes.status).toBe(502);
+    const evilJson = (await evilInstallRes.json()) as any;
+    expect(evilJson.ok).toBe(false);
+    expect(evilJson.error).toContain("GitHub installation endpoint failed with HTTP 401");
+
+    // Ensure victimorg's authorized_repos remained empty / untouched
+    const victimReposRes = await SELF.fetch("https://example.com/api/repos?owner=victimorg", {
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(victimReposRes.status).toBe(200);
+    const victimReposData = (await victimReposRes.json()) as any;
+    expect(victimReposData.count).toBe(0);
+    expect(victimReposData.repositories).toEqual([]);
+
+    // 2. Install-only callback when installation repositories API 500s -> returns 502
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/installations/")) {
+          if (url.includes("/repositories")) {
+            return new Response("Internal Server Error", { status: 500 });
+          }
+          return new Response(JSON.stringify({ id: 999, account: { login: "legitorg", type: "Organization" } }), { status: 200 });
+        }
+        if (url.includes("/installation/repositories")) {
+          return new Response("Internal Server Error", { status: 500 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const failReposRes = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=inst_999&setup_action=install",
+      { method: "GET", redirect: "manual" },
+    );
+    expect(failReposRes.status).toBe(502);
+    const failJson = (await failReposRes.json()) as any;
+    expect(failJson.ok).toBe(false);
+    expect(failJson.error).toContain("GitHub installation repositories failed with HTTP 500");
+  });
+
+  it("OAuth failure branches: covers /user/repos failure, persistence failure, and query credential override rejection (cloud-factory-cf-yp07)", async () => {
+    const loginRes = await SELF.fetch("https://example.com/auth/github/login?client_id=gh_test_client_id", {
+      method: "GET",
+      redirect: "manual",
+    });
+    const state = new URL(loginRes.headers.get("location")!).searchParams.get("state")!;
+    const cookieHeader = loginRes.headers.get("set-cookie")!.split(";")[0]!;
+
+    // 1. /user/repos fails with 500 -> returns 502
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://github.com/login/oauth/access_token") {
+          return new Response(JSON.stringify({ access_token: "gho_valid_token" }), { status: 200 });
+        }
+        if (url === "https://api.github.com/user") {
+          return new Response(JSON.stringify({ login: "octodev", type: "User" }), { status: 200 });
+        }
+        if (url.includes("/api.github.com/user/repos")) {
+          return new Response("Service Unavailable", { status: 503 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const reposFailRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=valid_code&state=${state}`,
+      { method: "GET", headers: { cookie: cookieHeader } },
+    );
+    expect(reposFailRes.status).toBe(502);
+    const reposFailJson = (await reposFailRes.json()) as any;
+    expect(reposFailJson.ok).toBe(false);
+    expect(reposFailJson.error).toContain("GitHub /user/repos failed with HTTP 503");
+
+    // 2. Query string client_secret override is ignored: post body to GitHub uses env secrets
+    let capturedBody: any = null;
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "https://github.com/login/oauth/access_token") {
+          capturedBody = JSON.parse(String(init?.body));
+          return new Response(JSON.stringify({ access_token: "gho_valid_token" }), { status: 200 });
+        }
+        if (url === "https://api.github.com/user") {
+          return new Response(JSON.stringify({ login: "octodev", type: "User" }), { status: 200 });
+        }
+        if (url.includes("/api.github.com/user/repos")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const overrideAttemptRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=valid_code&state=${state}&client_secret=attacker_controlled_secret&client_id=attacker_id`,
+      { method: "GET", headers: { cookie: cookieHeader }, redirect: "manual" },
+    );
+    expect(overrideAttemptRes.status).toBe(302);
+    expect(capturedBody).toBeDefined();
+    // Must use env credentials, NOT query params
+    expect(capturedBody.client_id).toBe("gh_test_client_id");
+    expect(capturedBody.client_secret).toBe("gh_test_client_secret");
   });
 });
