@@ -847,3 +847,69 @@ textarea.field__control {
     animation-duration: 0.01ms !important;
   }
 }
+
+/* ------------------------------------------------------- repository pillar */
+
+.repo-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.repo-pill:hover {
+  border-color: var(--accent);
+}
+
+.repo-pill:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.repo-pill__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+/* The tone lives on the label; :has() lets the dot follow it without JS swapping classes. */
+.repo-pill:has(.repo-pill__label[data-tone="ok"]) .repo-pill__dot {
+  background: #3ddc97;
+}
+
+.repo-pill:has(.repo-pill__label[data-tone="warn"]) .repo-pill__dot {
+  background: #f0b429;
+}
+
+.connect-status {
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  font: 0.82rem/1.4 var(--mono);
+}
+
+.connect-status--ok {
+  border-color: #3ddc97;
+}
+
+.connect-status--warn {
+  border-color: #f0b429;
+}
+
+.connect-dialog #connect-url {
+  width: 100%;
+}
+
+.connect-dialog .dialog-actions {
+  flex-wrap: wrap;
+}

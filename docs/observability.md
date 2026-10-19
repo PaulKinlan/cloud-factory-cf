@@ -87,6 +87,26 @@ thought stream (socket, with polling fallback when the socket cannot connect), a
 artifact inspector for the selected step, and the cost HUD. The control key is typed
 into the panel and kept in memory only — it is never written to `localStorage`.
 
+### The header gate
+
+The canvas header carries a repository pill (the scope, with a dot for the last
+check's state) and a **Connect GitHub** dialog behind it: the App install link, the
+webhook URL for the chosen repository, a control key field, and **Check connection**,
+which reads `/trace/:owner/:repo/connect` and reports the summary above.
+
+```
+no evidence            Not checked yet                     (muted)
+no ping, no events     Waiting for GitHub's ping            (warn)
+events, no ping        Receiving events · no ping yet (2m)  (warn)
+ping < 24h             Connected · ping just now            (ok)
+ping > 24h             Last ping 3d ago — check the hook    (warn)
+```
+
+The rule the summary encodes: a repository is only "connected" once the provider's
+ping has actually arrived. Silence is never upgraded to a green light, and a ping
+older than a day is a warning rather than a stale success. The control key stays in
+the page (a password field, never `localStorage`).
+
 ## Operator example
 
 ```bash
