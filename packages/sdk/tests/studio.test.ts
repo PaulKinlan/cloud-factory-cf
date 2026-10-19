@@ -330,4 +330,62 @@ test('AgentStudio: author, simulate, install, load, and list', async () => {
   assert.ok(orgAgent);
   assert.equal(repoAgent.name, 'dual-agent');
   assert.equal(orgAgent.name, 'dual-agent');
+
+  // 8. Test simulation failure when tool execution throws/fails (fixes cloud-factory-cf-c5c)
+  const throwingTool: ToolDefinition = {
+    name: 'exploding_tool',
+    description: 'Throws an error',
+    parameters: { type: 'object', properties: {} },
+    handler: async () => {
+      throw new Error('tool-exploded');
+    },
+  };
+  const failToolSim = await studio.simulate(
+    {
+      manifest: {
+        name: 'fail-tool-agent',
+        version: '0.1.0',
+        description: 'test',
+        prompt: 'p',
+        triggers: [{ event: 'push' }],
+        tools: ['exploding_tool'],
+        capabilities: [],
+        sinks: [],
+        memoryScope: 'repo',
+      },
+    },
+    { tools: [throwingTool] }
+  );
+  assert.equal(failToolSim.status, 'failed');
+  assert.ok(failToolSim.error?.includes('tool-exploded'));
+  assert.equal(failToolSim.toolCalls.length, 1);
+  assert.ok((failToolSim.toolCalls[0].result as { error?: string }).error?.includes('tool-exploded'));
+
+  // 9. Test simulation failure when sink dispatch throws (fixes cloud-factory-cf-c5c)
+  const brokenSink = {
+    name: 'broken-sink',
+    supportedActions: ['broken-sink'],
+    canHandle: () => true,
+    handle: async () => {
+      throw new Error('sink-failed');
+    },
+  };
+  const failSinkSim = await studio.simulate(
+    {
+      manifest: {
+        name: 'fail-sink-agent',
+        version: '0.1.0',
+        description: 'test',
+        prompt: 'p',
+        triggers: [{ event: 'push' }],
+        tools: [],
+        capabilities: [],
+        sinks: [{ type: 'broken-sink' }],
+        memoryScope: 'repo',
+      },
+    },
+    { sinks: [brokenSink] }
+  );
+  assert.equal(failSinkSim.status, 'failed');
+  assert.ok(failSinkSim.error?.includes('sink-failed'));
 });

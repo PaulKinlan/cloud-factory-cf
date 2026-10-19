@@ -57,13 +57,16 @@ export class AgentStudio {
   ): Extension {
     return (api: ExtensionAPI) => {
       // Listen to triggers
-      for (const trigger of manifest.triggers) {
-        api.on(trigger.event, async (eventPayload, ctx) => {
-          ctx.log('info', `Agent ${manifest.name} triggered by event: ${trigger.event}`);
-          if (options.customExecutor) {
-            await options.customExecutor(ctx, eventPayload);
-          }
-        });
+      const triggers = Array.isArray(manifest.triggers) ? manifest.triggers : [];
+      for (const trigger of triggers) {
+        if (trigger && typeof trigger.event === 'string') {
+          api.on(trigger.event, async (eventPayload, ctx) => {
+            ctx.log('info', `Agent ${manifest.name} triggered by event: ${trigger.event}`);
+            if (options.customExecutor) {
+              await options.customExecutor(ctx, eventPayload);
+            }
+          });
+        }
       }
 
       // Configure before_run hook
@@ -110,6 +113,58 @@ export class AgentStudio {
     const memoryMutations: SimulatedMemoryMutation[] = [];
     const permissionChecks: SimulatedPermissionCheck[] = [];
 
+    if (!request.manifest || typeof request.manifest !== 'object') {
+      return {
+        runId,
+        status: 'failed',
+        logs,
+        toolCalls,
+        sinkActions,
+        memoryMutations,
+        permissionChecks,
+        error: 'Invalid manifest: manifest must be an object',
+        durationMs: 0,
+      };
+    }
+    const manifestName = request.manifest.name;
+    if (!manifestName || typeof manifestName !== 'string') {
+      return {
+        runId,
+        status: 'failed',
+        logs,
+        toolCalls,
+        sinkActions,
+        memoryMutations,
+        permissionChecks,
+        error: 'Invalid manifest: missing required field "name"',
+        durationMs: 0,
+      };
+    }
+    const manifestPrompt = request.manifest.prompt;
+    if (!manifestPrompt || typeof manifestPrompt !== 'string') {
+      return {
+        runId,
+        status: 'failed',
+        logs,
+        toolCalls,
+        sinkActions,
+        memoryMutations,
+        permissionChecks,
+        error: 'Invalid manifest: missing required field "prompt"',
+        durationMs: 0,
+      };
+    }
+
+    const manifestCapabilities = Array.isArray(request.manifest.capabilities)
+      ? request.manifest.capabilities
+      : [];
+    const manifestTools = Array.isArray(request.manifest.tools)
+      ? request.manifest.tools
+      : [];
+    const manifestSinks = Array.isArray(request.manifest.sinks)
+      ? request.manifest.sinks
+      : [];
+
     // 1. Build sandboxed memory tracking
     const innerMemory = options.memoryStore ?? new InMemoryHierarchicalMemoryStore();
     const trackedMemory = new TrackedMemoryStore(innerMemory, (mutation) => {
@@ -154,7 +209,7 @@ export class AgentStudio {
     };
 
     // Pre-validate capabilities against policy (fail-closed)
-    for (const cap of request.manifest.capabilities) {
+    for (const cap of manifestCapabilities) {
       const allowed = await credentialBroker.hasPermission(cap.service, cap.action);
       if (!allowed) {
         return {
@@ -174,7 +229,7 @@ export class AgentStudio {
     // Pre-validate required tools exist in simulation environment
     const providedTools = options.tools ?? [];
     const availableToolNames = new Set(providedTools.map((t) => t.name));
-    for (const toolName of request.manifest.tools) {
+    for (const toolName of manifestTools) {
       if (!availableToolNames.has(toolName)) {
         return {
           runId,
@@ -200,7 +255,7 @@ export class AgentStudio {
       ...callerSinks.flatMap((s) => [s.name, ...s.supportedActions]),
     ]);
 
-    for (const sink of request.manifest.sinks) {
+    for (const sink of manifestSinks) {
       const isAvailable =
         knownSinkTypes.has(sink.type) ||
         knownSinkTypes.has('*') ||
@@ -264,24 +319,35 @@ export class AgentStudio {
 
     // 4. Build simulated tools with call tracking
     for (const tool of providedTools) {
-      if (request.manifest.tools.includes(tool.name)) {
+      if (manifestTools.includes(tool.name)) {
         runtime.registerTool({
           ...tool,
           handler: async (params, ctx) => {
             const toolStart = Date.now();
             let result: unknown;
-            if (request.mockToolResponses?.[tool.name] !== undefined) {
-              result = request.mockToolResponses[tool.name];
-            } else {
-              result = await tool.handler(params, ctx);
+            try {
+              if (request.mockToolResponses?.[tool.name] !== undefined) {
+                result = request.mockToolResponses[tool.name];
+              } else {
+                result = await tool.handler(params, ctx);
+              }
+              toolCalls.push({
+                tool: tool.name,
+                params,
+                result,
+                durationMs: Date.now() - toolStart,
+              });
+              return result;
+            } catch (err: unknown) {
+              const errMsg = err instanceof Error ? err.message : String(err);
+              toolCalls.push({
+                tool: tool.name,
+                params,
+                result: { error: errMsg },
+                durationMs: Date.now() - toolStart,
+              });
+              throw err;
             }
-            toolCalls.push({
-              tool: tool.name,
-              params,
-              result,
-              durationMs: Date.now() - toolStart,
-            });
-            return result;
           },
         });
       }
@@ -347,7 +413,8 @@ export class AgentStudio {
           } else {
             // Default simulation executor: actually exercises declared tools and sinks
             const toolResults: Record<string, unknown> = {};
-            for (const toolName of request.manifest.tools) {
+            const toolsExecuted: string[] = [];
+            for (const toolName of manifestTools) {
               const mockParams =
                 (request.mockToolInputs?.[toolName] as Record<string, unknown> | undefined) ??
                 (toolName === 'read_file'
@@ -358,29 +425,44 @@ export class AgentStudio {
                       ? { command: 'echo "simulated test"' }
                       : {});
               const res = await simCtx.invokeTool(toolName, mockParams);
-              toolResults[toolName] = res;
+              if (!res.success) {
+                throw new Error(
+                  `Tool "${toolName}" execution failed: ${res.error ?? 'unknown error'}`,
+                );
+              }
+              toolResults[toolName] = res.result;
+              toolsExecuted.push(toolName);
             }
 
-            for (const sink of request.manifest.sinks) {
-              await simCtx.ctx.sinks.emit(
+            const sinksEmitted: string[] = [];
+            for (const sink of manifestSinks) {
+              const dispatchResults = await simCtx.ctx.sinks.emit(
                 {
                   type: sink.type,
-                  target: `simulated-target-${request.manifest.name}`,
+                  target: `simulated-target-${manifestName}`,
                   payload: {
-                    agent: request.manifest.name,
+                    agent: manifestName,
                     event: request.event,
                     toolResults,
                   },
                 },
                 simCtx.ctx,
               );
+              for (const dr of dispatchResults) {
+                if (!dr.success) {
+                  throw new Error(
+                    `Sink "${sink.type}" dispatch failed: ${dr.error ?? 'unknown error'}`,
+                  );
+                }
+              }
+              sinksEmitted.push(sink.type);
             }
 
             agentOutput = {
               executed: true,
-              agent: request.manifest.name,
-              toolsExecuted: Object.keys(toolResults),
-              sinksEmitted: request.manifest.sinks.map((s) => s.type),
+              agent: manifestName,
+              toolsExecuted,
+              sinksEmitted,
             };
           }
           return {
@@ -391,21 +473,27 @@ export class AgentStudio {
         },
         {
           runId,
-          systemPrompt: request.manifest.prompt,
-          tools: request.manifest.tools,
+          systemPrompt: manifestPrompt,
+          tools: manifestTools,
           metadata: request.manifest.metadata,
         }
       );
 
       return {
         runId,
-        status: runSummary.status === 'success' ? 'completed' : runSummary.status === 'cancelled' ? 'denied' : 'failed',
+        status:
+          runSummary.status === 'success'
+            ? 'completed'
+            : runSummary.status === 'cancelled'
+              ? 'denied'
+              : 'failed',
         logs,
         toolCalls,
         sinkActions,
         memoryMutations,
         permissionChecks,
         output: runSummary.output,
+        error: runSummary.error,
         durationMs: Date.now() - startTime,
       };
     } catch (err: unknown) {

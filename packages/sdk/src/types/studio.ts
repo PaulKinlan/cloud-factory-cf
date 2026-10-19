@@ -2,7 +2,7 @@
  * Studio types for Natural Language Prompt-to-Agent authoring, simulation, and installation.
  */
 
-import type { ToolDefinition } from './tools.ts';
+import type { ToolDefinition, ToolExecutionResult } from './tools.ts';
 import type { SinkAction } from './sinks.ts';
 import type { LogEntry, AgentContext } from './context.ts';
 
@@ -25,6 +25,13 @@ export interface AgentManifest {
   };
   readonly metadata?: Record<string, unknown>;
 }
+
+export const STANDARD_SINK_TYPES: readonly string[] = [
+  'github-pr-review',
+  'github-issue',
+  'beads-task',
+  'cloud-telemetry',
+] as const;
 
 export interface AgentTrigger {
   readonly event: string;
@@ -96,7 +103,7 @@ export interface SimulatedPermissionCheck {
 
 export interface SimulationContext {
   readonly ctx: AgentContext;
-  readonly invokeTool: (name: string, params: Record<string, unknown>) => Promise<unknown>;
+  readonly invokeTool: (name: string, params: Record<string, unknown>) => Promise<ToolExecutionResult>;
 }
 
 /**

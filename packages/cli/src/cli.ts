@@ -341,6 +341,19 @@ export async function runCli(
         return 1;
       }
 
+      if (!manifest || typeof manifest !== 'object') {
+        io.stderr('[factory-cloud studio] Error: manifest must be a valid JSON object');
+        return 1;
+      }
+      if (!manifest.name || typeof manifest.name !== 'string') {
+        io.stderr('[factory-cloud studio] Error: manifest is missing required field "name"');
+        return 1;
+      }
+      if (!manifest.prompt || typeof manifest.prompt !== 'string') {
+        io.stderr('[factory-cloud studio] Error: manifest is missing required field "prompt"');
+        return 1;
+      }
+
       let event: Record<string, unknown> | undefined;
       if (parsed.eventFile) {
         try {

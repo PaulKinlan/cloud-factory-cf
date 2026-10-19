@@ -100,6 +100,8 @@ test('runCli: studio author and test simulation', async () => {
     const saved = JSON.parse(savedRaw);
     assert.equal(saved.name, 'pr-triage');
 
+    await fs.writeFile(path.join(tmpDir, 'README.md'), '# Test Readme\n', 'utf8');
+
     // 2. Test simulate agent manifest via CLI
     const testOutputs: string[] = [];
     const testIo = {
@@ -161,6 +163,61 @@ test('runCli: studio author and test simulation', async () => {
     );
     assert.equal(bogusCode, 1);
     assert.ok(bogusOutputs.some((o) => o.includes('Simulation denied') || o.includes('Simulation failed')));
+
+    // 5. Test studio test fails cleanly when a tool call fails (fixes cloud-factory-cf-c5c)
+    const emptySubdir = path.join(tmpDir, 'empty-dir');
+    await fs.mkdir(emptySubdir);
+    const readManifestPath = path.join(tmpDir, 'read-manifest.json');
+    await fs.writeFile(
+      readManifestPath,
+      JSON.stringify({
+        name: 'reader',
+        version: '0.1.0',
+        prompt: 'read readme',
+        triggers: [{ event: 'push' }],
+        tools: ['read_file'],
+        capabilities: [],
+        sinks: [],
+        memoryScope: 'repo',
+      }),
+      'utf8',
+    );
+    const readOutputs: string[] = [];
+    const readErrors: string[] = [];
+    const readCode = await runCli(
+      ['studio', 'test', readManifestPath, '--cwd', emptySubdir],
+      { stdout: (m) => readOutputs.push(m), stderr: (m) => readErrors.push(m) },
+    );
+    assert.equal(readCode, 1);
+    assert.ok(readOutputs.some((o) => o.includes('Simulation failed')));
+
+    // 6. Test studio test safely handles partial manifests without crashing (fixes cloud-factory-cf-gkg)
+    const partialPath = path.join(tmpDir, 'partial.json');
+    await fs.writeFile(
+      partialPath,
+      JSON.stringify({
+        name: 'partial',
+        version: '0.1.0',
+        prompt: 'do things',
+      }),
+      'utf8',
+    );
+    const partialOutputs: string[] = [];
+    const partialCode = await runCli(
+      ['studio', 'test', partialPath, '--cwd', tmpDir],
+      { stdout: (m) => partialOutputs.push(m), stderr: () => {} },
+    );
+    assert.equal(partialCode, 0);
+
+    const invalidPath = path.join(tmpDir, 'invalid.json');
+    await fs.writeFile(invalidPath, JSON.stringify({ version: '0.1.0' }), 'utf8');
+    const invalidErrors: string[] = [];
+    const invalidCode = await runCli(
+      ['studio', 'test', invalidPath, '--cwd', tmpDir],
+      { stdout: () => {}, stderr: (m) => invalidErrors.push(m) },
+    );
+    assert.equal(invalidCode, 1);
+    assert.ok(invalidErrors.some((e) => e.includes('missing required field "name"')));
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
