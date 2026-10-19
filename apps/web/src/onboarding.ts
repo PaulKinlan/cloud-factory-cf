@@ -139,13 +139,6 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
   const base = options.base ?? (typeof window === "undefined" ? "" : window.location.origin);
   const now = (): number => options.now?.() ?? Date.now();
   let scope: Scope | null = null;
-  let evidence: ConnectEvidence | null = null;
-
-  const fetchImpl = (): typeof fetch => {
-    const injected = options.fetchImpl;
-    // A bare `fetch` called as a method throws "Illegal invocation" in a browser.
-    return injected ?? ((input, init) => globalThis.fetch(input, init));
-  };
 
   function setStatus(label: string, tone: ConnectTone): void {
     if (statusNode !== null) {
@@ -155,7 +148,23 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     if (pillLabelNode !== null) pillLabelNode.dataset["tone"] = tone;
   }
 
-  function render(): void {
+  const poller = new ConnectPoller({
+    base,
+    scope: () => scope,
+    key: () => keyInput?.value ?? "",
+    ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+    now,
+    onChange: (state) => {
+      if (state.error !== null) {
+        setStatus(state.error, "warn");
+        return;
+      }
+      const summary = connectSummary(state.evidence, now());
+      setStatus(summary.label, summary.tone);
+    },
+  });
+
+  function renderScope(): void {
     if (pillLabelNode !== null) pillLabelNode.textContent = pillLabel(scope);
     if (urlInput !== null) {
       urlInput.value = scope === null ? "" : webhookUrl(base, scope.owner, scope.repo);
@@ -163,8 +172,6 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     if (installLink !== null) {
       installLink.href = installUrl(options.appSlug ?? "cloud-factory", scope === null ? "" : `${scope.owner}/${scope.repo}`);
     }
-    const summary = connectSummary(evidence, now());
-    setStatus(summary.label, summary.tone);
   }
 
   function readScope(): Scope | null {
@@ -174,60 +181,49 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     return parseRepository(`${owner}/${repo}`);
   }
 
+  /** A new scope is new evidence: drop the old reading and look again. */
   function applyScope(next: Scope | null): void {
+    const changed = next?.owner !== scope?.owner || next?.repo !== scope?.repo;
     scope = next;
-    // A different repository has different evidence; never carry it across.
-    evidence = null;
-    render();
+    renderScope();
     options.onScope?.(next);
+    if (changed) {
+      poller.reset();
+      if (scope !== null && (keyInput?.value ?? "") !== "") {
+        void poller.check().finally(() => {
+          if (!poller.state.paused) poller.start();
+        });
+      } else {
+        poller.stop();
+        setStatus("Not checked yet", "muted");
+      }
+    }
   }
 
   async function check(): Promise<void> {
-    const current = scope;
-    if (current === null) {
-      setStatus("Enter a repository as owner/repo first", "warn");
-      return;
-    }
-    const key = keyInput?.value ?? "";
-    if (key === "") {
-      setStatus("A control key is needed to read the connection state", "warn");
-      return;
-    }
-    setStatus("Checking…", "muted");
-    try {
-      const response = await fetchImpl()(
-        `${base.replace(/\/+$/, "")}/trace/${encodeURIComponent(current.owner)}/${encodeURIComponent(current.repo)}/connect`,
-        { headers: { "x-factory-control-key": key } },
-      );
-      if (response.status === 401) {
-        setStatus("control key rejected (401)", "warn");
-        return;
-      }
-      if (!response.ok) {
-        setStatus(`could not read the connection state (${response.status})`, "warn");
-        return;
-      }
-      const body = (await response.json()) as { connect?: ConnectEvidence };
-      evidence = body.connect ?? null;
-      render();
-      if (announcer !== null) announcer.textContent = connectSummary(evidence, now()).label;
-    } catch (error) {
-      setStatus(`could not reach the factory: ${message(error)}`, "warn");
-    }
+    poller.reset();
+    await poller.check();
   }
 
   function open(): void {
-    if (ownerInput !== null && ownerInput.value === "" && scope !== null) ownerInput.value = scope.owner;
-    if (repoInput !== null && repoInput.value === "" && scope !== null) repoInput.value = scope.repo;
-    render();
+    poller.setMode("dialog");
+    renderScope();
     pill?.setAttribute("aria-expanded", "true");
     dialog?.showModal();
     ownerInput?.focus();
+    // The check decides whether polling may run: a refused key must not leave a
+    // timer behind, so start only once the answer is in (and it was not a 401).
+    void poller.check().finally(() => {
+      if (!poller.state.paused) poller.start();
+    });
   }
 
   function close(): void {
     pill?.setAttribute("aria-expanded", "false");
     dialog?.close();
+    poller.setMode("idle");
+    // The pill keeps a slower watch on the connection so it is not a stale claim.
+    poller.start();
     pill?.focus();
   }
 
@@ -236,11 +232,26 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
   // Escape closes a native <dialog> without firing the button handler.
   dialog.addEventListener("close", () => {
     pill.setAttribute("aria-expanded", "false");
+    poller.setMode("idle");
+    poller.start();
     pill.focus();
   });
   for (const input of [ownerInput, repoInput]) {
     input?.addEventListener("input", () => applyScope(readScope()));
   }
+  // The key is not part of the scope, but a refused key must be re-tried once the
+  // operator changes it, and polling only makes sense when a key exists.
+  keyInput?.addEventListener("input", () => {
+    poller.reset();
+    if ((keyInput.value ?? "") === "") {
+      poller.stop();
+      setStatus("Not checked yet", "muted");
+      return;
+    }
+    void poller.check().finally(() => {
+      if (!poller.state.paused) poller.start();
+    });
+  });
   copyButton?.addEventListener("click", () => {
     if (urlInput === null) return;
     const text = urlInput.value;
@@ -258,6 +269,143 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
   });
   checkButton?.addEventListener("click", () => void check().catch(() => {}));
 
+  // A hidden tab has no business polling; the state is re-read on return.
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) poller.stop();
+      else poller.start();
+    });
+  }
+
   applyScope(readScope());
+  setStatus("Not checked yet", "muted");
   return { scope: () => scope, open, close, check };
+}
+
+/** How often the indicator re-reads: brisk while the dialog is open, slow behind it. */
+export const DIALOG_POLL_MS = 5000;
+export const IDLE_POLL_MS = 30_000;
+
+export type PollMode = "dialog" | "idle";
+
+export function pollIntervalMs(mode: PollMode): number {
+  return mode === "dialog" ? DIALOG_POLL_MS : IDLE_POLL_MS;
+}
+
+export interface PollerState {
+  evidence: ConnectEvidence | null;
+  error: string | null;
+  checking: boolean;
+  /** True once the control key was refused: polling stops until the key changes. */
+  paused: boolean;
+}
+
+export interface ConnectPollerOptions {
+  base: string;
+  scope: () => Scope | null;
+  key: () => string;
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+  onChange?: (state: PollerState) => void;
+  dialogMs?: number;
+  idleMs?: number;
+}
+
+/**
+ * The live indicator's engine: re-reads the connection evidence on a cadence and
+ * reports what it found. Kept out of the DOM so the cadence, the pause and the
+ * failure handling are tested directly.
+ *
+ * A refused key is a stop condition, not something to retry every few seconds: the
+ * operator has to change the key, and `reset()` is how the UI says they did.
+ */
+export class ConnectPoller {
+  state: PollerState = { evidence: null, error: null, checking: false, paused: false };
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private mode: PollMode = "idle";
+  private options: Required<Pick<ConnectPollerOptions, "dialogMs" | "idleMs">> & ConnectPollerOptions;
+
+  constructor(options: ConnectPollerOptions) {
+    this.options = { dialogMs: DIALOG_POLL_MS, idleMs: IDLE_POLL_MS, ...options };
+  }
+
+  private update(patch: Partial<PollerState>): void {
+    this.state = { ...this.state, ...patch };
+    this.options.onChange?.(this.state);
+  }
+
+  private get fetchImpl(): typeof fetch {
+    const injected = this.options.fetchImpl;
+    return injected ?? ((input, init) => globalThis.fetch(input, init));
+  }
+
+  private intervalMs(): number {
+    if (this.mode === "dialog") return this.options.dialogMs;
+    return this.options.idleMs;
+  }
+
+  /** Switch cadence (the dialog opening or closing), restarting the timer if running. */
+  setMode(mode: PollMode): void {
+    if (this.mode === mode) return;
+    this.mode = mode;
+    if (this.timer !== null) this.start();
+  }
+
+  /** The key or scope changed: whatever was refused might now be right. */
+  reset(): void {
+    this.update({ paused: false, error: null });
+  }
+
+  start(): void {
+    this.stop();
+    if (!this.eligible()) return;
+    this.timer = setInterval(() => void this.check(), this.intervalMs());
+  }
+
+  stop(): void {
+    if (this.timer !== null) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  get active(): boolean {
+    return this.timer !== null;
+  }
+
+  private eligible(): boolean {
+    const scope = this.options.scope();
+    return scope !== null && this.options.key() !== "" && !this.state.paused;
+  }
+
+  /** One read. Never throws: a transport failure is reported, not propagated. */
+  async check(): Promise<void> {
+    const scope = this.options.scope();
+    const key = this.options.key();
+    if (scope === null || key === "") {
+      this.update({ evidence: null, error: scope === null ? "No repository selected" : "A control key is needed" });
+      return;
+    }
+    if (this.state.checking) return; // one request at a time, however slow the network
+    this.update({ checking: true });
+    try {
+      const response = await this.fetchImpl(
+        `${this.options.base.replace(/\/+$/, "")}/trace/${encodeURIComponent(scope.owner)}/${encodeURIComponent(scope.repo)}/connect`,
+        { headers: { "x-factory-control-key": key } },
+      );
+      if (response.status === 401) {
+        this.stop();
+        this.update({ checking: false, evidence: null, error: "control key rejected (401)", paused: true });
+        return;
+      }
+      if (!response.ok) {
+        this.update({ checking: false, error: `could not read the connection state (${response.status})` });
+        return;
+      }
+      const body = (await response.json()) as { connect?: ConnectEvidence };
+      this.update({ checking: false, evidence: body.connect ?? null, error: null });
+    } catch (error) {
+      this.update({ checking: false, error: `could not reach the factory: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  }
 }

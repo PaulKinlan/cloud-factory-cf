@@ -130,6 +130,12 @@ ping < 24h             Connected · ping just now            (ok)
 ping > 24h             Last ping 3d ago — check the hook    (warn)
 ```
 
+The reading refreshes on a cadence rather than only on click: every 5s while the
+dialog is open, every 30s behind it so the pill's dot does not become a stale claim,
+paused while the tab is hidden, and stopped outright when the key is refused (a 401
+is a stop condition, not something to retry every few seconds; editing the key
+restarts it).
+
 The rule the summary encodes: a repository is only "connected" once the provider's
 ping has actually arrived. Silence is never upgraded to a green light, and a ping
 older than a day is a warning rather than a stale success. The control key stays in
