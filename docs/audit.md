@@ -18,8 +18,12 @@ All audit endpoints are control-plane read surfaces and require authentication v
 |---|---|---|
 | `GET` | `/audit/events/:owner/:repo` | Query historical ingested events and status breakdown |
 | `GET` | `/audit/events/:owner/:repo/:deliveryId` | Detailed audit for a single event including full payload and deliveries |
-| `GET` | `/audit/events/:owner/:repo/stats` | Status counts summary (`pending`, `processing`, `processed`, `failed`) |
+| `GET` | `/audit/events/:owner/:repo/stats` | Status counts summary (`pending`, `processing`, `processed`, `failed`). If an event with delivery ID `stats` exists, serves its detail view; pass `?counts=1` to explicitly request status counts. |
 | `GET` | `/audit/runs/:owner/:repo` | Historical records for canvas runs |
+
+### Query Parameters for `/audit/events/:owner/:repo/stats`
+
+- `counts` (string, optional): Pass `counts=1` to explicitly retrieve the status breakdown counts even if an ingested event has delivery ID `stats`.
 
 ### Query Parameters for `/audit/events/:owner/:repo`
 

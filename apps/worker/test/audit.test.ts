@@ -252,6 +252,22 @@ describe("DO event audit log API", () => {
     expect(countsBody.stats["pending"]).toBe(1);
   });
 
+  it("retrieves an event whose delivery ID is payload (cloud-factory-cf-obnz)", async () => {
+    const repository = "audit/deliv-named-payload";
+    const req = await githubRequest("payload", repository);
+    const queued = await SELF.fetch(req);
+    expect(queued.status).toBe(202);
+
+    // Detail route /audit/events/:owner/:repo/payload returns the event detail view
+    const detailRes = await callAudit(`/audit/events/${repository}/payload`, authHeaders);
+    expect(detailRes.status).toBe(200);
+    const detailBody = (await detailRes.json()) as any;
+    expect(detailBody.ok).toBe(true);
+    expect(detailBody.event).toBeDefined();
+    expect(detailBody.event.deliveryId).toBe("payload");
+    expect(detailBody.deliveries).toBeDefined();
+  });
+
   it("lists canvas run audits via /audit/runs", async () => {
     const repository = "audit/runs-test";
     const stub = coordinator(repository);

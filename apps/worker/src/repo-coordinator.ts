@@ -114,7 +114,7 @@ export class RepoCoordinator extends DurableObject<Env> {
         counts: this.eventQueue.statusCounts(),
       });
     }
-    if (request.method === "GET" && url.pathname.startsWith("/events/") && url.pathname.endsWith("/payload")) {
+    if (request.method === "GET" && url.pathname.startsWith("/events/") && url.pathname.endsWith("/payload") && url.pathname !== "/events/payload") {
       const deliveryId = decodeURIComponent(url.pathname.slice("/events/".length, -"/payload".length));
       return this.eventQueue.eventPayload(deliveryId);
     }

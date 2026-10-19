@@ -9,7 +9,7 @@ export const AUDIT_PATH =
  * historical run audit records (cloud-factory-cf-2ng.3).
  *
  *   GET /audit/events/:owner/:repo               historical event list (with stats)
- *   GET /audit/events/:owner/:repo/stats         status breakdown counts
+ *   GET /audit/events/:owner/:repo/stats         status breakdown counts (pass ?counts=1 to force counts if delivery ID 'stats' exists)
  *   GET /audit/events/:owner/:repo/:deliveryId   detailed single-event audit with payload & deliveries
  *   GET /audit/runs/:owner/:repo                 canvas runs audit records
  *
@@ -67,8 +67,8 @@ export async function handleAudit(
 
   // domain === "events"
   if (id === "stats") {
-    // If not explicitly requesting counts, check if an event with deliveryId "stats" exists:
-    if (!url.searchParams.has("counts")) {
+    // If not explicitly requesting counts via ?counts=1, check if an event with deliveryId "stats" exists:
+    if (url.searchParams.get("counts") !== "1") {
       const detailRes = await coordinator.fetch("https://repo-coordinator.internal/events/stats?detail=1");
       if (detailRes.ok) {
         const body = (await detailRes.json()) as Record<string, unknown>;
