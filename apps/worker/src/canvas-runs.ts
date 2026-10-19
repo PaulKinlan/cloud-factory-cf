@@ -23,9 +23,9 @@ import {
   type RunOutcome,
 } from "./pipeline";
 
-/** Default events per agent, and the cap a caller can ask for. */
-export const DEFAULT_EVENTS_PER_AGENT = 5;
-export const MAX_EVENTS_PER_AGENT = 50;
+/** Default events per run, and the cap a caller can ask for. */
+export const DEFAULT_EVENTS_PER_RUN = 5;
+export const MAX_EVENTS_PER_RUN = 50;
 
 export interface AgentSource {
   provider: string;
@@ -47,7 +47,7 @@ export interface AgentRunSummary {
   name: string;
   sources: AgentSource[];
   sinks: string[];
-  /** Events this agent claimed and ran; empty when nothing matched. */
+  /** Events this agent ran; empty when nothing matched. */
   runs: RunOutcome[];
   status: "ran" | "no-events" | "failed";
   error?: string;
@@ -57,7 +57,10 @@ export interface CanvasRunReport {
   documentId: string;
   name: string;
   agents: AgentRunSummary[];
+  /** Agent executions (an event wired to two agents counts twice). */
   ran: number;
+  /** Events claimed and settled in this run. */
+  events: number;
   failed: number;
 }
 
@@ -155,20 +158,77 @@ export async function runCanvasDocument(
   const planned = planAgents(body.document);
   if (!planned.ok) return planned;
 
-  const limit = Math.min(Math.max(options.limit ?? DEFAULT_EVENTS_PER_AGENT, 1), MAX_EVENTS_PER_AGENT);
+  const limit = Math.min(Math.max(options.limit ?? DEFAULT_EVENTS_PER_RUN, 1), MAX_EVENTS_PER_RUN);
   const report: CanvasRunReport = {
     documentId,
     name: typeof body.name === "string" && body.name.length > 0 ? body.name : planned.name,
-    agents: [],
+    agents: planned.plan.map((agent) => ({
+      agentId: agent.id,
+      name: agent.name,
+      sources: agent.sources,
+      sinks: agent.sinks,
+      runs: [],
+      status: "no-events",
+    })),
     ran: 0,
+    events: 0,
     failed: 0,
   };
 
-  for (const agent of planned.plan) {
-    const summary = await runAgent(deps, agent, limit);
-    report.agents.push(summary);
-    report.ran += summary.runs.length;
-    if (summary.status === "failed") report.failed += 1;
+  const claimed = await claim(deps, limit);
+  for (const event of claimed) {
+    // Fan-out: one event runs every agent whose sources name it, and the event is
+    // settled once. The wiring on the canvas reads as fan-out — one source
+    // feeding two agents means both act on the event (finding cloud-factory-cf-sdq).
+    const agents = planned.plan.filter((agent) =>
+      agent.sources.some((source) => sourceMatches(source, event)),
+    );
+    if (agents.length === 0) {
+      // Nobody wants it: hand it back without spending an attempt.
+      await release(deps, [event]);
+      continue;
+    }
+
+    report.events += 1;
+    const outcomes: RunOutcome[] = [];
+    for (const agent of agents) {
+      const outcome = await runEvent(deps, event, {
+        agentPrompt: agent.prompt,
+        agentId: agent.id,
+        sinks: agent.sinks,
+        ...(agent.memoryScope === null ? {} : { memoryScope: agent.memoryScope }),
+      });
+      outcomes.push(outcome);
+      report.ran += 1;
+
+      const summary = report.agents.find((entry) => entry.agentId === agent.id);
+      if (summary) {
+        summary.runs.push(outcome);
+        if (outcome.status === "failed") {
+          summary.status = "failed";
+          summary.error = outcome.error;
+        } else if (summary.status !== "failed") {
+          summary.status = "ran";
+        }
+      }
+      if (outcome.status === "failed") report.failed += 1;
+    }
+
+    // Settlement follows the event, not the agent: ack only when every agent
+    // succeeded. A partial failure retries the whole event, so the agents that
+    // did succeed run again — sinks are not idempotent yet.
+    const failure = outcomes.find((outcome) => outcome.status === "failed");
+    const settlement = await settleEvent(
+      deps,
+      event,
+      failure ?? outcomes[0] ?? { deliveryId: event.deliveryId, status: "skipped", settled: true, prompt: "", actionTypes: [], durationMs: 0 },
+    );
+    if (!settlement.ok) {
+      for (const outcome of outcomes) {
+        outcome.settled = false;
+        outcome.settlementError = settlement.error;
+      }
+    }
   }
 
   await deps.coordinator.fetch("https://repo-coordinator.internal/runs/audit", {
@@ -187,57 +247,6 @@ export async function runCanvasDocument(
   });
 
   return { ok: true, report };
-}
-
-async function runAgent(deps: PipelineDeps, agent: AgentPlan, limit: number): Promise<AgentRunSummary> {
-  const summary: AgentRunSummary = {
-    agentId: agent.id,
-    name: agent.name,
-    sources: agent.sources,
-    sinks: agent.sinks,
-    runs: [],
-    status: "no-events",
-  };
-
-  const claimed = await claim(deps, limit * 4);
-  const matching = claimed.filter((event) =>
-    agent.sources.some((source) => sourceMatches(source, event)),
-  );
-  const running = matching.slice(0, limit);
-  // Matched but over this run's limit: they go straight back on the queue rather
-  // than sitting on a lease until it expires and wasting an attempt
-  // (finding cloud-factory-cf-mj7).
-  const deferred = matching.slice(limit);
-
-  for (const event of running) {
-    // The agent's own prompt and wiring drive the run; the deterministic runtime
-    // still decides what it can actually deliver today.
-    const outcome = await runEvent(deps, event, {
-      agentPrompt: agent.prompt,
-      agentId: agent.id,
-      sinks: agent.sinks,
-      ...(agent.memoryScope === null ? {} : { memoryScope: agent.memoryScope }),
-    });
-    summary.runs.push(outcome);
-    if (outcome.status === "failed") {
-      summary.status = "failed";
-      summary.error = outcome.error;
-    } else if (summary.status !== "failed") {
-      summary.status = "ran";
-    }
-    const settlement = await settleEvent(deps, event, outcome);
-    if (!settlement.ok) {
-      outcome.settled = false;
-      outcome.settlementError = settlement.error;
-    }
-  }
-
-  // Events that matched nothing this agent may consume, and the ones over its
-  // limit, are released back to the queue so another agent (or a later run) can
-  // take them.
-  const unused = claimed.filter((event) => !running.includes(event));
-  await release(deps, [...unused, ...deferred]);
-  return summary;
 }
 
 async function claim(deps: PipelineDeps, limit: number): Promise<ClaimedEvent[]> {

@@ -68,15 +68,19 @@ document into work — the layout *is* the agent configuration:
    worker derives exactly what the canvas exports;
 2. the plan is rejected (400) with a reason if a layout cannot run: no agent
    nodes, an agent without a prompt, or an agent with no event source wired;
-3. for each agent, in document order: claim queued events, keep the ones its
-   source nodes name (`provider` + `event`, `*` matches all), run each through
-   the execution pipeline with the agent's prompt, its wired sinks and its
-   memory scope, then ack/fail; events no agent wanted are **released** back to
-   the queue without counting an attempt;
+3. claim up to `limit` events (default 5, `{ "limit": n }`) for the whole run,
+   then **fan out**: each event runs *every* agent whose sources name it
+   (`provider` + `event`, `*` matches all), with that agent's prompt, wired
+   sinks and memory scope. The event is settled once — ack only when every
+   agent succeeded, otherwise `/fail` (so the agents that succeeded run again on
+   the retry; sinks are not idempotent yet). Events no agent wanted are
+   **released** back to the queue without counting an attempt;
 4. one `run_audit` row records the document, the agents and the delivery ids
    each one consumed (`GET /runs/audit` on the coordinator lists them).
 
-Response: `{ ok, documentId, name, ran, failed, agents: [{ agentId, name, sources, sinks, runs, status, error? }] }`.
+Response: `{ ok, documentId, name, ran, events, failed, agents: [{ agentId, name, sources, sinks, runs, status, error? }] }`
+— `ran` counts agent executions (an event wired to two agents counts twice),
+`events` counts the events claimed and settled.
 
 Today's deterministic runtime can deliver `github-pr-review` and
 `github-issue-comment`; a sink type it does not know is ignored rather than
