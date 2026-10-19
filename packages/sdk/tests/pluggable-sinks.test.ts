@@ -230,7 +230,33 @@ test('CloudTelemetrySink: validates metrics and logs, buffers and exports', asyn
   assert.equal(logRes.success, true);
 
   assert.equal(telemetryEntries.length, 2);
-  assert.equal(sink.getBufferedEntries().length, 2);
+  // Exported entries are not retained in buffer (cloud-factory-cf-r628)
+  assert.equal(sink.getBufferedEntries().length, 0);
+
+  // Fallback to in-memory buffer when no exporter or broker permission
+  const fallbackSink = new CloudTelemetrySink({ maxBufferSize: 2 });
+  const bufferedMetric = await fallbackSink.handle(
+    { id: 'm1', type: 'telemetry:metric', payload: { metric: 'runs', value: 1 }, timestamp: 1 },
+    ctx,
+  );
+  assert.equal(bufferedMetric.success, true);
+  assert.deepEqual(bufferedMetric.result, { buffered: true });
+
+  const bufferedLog = await fallbackSink.handle(
+    { id: 'l1', type: 'telemetry:log', payload: { message: 'first' }, timestamp: 2 },
+    ctx,
+  );
+  assert.equal(bufferedLog.success, true);
+  assert.equal(fallbackSink.getBufferedEntries().length, 2);
+
+  // Verify maxBufferSize cap drops oldest
+  await fallbackSink.handle(
+    { id: 'l2', type: 'telemetry:log', payload: { message: 'second' }, timestamp: 3 },
+    ctx,
+  );
+  assert.equal(fallbackSink.getBufferedEntries().length, 2);
+  assert.equal(fallbackSink.getBufferedEntries()[0]!.payload.message, 'first');
+  assert.equal(fallbackSink.getBufferedEntries()[1]!.payload.message, 'second');
 
   // Test buffer disabled fails closed when no exporter or broker permission (fixes cloud-factory-cf-lj1)
   const unbufferedSink = new CloudTelemetrySink({ bufferInMemory: false });

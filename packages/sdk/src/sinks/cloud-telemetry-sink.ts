@@ -16,6 +16,7 @@ export interface CloudTelemetrySinkOptions {
   name?: string;
   exporter?: TelemetryExporter;
   bufferInMemory?: boolean;
+  maxBufferSize?: number;
 }
 
 export class CloudTelemetrySink implements ActionSink {
@@ -33,11 +34,24 @@ export class CloudTelemetrySink implements ActionSink {
     timestamp: number;
   }> = [];
   private readonly bufferInMemory: boolean;
+  private readonly maxBufferSize: number;
 
   constructor(options: CloudTelemetrySinkOptions = {}) {
     this.name = options.name ?? 'cloud-telemetry-sink';
     this.customExporter = options.exporter;
     this.bufferInMemory = options.bufferInMemory ?? true;
+    this.maxBufferSize = options.maxBufferSize ?? 1000;
+  }
+
+  private pushBuffer(entry: {
+    type: 'metric' | 'log';
+    payload: TelemetryMetricPayload | TelemetryLogPayload;
+    timestamp: number;
+  }): void {
+    if (this.buffer.length >= this.maxBufferSize) {
+      this.buffer.shift();
+    }
+    this.buffer.push(entry);
   }
 
   canHandle(action: SinkAction): boolean {
@@ -91,10 +105,6 @@ export class CloudTelemetrySink implements ActionSink {
         };
       }
 
-      if (this.bufferInMemory) {
-        this.buffer.push({ type: 'metric', payload, timestamp: action.timestamp });
-      }
-
       try {
         let result: Record<string, unknown> | undefined;
         if (this.customExporter) {
@@ -110,6 +120,7 @@ export class CloudTelemetrySink implements ActionSink {
             params: { type: 'metric', ...payload },
           });
         } else if (this.bufferInMemory) {
+          this.pushBuffer({ type: 'metric', payload, timestamp: action.timestamp });
           result = { buffered: true };
         } else {
           return {
@@ -165,10 +176,6 @@ export class CloudTelemetrySink implements ActionSink {
         };
       }
 
-      if (this.bufferInMemory) {
-        this.buffer.push({ type: 'log', payload, timestamp: action.timestamp });
-      }
-
       try {
         let result: Record<string, unknown> | undefined;
         if (this.customExporter) {
@@ -184,6 +191,7 @@ export class CloudTelemetrySink implements ActionSink {
             params: { type: 'log', ...payload },
           });
         } else if (this.bufferInMemory) {
+          this.pushBuffer({ type: 'log', payload, timestamp: action.timestamp });
           result = { buffered: true };
         } else {
           return {
