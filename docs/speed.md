@@ -74,7 +74,9 @@ contract:
   the others; a genuinely failing test stays red. Test files are recognised by vitest's
   own defaults, `*.test.*` and `*.spec.*` (bead `cloud-factory-cf-a5s`, `r0r`). A
   deleted last test does **not** vouch for a source change beside it: with no test files
-  left in the workspace that source is named as a failure, not skipped;
+  left in the workspace that source is named as a failure, not skipped. Source
+  validation runs before the selection report, so `--list` gives the same verdict as a
+  real run (bead `cloud-factory-cf-ryb`);
 - a test-file delta does **not** vouch for a source change in the same workspace: if the
   workspace's tests and sources reference that module nowhere, the source still fails by
   name, because a whole-suite run cannot invent a test for it (bead `cloud-factory-cf-9ef`);

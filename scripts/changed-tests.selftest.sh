@@ -144,6 +144,8 @@ export FAKE_SELECT="apps/web/test/a.test.ts"
 run_gate
 unset FAKE_SELECT
 check "a same-workspace test edit cannot mask an unreferenced source" 'test "$RC" -ne 0 && err_has "nothing in this workspace references" && err_has "apps/web/src/probe.ts"'
+run_gate --list
+check "--list reports the same failure for that delta (no rc split)" 'test "$RC" -ne 0 && err_has "apps/web/src/probe.ts"'
 reset_tree
 
 # 4c. ... while a source that its tests do import stays green in the same shape.
@@ -215,6 +217,8 @@ rm -rf "$FIX/apps/web/test"
 printf 'export const orphan = 1;\n' > "$FIX/apps/web/src/orphan.ts"
 run_gate
 check "a deleted last test cannot hide an uncovered source beside it" 'test "$RC" -ne 0 && err_has "apps/web has no test files left" && err_has "apps/web/src/orphan.ts"'
+run_gate --list
+check "--list agrees with run mode when tests are deleted under a source change" 'test "$RC" -ne 0 && err_has "apps/web has no test files left"'
 reset_tree
 
 # 9e. ... and the same delta with no source change stays the named no-op.

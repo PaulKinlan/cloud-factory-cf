@@ -258,45 +258,23 @@ for ws in "${WS_ORDER[@]}"; do
   [ -n "$ws_tests" ] || [ -n "$ws_sources" ] || continue
 
   if [ -n "$ws_tests" ]; then
-    # Checked before the --list report: a workspace whose tests were just deleted is a
-    # no-op, not a "whole suite" run that has nothing to pick up (cloud-factory-cf-a5s).
-    # A deleted last test does NOT vouch for the changed sources beside it: with no test
-    # files left they run no suite at all, whatever their references say (u8k review,
-    # cloud-factory-cf-9ef follow-up).
-    if ! has_test_files "$ws"; then
-      if [ -n "$ws_sources" ]; then
-        while IFS= read -r path; do
-          [ -n "$path" ] || continue
-          if is_declared "$path"; then
-            echo "changed-tests: DECLARED UNVERIFIED $path (no suite yet — cloud-factory-cf-5e8, cloud-factory-cf-d8s)"
-            continue
-          fi
-          echo "changed-tests: FAIL ${path} — ${ws} has no test files left, so this source change runs no suite" >&2
-          status=1
-        done <<< "$ws_sources"
-      else
-        echo "changed-tests: ${ws}: no test files remain — nothing to run (this delta removes the workspace's only coverage; say why on the bead)"
-      fi
-      noop_ws+=" ${ws}"
-      continue
-    fi
-    # Whole suite: a deleted or renamed test is never selected by `vitest --changed`,
-    # so asking for the delta would run nothing (cloud-factory-cf-8f1).
-    if [ "$LIST" -eq 1 ]; then
-      echo "changed-tests: ${ws}: whole suite (test-file delta)"
-      echo "$ws_tests" | grep -v '^$' | sed 's/^/  /'
-      continue
-    fi
-    echo "changed-tests: ${ws}: whole suite (test-file delta: $(echo "$ws_tests" | tr '\n' ' '))"
-    # A test edit in this workspace does not license an unreferenced source edit in it:
-    # the whole-suite run cannot establish that the source had any test.
-    if [ -n "$ws_sources" ] && [ "$kind" = "vitest" ]; then
+    # Source validation comes FIRST and in every mode, --list included: a test-file
+    # delta never vouches for the changed sources beside it (cloud-factory-cf-9ef), and
+    # a deleted last test leaves them nothing to run (cloud-factory-cf-u8k). --list used
+    # to report a clean selection here while the run mode failed the same delta
+    # (cloud-factory-cf-ryb).
+    ws_has_tests=1
+    has_test_files "$ws" || ws_has_tests=0
+    if [ -n "$ws_sources" ]; then
       unreferenced=""
       while IFS= read -r path; do
         [ -n "$path" ] || continue
         if is_declared "$path"; then
           echo "changed-tests: DECLARED UNVERIFIED $path (no suite yet — cloud-factory-cf-5e8, cloud-factory-cf-d8s)"
-        elif ! source_is_referenced "$ws" "$path"; then
+        elif [ "$ws_has_tests" -eq 0 ]; then
+          echo "changed-tests: FAIL ${path} — ${ws} has no test files left, so this source change runs no suite" >&2
+          status=1
+        elif [ "$kind" = "vitest" ] && ! source_is_referenced "$ws" "$path"; then
           unreferenced+="$path"$'\n'
         fi
       done <<< "$ws_sources"
@@ -306,6 +284,23 @@ for ws in "${WS_ORDER[@]}"; do
         status=1
       fi
     fi
+
+    if [ "$ws_has_tests" -eq 0 ]; then
+      # Nothing for the runner to pick up: name the lost coverage (a5s) and let the smoke
+      # set supply evidence from the workspaces that still have tests.
+      [ -n "$ws_sources" ] || echo "changed-tests: ${ws}: no test files remain — nothing to run (this delta removes the workspace's only coverage; say why on the bead)"
+      noop_ws+=" ${ws}"
+      continue
+    fi
+
+    # Whole suite: a deleted or renamed test is never selected by `vitest --changed`,
+    # so asking for the delta would run nothing (cloud-factory-cf-8f1).
+    if [ "$LIST" -eq 1 ]; then
+      echo "changed-tests: ${ws}: whole suite (test-file delta)"
+      echo "$ws_tests" | grep -v '^$' | sed 's/^/  /'
+      continue
+    fi
+    echo "changed-tests: ${ws}: whole suite (test-file delta: $(echo "$ws_tests" | tr '\n' ' '))"
     ran=$((ran + 1))
     if [ "$kind" = "vitest" ]; then (cd "$ws" && npx vitest run) || status=1
     else (cd "$ws" && npm test --silent) || status=1; fi
