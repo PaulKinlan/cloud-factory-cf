@@ -150,8 +150,6 @@ function loginOf(root: Record<string, unknown> | null): string | null {
   return typeof user === "string" ? user : null;
 }
 
-
-
 function hexToBytes(hex: string): Uint8Array<ArrayBuffer> | null {
   // Backed by a real ArrayBuffer (not ArrayBufferLike) so the result is a valid
   // BufferSource for `crypto.subtle.verify` under both the Workers and DOM libs
