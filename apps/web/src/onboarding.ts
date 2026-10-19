@@ -300,8 +300,9 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
       };
       if (data.ok && Array.isArray(data.repositories) && data.repositories.length > 0) {
         repoSelect.innerHTML = '<option value="">-- Choose an authorized repository --</option>';
+        const doc = (root as Document).createElement ? (root as Document) : (root.ownerDocument ?? (typeof document !== "undefined" ? document : null));
         for (const r of data.repositories) {
-          const opt = document.createElement("option");
+          const opt = doc ? doc.createElement("option") : document.createElement("option");
           opt.value = r.fullName;
           opt.textContent = r.fullName;
           repoSelect.appendChild(opt);
