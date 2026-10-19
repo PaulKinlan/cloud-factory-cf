@@ -19,6 +19,22 @@ github-pr-review sink → github:pr.review (broker: POST the review comment)
 queue ack  → the event is `processed`
 ```
 
+### What starts it
+
+The webhook's own delivery is what starts the review. Ingesting a delivery arms the
+repository's Durable Object alarm (`DRAIN_COALESCE_MS`, 1s), the alarm drains what is
+due, and the queue settles the event. A burst of deliveries coalesces into one pass.
+Nothing external has to poke the deployment.
+
+`POST /runs/:owner/:repo` still exists and calls the same drain: it is the manual
+lever for an operator, a test, or a stopgap cron, not a prerequisite. Before
+`cloud-factory-cf-7or.1` it was the *only* caller, so a webhook alone produced a
+queue row and no review.
+
+Inside the alarm the pipeline is called **in process** rather than through a stub to
+the coordinator's own Durable Object: an object that awaits a fetch to itself
+deadlocks, because it cannot serve the inner request while the outer one blocks.
+
 Nothing in the reviewer holds a credential. Every provider call is an action from
 the broker's closed policy table (`apps/worker/src/credentials/policy.ts`), so an
 agent prompt — or a model reading a hostile diff — cannot name a host, a method or

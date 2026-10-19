@@ -9,6 +9,8 @@ export const DEFAULT_VISIBILITY_MS = 60_000;
 /** Exponential-ish backoff between attempts: attempt * this, capped below. */
 const RETRY_BACKOFF_MS = 2_000;
 const RETRY_BACKOFF_CAP_MS = 60_000;
+/** How long a due event waits, so a burst of deliveries becomes one drain pass. */
+export const DRAIN_COALESCE_MS = 1_000;
 
 export interface AlarmScheduler {
   setAlarm(timestamp: number): Promise<void>;
@@ -457,23 +459,39 @@ export class EventQueue {
    * Schedule a wake-up for the next lease expiry or retry backoff. Rows that are
    * already due are left to the runner: arming an alarm for "now" would spin.
    */
+  /** True when an event is due now, which is what tells the alarm to drain. */
+  hasDue(now: string = new Date().toISOString()): boolean {
+    const rows = this.sql
+      .exec<{ due: number }>(
+        "SELECT COUNT(*) AS due FROM events WHERE status = 'pending' AND available_at <= ?",
+        now,
+      )
+      .toArray();
+    return (rows[0]?.due ?? 0) > 0;
+  }
+
+  /**
+   * Arms the alarm for the next thing that needs work, **including work that is due
+   * now**. The old query only looked at `available_at > now`, so a fresh delivery
+   * (due immediately) armed nothing and nothing ever woke to drain it — which is why
+   * a webhook alone produced no review (cloud-factory-cf-7or.1).
+   */
   async armAlarm(): Promise<void> {
     if (!this.alarmScheduler) return;
 
-    const now = new Date().toISOString();
     const next = this.sql
       .exec<{ next: string | null }>(
-        `SELECT MIN(available_at) AS next FROM events
-         WHERE status IN ('pending', 'processing') AND available_at > ?`,
-        now,
+        "SELECT MIN(available_at) AS next FROM events WHERE status IN ('pending', 'processing')",
       )
       .one().next;
 
-    if (next) {
-      await this.alarmScheduler.setAlarm(Date.parse(next) + 1_000);
-    } else {
+    if (next === null) {
       await this.alarmScheduler.deleteAlarm();
+      return;
     }
+    // A due event is drained after a short delay, so a burst of deliveries coalesces
+    // into one pass instead of one wake-up per webhook.
+    await this.alarmScheduler.setAlarm(Math.max(Date.now() + DRAIN_COALESCE_MS, Date.parse(next) + 1_000));
   }
 }
 
