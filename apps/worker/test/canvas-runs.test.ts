@@ -330,7 +330,7 @@ describe("canvas findings (xkg, mj7, olu)", () => {
     expect(sinksFor(undefined).map((sink) => sink.name)).toEqual(["github-pr-review-sink", "github-issue-comment-sink"]);
   });
 
-  it("releases matched events beyond the limit instead of leaving them on a lease", async () => {
+  it("claims only what the run will process, so nothing sits on a lease", async () => {
     const repository = "acme/canvas-limit";
     await provision(repository, "pr.review");
     const documentId = await storeDocument(repository, wiredLayout(), "Limited");
@@ -346,8 +346,8 @@ describe("canvas findings (xkg, mj7, olu)", () => {
     expect(report.agents[0]?.runs[0]?.settled).toBe(true);
     expect(calls).toHaveLength(1);
 
-    // The second delivery is back on the queue, not stuck processing with an
-    // attempt spent.
+    // The second delivery was never claimed: a run claims `limit` events for the
+    // whole document, so there is nothing left on a lease and no attempt spent.
     const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
     const stats = await coordinator.fetch("https://repo-coordinator.internal/stats");
     const counts = ((await stats.json()) as { counts?: Record<string, number> }).counts ?? {};
@@ -395,5 +395,77 @@ describe("canvas findings (xkg, mj7, olu)", () => {
     const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
     const repoMemory = await coordinator.fetch("https://repo-coordinator.internal/memory?scope=repo");
     expect(((await repoMemory.json()) as { total?: number }).total ?? 0).toBe(0);
+  });
+});
+
+describe("fan-out: one event, several agents (cloud-factory-cf-sdq)", () => {
+  function twoAgentLayout(): Record<string, unknown> {
+    return layout(
+      [
+        {
+          id: "n-source",
+          kind: "source",
+          label: "Pull requests",
+          config: { provider: "github", event: "pull_request" },
+        },
+        { id: "n-reviewer", kind: "agent", label: "Reviewer", config: { prompt: "Review the change.", model: "m" } },
+        { id: "n-docs", kind: "agent", label: "Docs checker", config: { prompt: "Check the docs.", model: "m" } },
+        { id: "n-sink-a", kind: "sink", label: "Review", config: { type: "github-pr-review" } },
+      ],
+      [
+        ["n-source", "n-reviewer"],
+        ["n-source", "n-docs"],
+        ["n-reviewer", "n-sink-a"],
+        ["n-docs", "n-sink-a"],
+      ],
+    );
+  }
+
+  it("runs every agent the event is wired to, and settles the event once", async () => {
+    const repository = "acme/canvas-fanout";
+    await provision(repository, "pr.review");
+    const documentId = await storeDocument(repository, twoAgentLayout(), "Two agents");
+    await enqueue(repository, "fan-1", pullRequest(repository, 41));
+    const { calls } = stubUpstream();
+
+    const report = (await (await runDocument(repository, documentId)).json()) as {
+      ran: number;
+      events: number;
+      failed: number;
+      agents: Array<{ agentId: string; status: string; runs: Array<{ deliveryId: string; settled: boolean }> }>;
+    };
+    expect(report).toMatchObject({ ran: 2, events: 1, failed: 0 });
+    expect(report.agents.map((agent) => agent.agentId)).toEqual(["n-reviewer", "n-docs"]);
+    for (const agent of report.agents) {
+      expect(agent.status).toBe("ran");
+      expect(agent.runs).toHaveLength(1);
+      expect(agent.runs[0]).toMatchObject({ deliveryId: "fan-1", settled: true });
+    }
+    // Both agents acted on the same event.
+    expect(calls).toHaveLength(2);
+    // The event was settled once: it is processed, not pending or processing.
+    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+    const stats = await coordinator.fetch("https://repo-coordinator.internal/stats");
+    const counts = ((await stats.json()) as { counts?: Record<string, number> }).counts ?? {};
+    expect(counts["processed"]).toBe(1);
+    expect(counts["processing"] ?? 0).toBe(0);
+  });
+
+  it("leaves the event queued when the layout has no agent for it", async () => {
+    const repository = "acme/canvas-fanout-none";
+    const documentId = await storeDocument(
+      repository,
+      wiredLayout({ provider: "gitlab", event: "merge_request" }),
+      "Gitlab only",
+    );
+    await enqueue(repository, "fan-2", pullRequest(repository, 42));
+    stubUpstream();
+
+    const report = (await (await runDocument(repository, documentId)).json()) as { ran: number; events: number };
+    expect(report).toMatchObject({ ran: 0, events: 0 });
+    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+    const stats = await coordinator.fetch("https://repo-coordinator.internal/stats");
+    const counts = ((await stats.json()) as { counts?: Record<string, number> }).counts ?? {};
+    expect(counts["pending"]).toBe(1);
   });
 });
