@@ -384,7 +384,7 @@ export class EventQueue {
     }
 
     const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
-    const query = `SELECT ${EVENT_COLUMNS} FROM events${where} ORDER BY received_at DESC LIMIT ?`;
+    const query = `SELECT ${EVENT_COLUMNS} FROM events${where} ORDER BY received_at DESC, delivery_id DESC LIMIT ?`;
     params.push(limit);
 
     const rows = this.sql.exec<EventRow>(query, ...params).toArray();

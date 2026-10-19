@@ -74,10 +74,10 @@ describe("audit route authentication", () => {
 });
 
 describe("DO event audit log API", () => {
-  const repository = "audit/events-test";
   const authHeaders = { "x-factory-control-key": controlKey };
 
   it("returns empty event list with zero counts when no events exist", async () => {
+    const repository = "audit/empty-test";
     const res = await callAudit(`/audit/events/${repository}`, authHeaders);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -95,12 +95,13 @@ describe("DO event audit log API", () => {
   });
 
   it("lists ingested events with status breakdown and filters", async () => {
+    const repository = "audit/list-test";
     // Ingest two webhook events
-    const req1 = await githubRequest("deliv-audit-1", repository);
+    const req1 = await githubRequest("deliv-list-1", repository);
     const res1 = await SELF.fetch(req1);
     expect(res1.status).toBe(202);
 
-    const req2 = await githubRequest("deliv-audit-2", repository);
+    const req2 = await githubRequest("deliv-list-2", repository);
     const res2 = await SELF.fetch(req2);
     expect(res2.status).toBe(202);
 
@@ -116,7 +117,7 @@ describe("DO event audit log API", () => {
     expect(listBody.ok).toBe(true);
     expect(listBody.count).toBe(2);
     expect(listBody.stats["pending"]).toBe(2);
-    expect(listBody.events.map((e) => e.deliveryId)).toEqual(["deliv-audit-2", "deliv-audit-1"]);
+    expect(listBody.events.map((e) => e.deliveryId)).toEqual(["deliv-list-2", "deliv-list-1"]);
 
     // Filter by limit
     const limitRes = await callAudit(`/audit/events/${repository}?limit=1`, authHeaders);
@@ -125,10 +126,10 @@ describe("DO event audit log API", () => {
     expect(limitBody.events).toHaveLength(1);
 
     // Filter by deliveryId
-    const delivRes = await callAudit(`/audit/events/${repository}?deliveryId=deliv-audit-1`, authHeaders);
+    const delivRes = await callAudit(`/audit/events/${repository}?deliveryId=deliv-list-1`, authHeaders);
     const delivBody = (await delivRes.json()) as { count: number; events: Array<{ deliveryId: string }> };
     expect(delivBody.count).toBe(1);
-    expect(delivBody.events[0]?.deliveryId).toBe("deliv-audit-1");
+    expect(delivBody.events[0]?.deliveryId).toBe("deliv-list-1");
 
     // Filter by status (none processed yet)
     const procRes = await callAudit(`/audit/events/${repository}?status=processed`, authHeaders);
@@ -137,21 +138,27 @@ describe("DO event audit log API", () => {
   });
 
   it("provides detailed audit for a single event including payload and agent deliveries", async () => {
+    const repository = "audit/detail-test";
+    const deliveryId = "deliv-detail-1";
+    const req = await githubRequest(deliveryId, repository);
+    const queued = await SELF.fetch(req);
+    expect(queued.status).toBe(202);
+
     const stub = coordinator(repository);
 
-    // Claim and complete a delivery record for deliv-audit-1 to simulate agent delivery
+    // Claim and complete a delivery record for deliv-detail-1 to simulate agent delivery
     await stub.fetch(`${BASE}/deliveries/claim`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ deliveryId: "deliv-audit-1", agentId: "reviewer" }),
+      body: JSON.stringify({ deliveryId, agentId: "reviewer" }),
     });
     await stub.fetch(`${BASE}/deliveries/complete`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ deliveryId: "deliv-audit-1", agentId: "reviewer", status: "delivered" }),
+      body: JSON.stringify({ deliveryId, agentId: "reviewer", status: "delivered" }),
     });
 
-    const res = await callAudit(`/audit/events/${repository}/deliv-audit-1`, authHeaders);
+    const res = await callAudit(`/audit/events/${repository}/${deliveryId}`, authHeaders);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       ok: boolean;
@@ -168,7 +175,7 @@ describe("DO event audit log API", () => {
     };
     expect(body.ok).toBe(true);
     expect(body.repository).toBe(repository);
-    expect(body.event.deliveryId).toBe("deliv-audit-1");
+    expect(body.event.deliveryId).toBe(deliveryId);
     expect(body.event.provider).toBe("github");
     expect(body.event.payload).toBeDefined();
     expect(body.deliveries).toHaveLength(1);
@@ -180,6 +187,7 @@ describe("DO event audit log API", () => {
   });
 
   it("returns 404 for a non-existent event deliveryId", async () => {
+    const repository = "audit/notfound-test";
     const res = await callAudit(`/audit/events/${repository}/non-existent`, authHeaders);
     expect(res.status).toBe(404);
     const body = (await res.json()) as { ok: boolean; error: string };
@@ -188,6 +196,11 @@ describe("DO event audit log API", () => {
   });
 
   it("returns status counts via the /stats subroute", async () => {
+    const repository = "audit/stats-test";
+    const req = await githubRequest("deliv-stats-1", repository);
+    const queued = await SELF.fetch(req);
+    expect(queued.status).toBe(202);
+
     const res = await callAudit(`/audit/events/${repository}/stats`, authHeaders);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -198,10 +211,11 @@ describe("DO event audit log API", () => {
     expect(body.ok).toBe(true);
     expect(body.repository).toBe(repository);
     expect(typeof body.stats).toBe("object");
-    expect(body.stats["pending"]).toBeGreaterThanOrEqual(1);
+    expect(body.stats["pending"]).toBe(1);
   });
 
   it("lists canvas run audits via /audit/runs", async () => {
+    const repository = "audit/runs-test";
     const stub = coordinator(repository);
     await stub.fetch(`${BASE}/runs/audit`, {
       method: "POST",
@@ -223,10 +237,16 @@ describe("DO event audit log API", () => {
     };
     expect(body.ok).toBe(true);
     expect(body.repository).toBe(repository);
-    expect(body.count).toBeGreaterThanOrEqual(1);
+    expect(body.count).toBe(1);
     const run = body.runs.find((r) => r.documentId === "doc-canvas-1");
     expect(run).toBeDefined();
     expect(run?.name).toBe("Security review canvas");
     expect(run?.agents).toBe(1);
+  });
+
+  it("returns 404 for /audit/runs with subpath id", async () => {
+    const repository = "audit/runs-test";
+    const res = await callAudit(`/audit/runs/${repository}/extra-id`, authHeaders);
+    expect(res.status).toBe(404);
   });
 });
