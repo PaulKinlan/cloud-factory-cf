@@ -16,5 +16,8 @@
     "typescript": "^5.9.3",
     "vite": "^8.3.4",
     "vitest": "^4.1.12"
+  },
+  "dependencies": {
+    "@factory-cloud/canvas-model": "^0.1.0"
   }
 }
