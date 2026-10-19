@@ -27,6 +27,19 @@
         <button type="button" id="clear" class="button button--danger">Clear</button>
       </div>
 
+      <button
+        type="button"
+        id="repo-pill"
+        class="repo-pill"
+        aria-haspopup="dialog"
+        aria-expanded="false"
+        aria-controls="connect-dialog"
+        title="Repository connection"
+      >
+        <span class="repo-pill__dot" aria-hidden="true"></span>
+        <span class="repo-pill__label" data-tone="muted">No repository</span>
+      </button>
+
       <div class="zoom" role="group" aria-label="Zoom">
         <button type="button" id="zoom-out" class="button button--icon" aria-label="Zoom out">−</button>
         <output id="zoom-level" aria-live="off">100%</output>
@@ -167,6 +180,44 @@
         </section>
       </section>
     </main>
+
+    <dialog id="connect-dialog" class="export-dialog connect-dialog" aria-label="Connect a GitHub repository">
+      <h2>Connect GitHub</h2>
+      <p class="muted">
+        A repository is connected when its webhook reaches the factory. Install the app, then point the
+        repository's webhook at the URL below — GitHub sends a ping the moment the hook is created.
+      </p>
+      <div class="share-form">
+        <label class="field">
+          <span>Owner</span>
+          <input id="connect-owner" type="text" placeholder="owner or organisation" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>Repository</span>
+          <input id="connect-repo" type="text" placeholder="repo" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>Control key</span>
+          <input id="connect-key" type="password" autocomplete="off" placeholder="not stored on this device" />
+        </label>
+      </div>
+      <label class="field">
+        <span>Webhook URL (payload URL)</span>
+        <input id="connect-url" type="text" readonly />
+      </label>
+      <div class="dialog-actions share-actions">
+        <a id="connect-install" class="button" href="https://github.com/apps/cloud-factory/installations/new" target="_blank" rel="noopener noreferrer">Install GitHub App</a>
+        <button type="button" id="connect-copy" class="button button--ghost">Copy webhook URL</button>
+        <button type="button" id="connect-check" class="button button--ghost">Check connection</button>
+        <button type="button" id="connect-close" class="button button--ghost">Close</button>
+      </div>
+      <p id="connect-status" class="connect-status connect-status--muted" role="status" aria-live="polite">Not checked yet</p>
+      <p class="muted">
+        The control key stays in this page. Your webhook secret is set when you create the hook in GitHub and is
+        never typed here.
+      </p>
+      <span id="connect-announcer" class="sr-only" aria-live="polite"></span>
+    </dialog>
 
     <dialog id="share-dialog" class="export-dialog share-dialog" aria-label="Store this canvas with a repository">
       <h2>Repository documents</h2>

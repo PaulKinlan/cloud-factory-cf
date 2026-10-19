@@ -14,6 +14,7 @@ import {
   type ShareTarget,
 } from "./sync";
 import { initObservability } from "./observability";
+import { mountConnectGate } from "./onboarding";
 import {
   KIND_LABELS,
   NODE_HEIGHT,
@@ -879,6 +880,18 @@ fieldLabel.addEventListener("input", () => {
 if (storedCanvas === null) fitToContent();
 render();
 announce(`Canvas ready with ${doc.nodes.length} nodes`);
+
+// The repository gate: the header pill owns the scope, and the panels that need a
+// repository (share, observability) start from whatever the operator connected.
+mountConnectGate(document, {
+  appSlug: "cloud-factory",
+  onScope: (scope) => {
+    // Prefill, never overwrite: an operator may already have typed a scope.
+    if (scope !== null && shareRepository.value.trim() === "") {
+      shareRepository.value = `${scope.owner}/${scope.repo}`;
+    }
+  },
+});
 
 const obsPanel = document.getElementById("observability-panel");
 const obsToggle = document.getElementById("observability-toggle");
