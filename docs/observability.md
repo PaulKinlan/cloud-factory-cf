@@ -73,7 +73,9 @@ WS /trace/:owner/:repo/socket?key=<BROKER_CONTROL_KEY>
 
 The socket is accepted with `ctx.acceptWebSocket`, so the Durable Object hibernates
 while watchers stay connected instead of billing for idle tabs. Sending `ping` gets
-`{"type":"pong"}`; the stream itself is read-only.
+`{"type":"pong","at":"…"}` **on the socket that pinged** (not to every watcher: a
+broadcast pong cannot prove that your connection is alive); the stream itself is
+read-only. A socket that errors is closed rather than left for the runtime to reap.
 
 Verified end to end against `wrangler dev` (local Durable Objects): a signed webhook
 plus `POST /runs/:owner/:repo` produced `claimed → facts → agent → agent → settled`,
@@ -86,6 +88,28 @@ the socket delivered `hello` (5 recent rows) followed by live `step` messages, a
 thought stream (socket, with polling fallback when the socket cannot connect), an
 artifact inspector for the selected step, and the cost HUD. The control key is typed
 into the panel and kept in memory only — it is never written to `localStorage`.
+
+### Heartbeat and reconnection
+
+An open socket is not the same thing as a live one: a dropped TCP connection, a
+restarted Durable Object or a sleeping laptop can leave `readyState` saying OPEN while
+no step ever arrives again. The panel therefore probes the stream:
+
+| Setting | Value | Meaning |
+|---|---|---|
+| `HEARTBEAT_MS` | 15s | how often an open socket is sent `ping` |
+| `PONG_TIMEOUT_MS` | 15s | how long one unanswered ping may stand before the socket is assumed dead |
+| `RECONNECT_BASE_MS` / `RECONNECT_MAX_MS` | 1s / 30s | exponential backoff, doubling per attempt |
+
+When a ping goes unanswered (or the socket errors, closes, or never finishes opening)
+the panel closes it, **keeps polling so the rows stay current**, and reconnects with
+backoff. The status line says which of those it is doing — `live · 12 step(s) ·
+heartbeat 3s ago`, `reconnecting (attempt 2, retry in 2s) · heartbeat lost…` — and a
+**Reconnect** button retries immediately instead of waiting out the backoff. Attempts
+reset once the new socket answers a ping (an `open` that never answers must not
+forgive a flapping socket, or the retry becomes a one-second loop); a `401` fails closed rather than retrying a key that will
+never be accepted. `pagehide` and Disconnect clear the poll, heartbeat and retry
+timers.
 
 ## Operator example
 

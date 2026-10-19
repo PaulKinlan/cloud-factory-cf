@@ -199,17 +199,30 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
   }
 
-  /** A viewer that talks to the socket: the stream is read-only, so ignore input. */
-  override async webSocketMessage(_ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+  /**
+   * A viewer that talks to the socket: the stream is read-only, so the only
+   * accepted input is a heartbeat. The pong goes back to the socket that pinged
+   * and never to every watcher, because a broadcast pong cannot prove that
+   * *your* connection is alive, which is the whole point of the heartbeat
+   * (cloud-factory-cf-2ng.6).
+   */
+  override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (typeof message === "string" && message.trim() === "ping") {
       // Kept small and explicit: a browser cannot send a protocol-level ping.
-      for (const socket of this.ctx.getWebSockets()) {
-        try {
-          socket.send(JSON.stringify({ type: "pong", at: new Date().toISOString() }));
-        } catch {
-          /* closed */
-        }
+      try {
+        ws.send(JSON.stringify({ type: "pong", at: new Date().toISOString() }));
+      } catch {
+        /* closed: the runtime drops the socket */
       }
+    }
+  }
+
+  /** A socket that errored is closed rather than left for the runtime to reap. */
+  override async webSocketError(ws: WebSocket): Promise<void> {
+    try {
+      ws.close();
+    } catch {
+      /* already closed */
     }
   }
 

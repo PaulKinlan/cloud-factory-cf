@@ -145,7 +145,26 @@ export function traceUrls(base: string, owner: string, repo: string, key: string
   };
 }
 
-export type SessionStatus = "idle" | "connecting" | "live" | "polling" | "error";
+export type SessionStatus = "idle" | "connecting" | "live" | "polling" | "reconnecting" | "error";
+
+/** How often an open socket is pinged. The Worker answers `ping` with `pong`. */
+export const HEARTBEAT_MS = 15_000;
+/** How long one ping may stay unanswered before the socket is treated as dead. */
+export const PONG_TIMEOUT_MS = 15_000;
+/** First reconnect delay; it doubles per attempt up to RECONNECT_MAX_MS. */
+export const RECONNECT_BASE_MS = 1_000;
+export const RECONNECT_MAX_MS = 30_000;
+
+/**
+ * Delay before reconnect attempt `attempt` (1-based): exponential with a hard
+ * ceiling, so a Worker that is down for an hour is retried every 30s instead of
+ * in a tight loop, and a tab left open overnight does not hammer it.
+ */
+export function reconnectDelay(attempt: number, base = RECONNECT_BASE_MS, max = RECONNECT_MAX_MS): number {
+  if (!Number.isFinite(attempt) || attempt < 1) return base;
+  const delay = base * 2 ** Math.min(30, Math.trunc(attempt) - 1);
+  return Math.min(max, Math.max(base, delay));
+}
 
 export interface SessionState {
   status: SessionStatus;
@@ -153,12 +172,24 @@ export interface SessionState {
   usage: Usage | null;
   selectedId: string | null;
   error: string | null;
+  /** Epoch ms of the last message the socket delivered, or null when none has. */
+  lastMessageAt: number | null;
+  /** Epoch ms of the last `pong`: proof the connection is alive in both directions. */
+  lastPongAt: number | null;
+  /** Consecutive reconnect attempts since the last healthy socket (0 while live). */
+  reconnectAttempts: number;
+  /** Epoch ms when the next reconnect fires, or null when none is scheduled. */
+  nextRetryAt: number | null;
 }
 
 export interface SocketLike {
   addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
   addEventListener(type: "error" | "close" | "open", listener: () => void): void;
   close(): void;
+  /** Optional: a socket without `send` cannot be pinged, so idleness is watched instead. */
+  send?(data: string): void;
+  /** `1` is OPEN in the WebSocket API; absent on fakes, which are assumed usable. */
+  readonly readyState?: number;
 }
 
 export interface SessionOptions {
@@ -173,6 +204,14 @@ export interface SessionOptions {
   stepCap?: number;
   /** How many steps to ask the trace route for (the panel's Limit field). */
   limit?: number;
+  /** Heartbeat cadence; 0 disables the heartbeat for a session that only polls. */
+  heartbeatMs?: number;
+  /** How long one outstanding ping may stay unanswered. */
+  pongTimeoutMs?: number;
+  reconnectBaseMs?: number;
+  reconnectMaxMs?: number;
+  /** Injectable clock, so staleness is testable without waiting on real time. */
+  now?: () => number;
 }
 
 /**
@@ -180,15 +219,53 @@ export interface SessionOptions {
  * when it cannot connect (a proxy that blocks upgrades, a tab restored from a
  * background state) the session polls the same rows, so the panel degrades
  * instead of going blank.
+ *
+ * A socket that is open is not necessarily alive: a dropped TCP connection, a
+ * hibernated Durable Object or a sleeping laptop can all leave a `readyState`
+ * that still says OPEN while no step ever arrives again. So the session pings on
+ * a timer, treats an unanswered ping as death, and reconnects with backoff while
+ * polling keeps the rows flowing in the meantime (cloud-factory-cf-2ng.6).
  */
 export class ObservabilitySession {
-  state: SessionState = { status: "idle", steps: [], usage: null, selectedId: null, error: null };
+  state: SessionState = {
+    status: "idle",
+    steps: [],
+    usage: null,
+    selectedId: null,
+    error: null,
+    lastMessageAt: null,
+    lastPongAt: null,
+    reconnectAttempts: 0,
+    nextRetryAt: null,
+  };
   private socket: SocketLike | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
-  private options: Required<Pick<SessionOptions, "pollMs" | "stepCap">> & SessionOptions;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The ping we are still waiting on; one outstanding ping at a time. */
+  private pendingPingAt: number | null = null;
+  /** True from connect() until disconnect(): a viewer who stopped gets no retries. */
+  private desired = false;
+  private options: Required<
+    Pick<SessionOptions, "pollMs" | "stepCap" | "heartbeatMs" | "pongTimeoutMs" | "reconnectBaseMs" | "reconnectMaxMs">
+  > &
+    SessionOptions;
 
   constructor(options: SessionOptions) {
-    this.options = { pollMs: 3000, stepCap: 200, limit: DEFAULT_LIMIT, ...options };
+    this.options = {
+      pollMs: 3000,
+      stepCap: 200,
+      limit: DEFAULT_LIMIT,
+      heartbeatMs: HEARTBEAT_MS,
+      pongTimeoutMs: PONG_TIMEOUT_MS,
+      reconnectBaseMs: RECONNECT_BASE_MS,
+      reconnectMaxMs: RECONNECT_MAX_MS,
+      ...options,
+    };
+  }
+
+  private now(): number {
+    return this.options.now?.() ?? Date.now();
   }
 
   private update(patch: Partial<SessionState>): void {
@@ -207,7 +284,18 @@ export class ObservabilitySession {
 
   async connect(): Promise<void> {
     this.disconnect();
-    this.update({ status: "connecting", error: null });
+    this.desired = true;
+    await this.open();
+  }
+
+  /** One connection attempt: read the seed rows, then open the socket. */
+  private async open(): Promise<void> {
+    if (!this.desired) return;
+    this.update({
+      status: this.state.reconnectAttempts === 0 ? "connecting" : "reconnecting",
+      error: null,
+      nextRetryAt: null,
+    });
     const urls = traceUrls(this.options.base, this.options.owner, this.options.repo, this.options.key, this.options.limit);
     const headers = { "x-factory-control-key": this.options.key };
     try {
@@ -215,22 +303,29 @@ export class ObservabilitySession {
         this.fetchImpl(urls.usage, { headers }),
         this.fetchImpl(urls.trace, { headers }),
       ]);
+      // A disconnect (or a newer connect) while the reads were in flight wins.
+      if (!this.desired) return;
       if (usageResponse.status === 401 || traceResponse.status === 401) {
-        this.update({ status: "error", error: "control key rejected (401)" });
+        // A rejected key does not fix itself, so fail closed instead of retry-looping.
+        this.desired = false;
+        this.stopPolling();
+        this.update({ status: "error", error: "control key rejected (401)", nextRetryAt: null });
         return;
       }
       if (!usageResponse.ok || !traceResponse.ok) {
-        this.update({ status: "error", error: `trace request failed (${usageResponse.status}/${traceResponse.status})` });
+        this.retry(`trace request failed (${usageResponse.status}/${traceResponse.status})`);
         return;
       }
       const usage = (await usageResponse.json()) as { usage?: Usage };
       const trace = (await traceResponse.json()) as { steps?: TraceStep[] };
+      if (!this.desired) return;
       this.update({
         usage: usage.usage ?? null,
         steps: (trace.steps ?? []).slice(0, this.options.stepCap),
       });
     } catch (error) {
-      this.update({ status: "error", error: `could not read the trace: ${message(error)}` });
+      if (!this.desired) return;
+      this.retry(`could not read the trace: ${message(error)}`);
       return;
     }
 
@@ -250,31 +345,149 @@ export class ObservabilitySession {
       this.startPolling();
       return;
     }
+    let socket: SocketLike;
     try {
-      const socket = factory(url);
-      this.socket = socket;
-      // Every listener checks it still owns the session: a socket that errors or
-      // closes after Disconnect must not restart polling behind the user's back.
-      const current = (): boolean => this.socket === socket;
-      socket.addEventListener("open", () => {
-        if (current()) this.update({ status: "live", error: null });
-      });
-      socket.addEventListener("message", (event) => {
-        if (current()) this.ingest(event.data);
-      });
-      socket.addEventListener("error", () => {
-        if (!current()) return;
-        this.stopPolling();
-        this.startPolling();
-      });
-      socket.addEventListener("close", () => {
-        if (!current()) return;
-        this.socket = null;
-        if (this.state.status === "live") this.startPolling();
-      });
-    } catch {
-      this.startPolling();
+      socket = factory(url);
+    } catch (error) {
+      this.retry(`could not open the socket: ${message(error)}`);
+      return;
     }
+    this.socket = socket;
+    // Every listener checks it still owns the session: a socket that errors or
+    // closes after Disconnect must not restart polling behind the user's back.
+    const current = (): boolean => this.socket === socket;
+    socket.addEventListener("open", () => {
+      if (!current()) return;
+      this.stopPolling();
+      this.pendingPingAt = null;
+      // `lastPongAt` belongs to the socket that answered it, not to this one: a
+      // fresh connection must not inherit an old heartbeat (2ng.6).
+      this.update({ status: "live", error: null, nextRetryAt: null, lastPongAt: null });
+      this.startHeartbeat();
+    });
+    socket.addEventListener("message", (event) => {
+      if (current()) this.ingest(event.data);
+    });
+    socket.addEventListener("error", () => {
+      if (!current()) return;
+      this.drop(socket, "socket error");
+    });
+    socket.addEventListener("close", () => {
+      if (!current()) return;
+      this.drop(socket, "socket closed");
+    });
+    // Also watch a socket that never opens: a handshake that hangs would
+    // otherwise leave the panel "connecting" forever with no retry.
+    this.startHeartbeat();
+  }
+
+  /**
+   * The socket is gone. Close it, then degrade to polling and schedule a retry:
+   * the stream is the primary source, but a stale tab that still claims to be
+   * live is worse than one that says it is reconnecting.
+   */
+  private drop(socket: SocketLike, reason: string): void {
+    this.stopHeartbeat();
+    this.pendingPingAt = null;
+    this.socket = null;
+    try {
+      socket.close();
+    } catch {
+      /* already closed */
+    }
+    if (!this.desired) return;
+    this.retry(reason);
+  }
+
+  /** Degrade to polling now, and try the socket again after a backoff. */
+  private retry(reason: string): void {
+    if (!this.desired) return;
+    this.stopHeartbeat();
+    this.pendingPingAt = null;
+    const attempt = this.state.reconnectAttempts + 1;
+    const delay = reconnectDelay(attempt, this.options.reconnectBaseMs, this.options.reconnectMaxMs);
+    // Polling keeps the rows current while the socket is down; the status still
+    // says "reconnecting", because the socket is what the panel wants back.
+    this.startPolling();
+    this.update({
+      status: "reconnecting",
+      error: reason,
+      reconnectAttempts: attempt,
+      nextRetryAt: this.now() + delay,
+    });
+    if (this.retryTimer !== null) clearTimeout(this.retryTimer);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.open();
+    }, delay);
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    const every = this.options.heartbeatMs;
+    if (every <= 0) return;
+    this.heartbeatTimer = setInterval(() => this.beat(), every);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  /**
+   * One heartbeat tick. A socket that cannot be pinged (no `send`) is judged by
+   * message idleness instead, so the panel still notices a silent stream.
+   */
+  private beat(): void {
+    const socket = this.socket;
+    if (socket === null) return;
+    const now = this.now();
+    if (this.pendingPingAt !== null) {
+      if (now - this.pendingPingAt >= this.options.pongTimeoutMs) {
+        this.drop(socket, `heartbeat lost: no pong within ${Math.round(this.options.pongTimeoutMs / 1000)}s`);
+        return;
+      }
+      return; // Still waiting on the outstanding ping: do not stack them up.
+    }
+    if (typeof socket.send !== "function") {
+      const last = this.state.lastMessageAt;
+      if (last !== null && now - last >= this.options.pongTimeoutMs) {
+        this.drop(socket, `stream idle: no message within ${Math.round(this.options.pongTimeoutMs / 1000)}s`);
+      }
+      return;
+    }
+    if (socket.readyState !== undefined && socket.readyState !== 1) return; // not OPEN yet
+    try {
+      socket.send("ping");
+      this.pendingPingAt = now;
+    } catch {
+      this.drop(socket, "could not send a heartbeat");
+    }
+  }
+
+  /** Retry now (the panel's Reconnect button), cancelling any scheduled wait. */
+  async reconnect(): Promise<void> {
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.stopHeartbeat();
+    this.pendingPingAt = null;
+    this.stopPolling();
+    const socket = this.socket;
+    this.socket = null;
+    if (socket) {
+      try {
+        socket.close();
+      } catch {
+        /* already closed */
+      }
+    }
+    this.desired = true;
+    this.update({ reconnectAttempts: 0, nextRetryAt: null });
+    await this.open();
   }
 
   /** Re-point the session at another repository (the panel's form). */
@@ -294,13 +507,30 @@ export class ObservabilitySession {
     }
     if (typeof message !== "object" || message === null) return;
     const shape = message as { type?: unknown; steps?: unknown; step?: unknown };
+    const at = this.now();
     if (shape.type === "hello" && Array.isArray(shape.steps)) {
       const steps = (shape.steps as TraceStep[]).slice(0, this.options.stepCap);
-      this.update({ steps, status: this.socket === null ? this.state.status : "live" });
+      this.update({ steps, status: this.socket === null ? this.state.status : "live", lastMessageAt: at });
+      return;
+    }
+    if (shape.type === "pong") {
+      // Only a pong proves the connection is alive in both directions, so it is
+      // also the point where the reconnect backoff resets: an open() alone would
+      // forgive a socket that accepts and then dies immediately, and the panel
+      // would retry it every second forever.
+      this.pendingPingAt = null;
+      this.update({
+        lastMessageAt: at,
+        lastPongAt: at,
+        error: null,
+        reconnectAttempts: 0,
+        nextRetryAt: null,
+        status: this.socket === null ? this.state.status : "live",
+      });
       return;
     }
     if (shape.type === "step" && isStep(shape.step)) {
-      this.update({ steps: mergeStep(this.state.steps, shape.step, this.options.stepCap), status: "live" });
+      this.update({ steps: mergeStep(this.state.steps, shape.step, this.options.stepCap), status: "live", lastMessageAt: at });
       // The HUD is an aggregate of settled runs, so it would otherwise stay frozen
       // at whatever the Connect fetch saw.
       if (shape.step.step === "settled") void this.refreshUsage();
@@ -348,7 +578,15 @@ export class ObservabilitySession {
           const usage = (await usageResponse.json()) as { usage?: Usage };
           this.update({ usage: usage.usage ?? null });
         }
+        // A poll that recovers clears its own error rather than leaving a banner
+        // over a stream that is working again.
+        if (this.state.error !== null && this.state.error.startsWith("polling failed:")) {
+          this.update({ status: "polling", error: null });
+        }
       } catch (error) {
+        // While reconnecting, a failed poll is expected and must not hide the
+        // fact that the socket is the thing being retried.
+        if (this.state.status !== "polling") return;
         this.update({ status: "error", error: `polling failed: ${message(error)}` });
       }
     };
@@ -364,7 +602,14 @@ export class ObservabilitySession {
   }
 
   disconnect(): void {
+    this.desired = false;
     this.stopPolling();
+    this.stopHeartbeat();
+    this.pendingPingAt = null;
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
     if (this.socket) {
       try {
         this.socket.close();
@@ -373,13 +618,63 @@ export class ObservabilitySession {
       }
       this.socket = null;
     }
-    this.update({ status: "idle" });
+    this.update({ status: "idle", error: null, reconnectAttempts: 0, nextRetryAt: null, lastMessageAt: null });
   }
 
   /** True when a poll interval is registered (the tests assert this is cleaned up). */
   get polling(): boolean {
     return this.pollTimer !== null;
   }
+
+  /** True while the heartbeat interval is registered. */
+  get heartbeating(): boolean {
+    return this.heartbeatTimer !== null;
+  }
+
+  /** True while a reconnect is scheduled. */
+  get retrying(): boolean {
+    return this.retryTimer !== null;
+  }
+}
+
+/** Human age of the last proof of life: "12s ago", "3m ago", "no heartbeat yet". */
+export function heartbeatAge(now: number, at: number | null): string {
+  if (at === null) return "no heartbeat yet";
+  const seconds = Math.round((now - at) / 1000);
+  if (seconds <= 1) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  return `${Math.round(seconds / 60)}m ago`;
+}
+
+/**
+ * The status line's text: the connection's health, not just its intent. A live
+ * socket reports when it last answered a ping (so a silently dead stream is
+ * visible), and a reconnect reports its attempt and the wait before the next one.
+ */
+export function statusText(state: SessionState, now: number): string {
+  if (state.status === "error") return state.error ?? "error";
+  if (state.status === "live") {
+    const beat = state.lastPongAt ?? state.lastMessageAt;
+    const health = beat === null ? "no heartbeat yet" : `heartbeat ${heartbeatAge(now, beat)}`;
+    return `live · ${state.steps.length} step(s) · ${health}`;
+  }
+  if (state.status === "reconnecting") {
+    const wait = state.nextRetryAt === null ? null : Math.max(0, Math.ceil((state.nextRetryAt - now) / 1000));
+    const retry = wait === null ? "retrying" : wait === 0 ? "retrying now" : `retry in ${wait}s`;
+    return `reconnecting (attempt ${state.reconnectAttempts}, ${retry})${state.error === null ? "" : ` · ${state.error}`}`;
+  }
+  if (state.status === "polling") return "polling (socket unavailable)";
+  if (state.status === "connecting") return "connecting…";
+  return "Disconnected";
+}
+
+/** The status line's tone: a reconnect is a warning, not a failure. */
+export function statusTone(state: SessionState): "ok" | "warn" | "info" | "error" | "muted" {
+  if (state.status === "error") return "error";
+  if (state.status === "live") return "ok";
+  if (state.status === "reconnecting" || state.status === "polling") return "warn";
+  if (state.status === "connecting") return "info";
+  return "muted";
 }
 
 function isStep(value: unknown): value is TraceStep {
@@ -425,6 +720,7 @@ export function initObservability(root: HTMLElement, options: MountOptions = {})
   const inspectorInfo = $<HTMLDivElement>(".obs-inspector-step-info");
   const artifact = $<HTMLPreElement>(".obs-artifact");
   const disconnectButton = $<HTMLButtonElement>(".obs-btn-disconnect");
+  const reconnectButton = $<HTMLButtonElement>(".obs-btn-reconnect");
 
   // The panel starts from the repository the canvas is bound to, when there is one.
   if (ownerInput) ownerInput.value = options.initialOwner ?? ownerInput.value;
@@ -442,22 +738,11 @@ export function initObservability(root: HTMLElement, options: MountOptions = {})
 
   function setStatus(state: SessionState): void {
     if (!statusLine) return;
-    const text =
-      state.error ??
-      (state.status === "live"
-        ? `live · ${state.steps.length} step(s)`
-        : state.status === "polling"
-          ? "polling (socket unavailable)"
-          : state.status === "connecting"
-            ? "connecting…"
-            : state.status === "idle"
-              ? "Disconnected"
-              : "error");
-    statusLine.textContent = text;
-    statusLine.className = `obs-status obs-status--${
-      state.error ? "error" : state.status === "live" ? "ok" : state.status === "polling" ? "warn" : "muted"
-    }`;
+    statusLine.textContent = statusText(state, Date.now());
+    statusLine.className = `obs-status obs-status--${statusTone(state)}`;
     if (disconnectButton) disconnectButton.disabled = state.status === "idle" || state.status === "error";
+    // Reconnect is a manual retry: pointless while idle or already connecting.
+    if (reconnectButton) reconnectButton.disabled = state.status === "idle" || state.status === "connecting";
   }
 
   function renderStream(state: SessionState): void {
@@ -606,6 +891,11 @@ export function initObservability(root: HTMLElement, options: MountOptions = {})
   disconnectButton?.addEventListener("click", () => {
     session.disconnect();
     if (announcer) announcer.textContent = "Disconnected from the trace";
+  });
+
+  reconnectButton?.addEventListener("click", () => {
+    if (announcer) announcer.textContent = "Reconnecting to the trace";
+    void session.reconnect().catch(() => {});
   });
 
   const toggle = options.toggleButton;
