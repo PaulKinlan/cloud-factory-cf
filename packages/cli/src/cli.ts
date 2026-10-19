@@ -4,9 +4,11 @@ import { AgentStudio, type AgentManifest, STANDARD_SINK_TYPES } from '@factory-c
 import { LocalAgentRunner } from './runner/local-runner.ts';
 import { QueueWorker } from './worker/queue-worker.ts';
 import { createLocalTools } from './tools/local-tools.ts';
+import { runPrReview } from './dogfood/pr-reviewer.ts';
+import { sendWebhook } from './dogfood/webhook-sender.ts';
 
 export interface CliParsedArgs {
-  command: 'run' | 'worker' | 'studio' | 'help' | 'version';
+  command: 'run' | 'worker' | 'studio' | 'review' | 'webhook' | 'help' | 'version';
   studioAction?: 'author' | 'test' | 'list';
   prompt?: string;
   cwd?: string;
@@ -20,6 +22,17 @@ export interface CliParsedArgs {
   eventFile?: string;
   outPath?: string;
   install?: boolean;
+  prNumber?: number;
+  commitSha?: string;
+  token?: string;
+  dryRun?: boolean;
+  strict?: boolean;
+  url?: string;
+  secret?: string;
+  event?: string;
+  payload?: string;
+  drain?: boolean;
+  controlKey?: string;
 }
 
 export function parseArgs(args: readonly string[]): CliParsedArgs {
@@ -36,7 +49,7 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
     return { command: 'help' };
   }
   const rest = args.slice(1);
-  let command: 'run' | 'worker' | 'studio' | 'help' | 'version' = 'run';
+  let command: 'run' | 'worker' | 'studio' | 'review' | 'webhook' | 'help' | 'version' = 'run';
   let studioAction: 'author' | 'test' | 'list' | undefined;
   let remaining = rest;
 
@@ -44,6 +57,10 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
     command = 'run';
   } else if (first === 'worker' || first === 'poll') {
     command = 'worker';
+  } else if (first === 'review') {
+    command = 'review';
+  } else if (first === 'webhook') {
+    command = 'webhook';
   } else if (first === 'studio') {
     command = 'studio';
     if (rest.length > 0 && !rest[0]!.startsWith('-')) {
@@ -74,6 +91,17 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
   let eventFile: string | undefined;
   let outPath: string | undefined;
   let install: boolean | undefined;
+  let prNumber: number | undefined;
+  let commitSha: string | undefined;
+  let token: string | undefined;
+  let dryRun: boolean | undefined;
+  let strict: boolean | undefined;
+  let url: string | undefined;
+  let secret: string | undefined;
+  let event: string | undefined;
+  let payload: string | undefined;
+  let drain: boolean | undefined;
+  let controlKey: string | undefined;
   const extensions: string[] = [];
 
   for (let i = 0; i < remaining.length; i++) {
@@ -96,12 +124,38 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
       once = true;
     } else if (arg === '--manifest' && i + 1 < remaining.length) {
       manifestPath = remaining[++i];
-    } else if (arg === '--event' && i + 1 < remaining.length) {
-      eventFile = remaining[++i];
+    } else if ((arg === '--event' || arg === '--event-file') && i + 1 < remaining.length) {
+      if (command === 'webhook') {
+        event = remaining[++i];
+      } else {
+        eventFile = remaining[++i];
+      }
+    } else if (arg === '--event-type' && i + 1 < remaining.length) {
+      event = remaining[++i];
     } else if (arg === '--out' && i + 1 < remaining.length) {
       outPath = remaining[++i];
     } else if (arg === '--install') {
       install = true;
+    } else if (arg === '--pr' && i + 1 < remaining.length) {
+      prNumber = Number.parseInt(remaining[++i]!, 10);
+    } else if (arg === '--commit' && i + 1 < remaining.length) {
+      commitSha = remaining[++i];
+    } else if (arg === '--token' && i + 1 < remaining.length) {
+      token = remaining[++i];
+    } else if (arg === '--dry-run') {
+      dryRun = true;
+    } else if (arg === '--strict') {
+      strict = true;
+    } else if (arg === '--url' && i + 1 < remaining.length) {
+      url = remaining[++i];
+    } else if (arg === '--secret' && i + 1 < remaining.length) {
+      secret = remaining[++i];
+    } else if (arg === '--payload' && i + 1 < remaining.length) {
+      payload = remaining[++i];
+    } else if (arg === '--drain') {
+      drain = true;
+    } else if (arg === '--control-key' && i + 1 < remaining.length) {
+      controlKey = remaining[++i];
     } else if (!arg.startsWith('-')) {
       if (command === 'studio' && studioAction === 'test' && !manifestPath) {
         manifestPath = arg;
@@ -126,6 +180,17 @@ export function parseArgs(args: readonly string[]): CliParsedArgs {
     eventFile,
     outPath,
     install,
+    prNumber,
+    commitSha,
+    token,
+    dryRun,
+    strict,
+    url,
+    secret,
+    event,
+    payload,
+    drain,
+    controlKey,
   };
 }
 
@@ -135,6 +200,8 @@ export function printHelp(): string {
 USAGE:
   factory-cloud run [prompt] [options]       Execute an agent run locally
   factory-cloud worker [options]             Run a local queue worker polling RepoCoordinator
+  factory-cloud review [options]             Self-hosted PR reviewer agent (dogfooding)
+  factory-cloud webhook [options]            Dispatch signed GitHub webhook to Worker & drain
   factory-cloud studio author <prompt>       Synthesize agent manifest from natural language
   factory-cloud studio test <manifest.json>  Simulate agent execution in test harness
   factory-cloud studio list [options]        List installed agents
@@ -150,8 +217,19 @@ OPTIONS:
   --once                 Process a single batch and exit (worker command)
   --extension <path>     Path to extension module to load
   --manifest <path>      Path to agent manifest file (studio test)
-  --event <path>         Path to event payload JSON file (studio test)
-  --out <path>           Output file path for authored manifest (studio author)
+  --event <path>         Path to event payload JSON file (studio test / review)
+  --out <path>           Output file path for authored manifest or review summary
+  --pr <number>          Pull Request number for review command
+  --commit <sha>         Commit SHA for review command
+  --token <token>        GitHub personal access token for PR review
+  --dry-run              Dry run mode (do not post PR review externally)
+  --strict               Fail with exit 1 if review recommends changes
+  --url <url>            Cloud Factory worker base URL (webhook command)
+  --secret <secret>      HMAC secret for webhook verification
+  --event-type <type>    GitHub event type (e.g. pull_request, push)
+  --payload <json/file>  Webhook payload JSON string or file path
+  --drain                Trigger queue drain after posting webhook
+  --control-key <key>    Bearer control key for queue drain
 `;
 }
 
@@ -539,6 +617,74 @@ export async function runCli(
         }
       }
       return 0;
+    }
+  }
+
+  if (parsed.command === 'review') {
+    try {
+      io.stdout(`[factory-cloud review] Starting PR review analysis in ${cwd}...`);
+      const result = await runPrReview({
+        cwd,
+        repo: owner && name ? { owner, name } : undefined,
+        prNumber: parsed.prNumber,
+        commitSha: parsed.commitSha,
+        eventFile: parsed.eventFile,
+        githubToken: parsed.token,
+        dryRun: parsed.dryRun,
+        outPath: parsed.outPath,
+        strict: parsed.strict,
+        io,
+      });
+
+      io.stdout(`[factory-cloud review] Verdict: ${result.verdict} (${result.findings.length} finding(s))`);
+      if (parsed.strict && result.verdict === 'REQUEST_CHANGES') {
+        return 1;
+      }
+      return 0;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      io.stderr(`[factory-cloud review] Error during PR review: ${msg}`);
+      return 1;
+    }
+  }
+
+  if (parsed.command === 'webhook') {
+    if (!parsed.url) {
+      io.stderr('Error: missing --url for webhook command.');
+      return 1;
+    }
+    if (!parsed.secret) {
+      io.stderr('Error: missing --secret for webhook command.');
+      return 1;
+    }
+    const eventType = parsed.event ?? 'pull_request';
+    if (!owner || !name) {
+      io.stderr('Error: missing --repo <owner/name> for webhook command.');
+      return 1;
+    }
+    const payload = parsed.payload ?? parsed.eventFile;
+    if (!payload) {
+      io.stderr('Error: missing --payload <json_or_file> for webhook command.');
+      return 1;
+    }
+
+    try {
+      const result = await sendWebhook({
+        url: parsed.url,
+        owner,
+        repo: name,
+        secret: parsed.secret,
+        event: eventType,
+        payload,
+        drain: parsed.drain,
+        controlKey: parsed.controlKey,
+        io,
+      });
+      return result.ok ? 0 : 1;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      io.stderr(`[factory-cloud webhook] Error: ${msg}`);
+      return 1;
     }
   }
 
