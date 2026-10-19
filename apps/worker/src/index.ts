@@ -214,7 +214,7 @@ async function routeStudio(
       const manifest = await studio.author(body.prompt, {
         repoContext: { owner, repo },
         availablePermissions: workerPermissions,
-        availableSinks: ["github-pr-review", "github-issue", "beads-task", "cloud-telemetry"],
+        availableSinks: [...STANDARD_SINK_TYPES],
       });
       return Response.json({ ok: true, manifest });
     } catch (err: unknown) {

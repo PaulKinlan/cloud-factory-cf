@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
-import { AgentStudio, type AgentManifest } from '@factory-cloud/sdk';
+import { AgentStudio, type AgentManifest, STANDARD_SINK_TYPES } from '@factory-cloud/sdk';
 import { LocalAgentRunner } from './runner/local-runner.ts';
 import { QueueWorker } from './worker/queue-worker.ts';
 import { createLocalTools } from './tools/local-tools.ts';
@@ -300,7 +300,7 @@ export async function runCli(
       const manifest = await studio.author(parsed.prompt, {
         availableTools: localTools,
         availablePermissions: defaultCliPermissions,
-        availableSinks: ['github-pr-review', 'github-issue', 'beads-task', 'cloud-telemetry'],
+        availableSinks: [...STANDARD_SINK_TYPES],
         repoContext: { owner: owner ?? 'local', repo: name ?? 'local-repo' },
       });
 
