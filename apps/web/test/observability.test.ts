@@ -59,20 +59,40 @@ function fakeSocket(): SocketLike & { emit: (type: string, payload?: unknown) =>
   };
 }
 
-/** A socket the session can ping, recording what was sent. */
+/**
+ * A socket the session can ping, recording what was sent. It behaves like a
+ * browser WebSocket where it matters: it starts CONNECTING (readyState 0), only
+ * becomes OPEN on `open`, and `send` throws before that (review cb3: a fake that
+ * accepted sends while unopened hid a hanging-handshake bug).
+ */
 function pingableSocket(): SocketLike & {
   emit: (type: string, payload?: unknown) => void;
   closed: boolean;
   sent: string[];
+  readyState: number;
 } {
   const socket = fakeSocket() as SocketLike & {
     emit: (type: string, payload?: unknown) => void;
     closed: boolean;
     sent: string[];
+    readyState: number;
   };
+  const emit = socket.emit.bind(socket);
+  const close = socket.close.bind(socket);
+  socket.readyState = 0;
   socket.sent = [];
   socket.send = (data: string) => {
+    if (socket.readyState !== 1) throw new Error("InvalidStateError");
     socket.sent.push(data);
+  };
+  socket.emit = (type: string, payload?: unknown) => {
+    if (type === "open") socket.readyState = 1;
+    if (type === "close") socket.readyState = 3;
+    emit(type, payload);
+  };
+  socket.close = () => {
+    close();
+    socket.readyState = 3;
   };
   return socket;
 }
@@ -510,7 +530,7 @@ describe("heartbeat", () => {
     expect(session.heartbeating).toBe(false);
   });
 
-  it("does not sit on a socket that never finishes opening", async () => {
+  it("times out a handshake that never completes (review cb3)", async () => {
     const sockets: Array<ReturnType<typeof pingableSocket>> = [];
     const session = new ObservabilitySession({
       base: "https://factory.example",
@@ -529,11 +549,16 @@ describe("heartbeat", () => {
       pollMs: 100000,
     });
     await session.connect();
-    // No `open` event at all: a handshake that hangs must not mean "connecting" forever.
+    // The socket stays CONNECTING and `send` throws, exactly like a browser whose
+    // handshake is being swallowed: no `open` event will ever arrive.
     expect(session.state.status).toBe("connecting");
+    expect(sockets[0]?.readyState).toBe(0);
     await sleep(90);
     expect(session.state.status).toBe("reconnecting");
+    expect(session.state.error).toContain("handshake timed out");
     expect(session.state.reconnectAttempts).toBe(1);
+    expect(sockets[0]?.closed).toBe(true);
+    expect(session.polling).toBe(true);
     session.disconnect();
   });
 
@@ -580,11 +605,18 @@ describe("heartbeat", () => {
         const socket = pingableSocket();
         sockets.push(socket);
         if (created > 1) {
-          // The retry worked: the new socket opens and answers its first ping.
-          setTimeout(() => {
-            socket.emit("open");
-            socket.emit("message", JSON.stringify({ type: "pong", at: "2026-10-19T13:23:08.383Z" }));
-          }, 1);
+          // The retry worked: the new socket opens and then answers every ping,
+          // so the backoff has proof of life rather than one lucky pong.
+          const send = socket.send?.bind(socket);
+          socket.send = (data: string) => {
+            send?.(data);
+            if (data === "ping") {
+              setTimeout(() => {
+                socket.emit("message", JSON.stringify({ type: "pong", at: "2026-10-19T13:23:08.383Z" }));
+              }, 0);
+            }
+          };
+          setTimeout(() => socket.emit("open"), 5);
         }
         return socket;
       },

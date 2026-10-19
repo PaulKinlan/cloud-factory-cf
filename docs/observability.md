@@ -101,9 +101,11 @@ no step ever arrives again. The panel therefore probes the stream:
 | `PONG_TIMEOUT_MS` | 15s | how long one unanswered ping may stand before the socket is assumed dead |
 | `RECONNECT_BASE_MS` / `RECONNECT_MAX_MS` | 1s / 30s | exponential backoff, doubling per attempt |
 
-When a ping goes unanswered (or the socket errors, closes, or never finishes opening)
-the panel closes it, **keeps polling so the rows stay current**, and reconnects with
-backoff. The status line says which of those it is doing — `live · 12 step(s) ·
+When a ping goes unanswered (or the socket errors, closes, or its handshake never
+completes — a real `WebSocket` starts at `readyState` 0, and a proxy that swallows the
+upgrade would otherwise leave the panel "connecting" forever) the panel closes it,
+**keeps polling so the rows stay current**, and reconnects with backoff. The handshake
+gets the same 15s budget as a ping. The status line says which of those it is doing — `live · 12 step(s) ·
 heartbeat 3s ago`, `reconnecting (attempt 2, retry in 2s) · heartbeat lost…` — and a
 **Reconnect** button retries immediately instead of waiting out the backoff. Attempts
 reset once the new socket answers a ping (an `open` that never answers must not

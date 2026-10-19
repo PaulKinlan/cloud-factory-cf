@@ -244,6 +244,8 @@ export class ObservabilitySession {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   /** The ping we are still waiting on; one outstanding ping at a time. */
   private pendingPingAt: number | null = null;
+  /** When the current socket was created, so a hanging handshake can time out. */
+  private pendingOpenAt: number | null = null;
   /** True from connect() until disconnect(): a viewer who stopped gets no retries. */
   private desired = false;
   private options: Required<
@@ -353,6 +355,7 @@ export class ObservabilitySession {
       return;
     }
     this.socket = socket;
+    this.pendingOpenAt = this.now();
     // Every listener checks it still owns the session: a socket that errors or
     // closes after Disconnect must not restart polling behind the user's back.
     const current = (): boolean => this.socket === socket;
@@ -360,6 +363,7 @@ export class ObservabilitySession {
       if (!current()) return;
       this.stopPolling();
       this.pendingPingAt = null;
+      this.pendingOpenAt = null;
       // `lastPongAt` belongs to the socket that answered it, not to this one: a
       // fresh connection must not inherit an old heartbeat (2ng.6).
       this.update({ status: "live", error: null, nextRetryAt: null, lastPongAt: null });
@@ -389,6 +393,7 @@ export class ObservabilitySession {
   private drop(socket: SocketLike, reason: string): void {
     this.stopHeartbeat();
     this.pendingPingAt = null;
+    this.pendingOpenAt = null;
     this.socket = null;
     try {
       socket.close();
@@ -404,6 +409,7 @@ export class ObservabilitySession {
     if (!this.desired) return;
     this.stopHeartbeat();
     this.pendingPingAt = null;
+    this.pendingOpenAt = null;
     const attempt = this.state.reconnectAttempts + 1;
     const delay = reconnectDelay(attempt, this.options.reconnectBaseMs, this.options.reconnectMaxMs);
     // Polling keeps the rows current while the socket is down; the status still
@@ -458,7 +464,17 @@ export class ObservabilitySession {
       }
       return;
     }
-    if (socket.readyState !== undefined && socket.readyState !== 1) return; // not OPEN yet
+    if (socket.readyState !== undefined && socket.readyState !== 1) {
+      // A real WebSocket starts CONNECTING (0). If that never becomes OPEN the
+      // handshake is hanging (a proxy swallowing the upgrade, a dead endpoint),
+      // so it must time out on the same budget as a ping instead of returning
+      // here forever with no retry (review cb3).
+      const created = this.pendingOpenAt;
+      if (created !== null && now - created >= this.options.pongTimeoutMs) {
+        this.drop(socket, `handshake timed out after ${Math.round(this.options.pongTimeoutMs / 1000)}s`);
+      }
+      return;
+    }
     try {
       socket.send("ping");
       this.pendingPingAt = now;
@@ -475,6 +491,7 @@ export class ObservabilitySession {
     }
     this.stopHeartbeat();
     this.pendingPingAt = null;
+    this.pendingOpenAt = null;
     this.stopPolling();
     const socket = this.socket;
     this.socket = null;
@@ -606,6 +623,7 @@ export class ObservabilitySession {
     this.stopPolling();
     this.stopHeartbeat();
     this.pendingPingAt = null;
+    this.pendingOpenAt = null;
     if (this.retryTimer !== null) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
