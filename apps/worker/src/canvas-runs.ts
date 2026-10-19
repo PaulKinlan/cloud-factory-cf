@@ -260,12 +260,22 @@ async function claim(deps: PipelineDeps, limit: number): Promise<ClaimedEvent[]>
   return Array.isArray(payload.claimed) ? payload.claimed : [];
 }
 
+/** One claim per delivery id, keeping order; a lease is released at most once. */
+export function uniqueClaims(events: ClaimedEvent[]): ClaimedEvent[] {
+  const seen = new Map<string, ClaimedEvent>();
+  for (const event of events) {
+    if (!seen.has(event.deliveryId)) seen.set(event.deliveryId, event);
+  }
+  return [...seen.values()];
+}
+
 /** Puts claimed events back without counting an attempt. */
 async function release(deps: PipelineDeps, events: ClaimedEvent[]): Promise<void> {
-  if (events.length === 0) return;
+  const unique = uniqueClaims(events);
+  if (unique.length === 0) return;
   await deps.coordinator.fetch("https://repo-coordinator.internal/release", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ claims: events.map((event) => ({ deliveryId: event.deliveryId, leaseId: event.leaseId })) }),
+    body: JSON.stringify({ claims: unique.map((event) => ({ deliveryId: event.deliveryId, leaseId: event.leaseId })) }),
   });
 }
