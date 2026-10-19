@@ -712,6 +712,17 @@ describe("fan-out settlement when a ledger write is lost (cloud-factory-cf-lbi)"
     expect(chosen.ledgerErrors).toEqual(["delivery ledger rejected the completion (503)"]);
   });
 
+  it("acknowledges a single failed outcome that carries a ledger gap (ww9)", () => {
+    // One agent: the provider call happened, the ledger write was rejected and the
+    // run also failed. Settling as failed would retry and repeat the provider call.
+    const chosen = chooseSettlement([
+      outcome({ status: "failed", deliveryError: "delivery ledger rejected the completion (503)" }),
+    ]);
+    expect(chosen.retry).toBe(false);
+    expect(chosen.outcome.status).toBe("succeeded");
+    expect(chosen.ledgerErrors).toEqual(["delivery ledger rejected the completion (503)"]);
+  });
+
   it("acknowledges when every agent delivered", () => {
     const chosen = chooseSettlement([outcome({}), outcome({})]);
     expect(chosen.retry).toBe(false);

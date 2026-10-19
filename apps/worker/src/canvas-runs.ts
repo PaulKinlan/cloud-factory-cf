@@ -79,8 +79,12 @@ export function chooseSettlement(outcomes: readonly RunOutcome[]): {
   };
   const outcome = outcomes[0] ?? synthetic;
   if (ledgerErrors.length > 0) {
+    // Force a success-shaped settlement: the side effect happened and could not be
+    // recorded, so the event must be acknowledged. Falling back to a failed
+    // outcome would `/fail` it and the retry would repeat the provider call
+    // (finding cloud-factory-cf-ww9).
     const delivered = outcomes.find((entry) => entry.status !== "failed") ?? outcome;
-    return { outcome: delivered, retry: false, ledgerErrors };
+    return { outcome: { ...delivered, status: "succeeded" }, retry: false, ledgerErrors };
   }
   const failure = outcomes.find((entry) => entry.status === "failed");
   return { outcome: failure ?? outcome, retry: failure !== undefined, ledgerErrors };
