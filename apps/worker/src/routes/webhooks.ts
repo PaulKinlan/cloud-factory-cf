@@ -1,7 +1,7 @@
 import type { Env } from "../env";
 import { MAX_WEBHOOK_BYTES } from "../webhooks";
 
-export const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
+export const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab|gitea)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
 
 /**
  * Copy only the headers the coordinator acts on. Replaying the inbound
@@ -19,6 +19,15 @@ export function forwardableHeaders(headers: Headers, repository: string): Header
     "x-gitlab-token",
     "x-gitlab-event-uuid",
     "x-gitlab-event",
+    // Gitea / Forgejo (both header families: Forgejo keeps Gitea's names)
+    "x-gitea-signature",
+    "x-gitea-token",
+    "x-gitea-delivery",
+    "x-gitea-event",
+    "x-forgejo-signature",
+    "x-forgejo-token",
+    "x-forgejo-delivery",
+    "x-forgejo-event",
     "content-type",
   ]) {
     const value = headers.get(name);

@@ -72,6 +72,7 @@ Everything else is a secret, read through `FactoryEnv` in
 | --- | --- | --- |
 | `WEBHOOK_SECRET` | **required for GitHub webhooks** | HMAC key for `X-Hub-Signature-256`. Unset ⇒ every GitHub webhook is refused with `503 webhook secret not configured` (fail closed). |
 | `GITLAB_WEBHOOK_TOKEN` | required for GitLab webhooks | Compared against `X-Gitlab-Token`; unset ⇒ `503 gitlab token not configured`. |
+| `GITEA_WEBHOOK_SECRET` | required for Gitea/Forgejo webhooks | Verified as `X-Gitea-Signature` (HMAC-SHA256 hex of the body) or compared against `X-Gitea-Token`; unset ⇒ `503 gitea webhook secret not configured`. |
 | `BROKER_CONTROL_KEY` | required to use the broker control plane | Control-plane key for `POST /broker/…/capabilities`, provisioning, overrides, audit. |
 | `BROKER_SIGNING_KEY` | required to mint capabilities | HMAC key for capability tokens. |
 | `GITHUB_TOKEN` | for GitHub actions | Credential the broker attaches to `repo.read`, `issue.create`, `issue.comment`, `pr.comment`, `pr.review`. |

@@ -11,6 +11,8 @@ export default defineConfig({
           // `wrangler secret put` and never commit a value.
           WEBHOOK_SECRET: "test-webhook-secret",
           GITLAB_WEBHOOK_TOKEN: "test-gitlab-token",
+          // Gitea/Forgejo hook secret (ADR 003, cloud-factory-cf-6to).
+          GITEA_WEBHOOK_SECRET: "test-gitea-webhook-secret",
           BROKER_SIGNING_KEY: "test-broker-signing-key",
           BROKER_CONTROL_KEY: "test-control-key",
           // Small window so the 429 path is exercised without 60 calls.

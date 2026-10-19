@@ -38,8 +38,11 @@ Slices:
 
 1. **Done (6to.1):** interface, `SdlcEvent`, adapters for GitHub / GitLab /
    Gitea-Forgejo, `repositoryKey`/`parseRepositoryKey`, tests.
-2. Worker wiring: `POST /webhooks/:platform/:repository` for `gitea`, verification
-   per platform, and the queue/ledger carrying the canonical event.
+2. **Done (6to.2):** `POST /webhooks/:platform/:repository` accepts `gitea`, the
+   hook secret is verified as `X-Gitea-Signature` (HMAC-SHA256) or `X-Gitea-Token`,
+   and the worker's delivery-id/event/normalisation now come from the adapters
+   instead of a third provider branch. The canonical `kind` is not duplicated into
+   the queue: the raw body is stored, so `kind` stays derivable by whoever consumes it.
 3. DO addressing: prefix `RepoCoordinator` names with the platform and migrate the
    existing `owner/repo` rows.
 4. Sinks: speak `SdlcEvent` rather than provider payloads.
