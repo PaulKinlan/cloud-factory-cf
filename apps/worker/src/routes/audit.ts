@@ -89,7 +89,13 @@ export async function handleAudit(
   }
 
   if (id !== undefined && id.length > 0) {
-    const target = `https://repo-coordinator.internal/events/${encodeURIComponent(id)}`;
+    let deliveryId: string;
+    try {
+      deliveryId = decodeURIComponent(id);
+    } catch {
+      deliveryId = id;
+    }
+    const target = `https://repo-coordinator.internal/events/${encodeURIComponent(deliveryId)}`;
     const res = await coordinator.fetch(target);
     const body = (await res.json()) as Record<string, unknown>;
     return Response.json(body, { status: res.status });

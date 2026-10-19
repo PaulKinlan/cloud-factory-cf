@@ -250,6 +250,21 @@ describe("DO event audit log API", () => {
     const countsBody = (await countsRes.json()) as any;
     expect(countsBody.ok).toBe(true);
     expect(countsBody.stats["pending"]).toBe(1);
+
+    // ?counts=0 and bare ?counts return event detail view (with event and deliveries, and no stats key) (cloud-factory-cf-czha)
+    const counts0Res = await callAudit(`/audit/events/${repository}/stats?counts=0`, authHeaders);
+    expect(counts0Res.status).toBe(200);
+    const counts0Body = (await counts0Res.json()) as any;
+    expect(counts0Body.event?.deliveryId).toBe("stats");
+    expect(counts0Body.deliveries).toBeDefined();
+    expect(counts0Body.stats).toBeUndefined();
+
+    const bareCountsRes = await callAudit(`/audit/events/${repository}/stats?counts`, authHeaders);
+    expect(bareCountsRes.status).toBe(200);
+    const bareCountsBody = (await bareCountsRes.json()) as any;
+    expect(bareCountsBody.event?.deliveryId).toBe("stats");
+    expect(bareCountsBody.deliveries).toBeDefined();
+    expect(bareCountsBody.stats).toBeUndefined();
   });
 
   it("retrieves an event whose delivery ID is payload (cloud-factory-cf-obnz)", async () => {
@@ -265,6 +280,23 @@ describe("DO event audit log API", () => {
     expect(detailBody.ok).toBe(true);
     expect(detailBody.event).toBeDefined();
     expect(detailBody.event.deliveryId).toBe("payload");
+    expect(detailBody.deliveries).toBeDefined();
+  });
+
+  it("retrieves an event whose delivery ID contains percent encoding (cloud-factory-cf-pd03)", async () => {
+    const repository = "audit/deliv-pct-encoded";
+    const id = "a%2Fb";
+    const req = await githubRequest(id, repository);
+    const queued = await SELF.fetch(req);
+    expect(queued.status).toBe(202);
+
+    // Detail route /audit/events/:owner/:repo/:encodedId returns the event detail view
+    const detailRes = await callAudit(`/audit/events/${repository}/${encodeURIComponent(id)}`, authHeaders);
+    expect(detailRes.status).toBe(200);
+    const detailBody = (await detailRes.json()) as any;
+    expect(detailBody.ok).toBe(true);
+    expect(detailBody.event).toBeDefined();
+    expect(detailBody.event.deliveryId).toBe(id);
     expect(detailBody.deliveries).toBeDefined();
   });
 
