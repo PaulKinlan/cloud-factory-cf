@@ -258,11 +258,11 @@ for ws in "${WS_ORDER[@]}"; do
   [ -n "$ws_tests" ] || [ -n "$ws_sources" ] || continue
 
   if [ -n "$ws_tests" ]; then
-    # Source validation comes FIRST and in every mode, --list included: a test-file
-    # delta never vouches for the changed sources beside it (cloud-factory-cf-9ef), and
-    # a deleted last test leaves them nothing to run (cloud-factory-cf-u8k). --list used
-    # to report a clean selection here while the run mode failed the same delta
-    # (cloud-factory-cf-ryb).
+    # Source validation comes FIRST and in every mode, --list included, and for every
+    # runner (vitest and node:test alike): a test-file delta never vouches for the changed
+    # sources beside it (cloud-factory-cf-9ef, rev-gate6), and a deleted last test leaves
+    # them nothing to run (cloud-factory-cf-u8k). --list used to report a clean selection
+    # here while the run mode failed the same delta (cloud-factory-cf-ryb).
     ws_has_tests=1
     has_test_files "$ws" || ws_has_tests=0
     if [ -n "$ws_sources" ]; then
@@ -274,7 +274,7 @@ for ws in "${WS_ORDER[@]}"; do
         elif [ "$ws_has_tests" -eq 0 ]; then
           echo "changed-tests: FAIL ${path} — ${ws} has no test files left, so this source change runs no suite" >&2
           status=1
-        elif [ "$kind" = "vitest" ] && ! source_is_referenced "$ws" "$path"; then
+        elif ! source_is_referenced "$ws" "$path"; then
           unreferenced+="$path"$'\n'
         fi
       done <<< "$ws_sources"

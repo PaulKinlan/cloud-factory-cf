@@ -77,9 +77,11 @@ contract:
   left in the workspace that source is named as a failure, not skipped. Source
   validation runs before the selection report, so `--list` gives the same verdict as a
   real run (bead `cloud-factory-cf-ryb`);
-- a test-file delta does **not** vouch for a source change in the same workspace: if the
-  workspace's tests and sources reference that module nowhere, the source still fails by
-  name, because a whole-suite run cannot invent a test for it (bead `cloud-factory-cf-9ef`);
+- a test-file delta does **not** vouch for a source change in the same workspace, for
+  **every** runner: if the workspace's tests and sources reference that module nowhere,
+  the source still fails by name, because a whole-suite run cannot invent a test for it
+  (bead `cloud-factory-cf-9ef`; the vitest-only version of this check was itself a
+  finding, rev-gate6);
 - a delta with no source changes runs a fixed **smoke set** (`apps/web`'s node
   suite, `apps/worker`'s `worker`/`assets` tests) instead of nothing: a gate that
   executes no suite at all cannot be distinguished from one whose selection broke,

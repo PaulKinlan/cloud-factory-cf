@@ -71,7 +71,7 @@ SH
     mkdir -p packages/nodep/tests packages/nodep/src packages/plain/src
     printf '{ "name": "nodep", "scripts": { "test": "node --test tests/**/*.test.ts" } }\n' > packages/nodep/package.json
     printf 'export const n = 1;\n' > packages/nodep/src/n.ts
-    printf 'import { test } from "node:test";\ntest("n", () => {});\n' > packages/nodep/tests/n.test.ts
+    printf 'import { test } from "node:test";\nimport { n } from "../src/n";\ntest("n", () => { void n; });\n' > packages/nodep/tests/n.test.ts
     printf '{ "name": "plain", "scripts": { "build": "tsc" } }\n' > packages/plain/package.json
     printf 'export const p = 1;\n' > packages/plain/src/keep.ts
     mkdir -p docs && printf 'docs\n' > docs/speed.md
@@ -155,6 +155,20 @@ export FAKE_SELECT="apps/web/test/a.test.ts"
 run_gate
 unset FAKE_SELECT
 check "a referenced source plus a test edit in the same workspace stays green" 'test "$RC" -eq 0 && out_lacks "references these changed source files"'
+reset_tree
+
+# 4d. rev-gate6: the same rule holds for a node:test workspace, not just vitest ones.
+printf '\n// touch\n' >> "$FIX/packages/nodep/tests/n.test.ts"
+printf 'export const orphan = 1;\n' > "$FIX/packages/nodep/src/orphan.ts"
+run_gate
+check "a node:test workspace cannot mask an unreferenced source either" 'test "$RC" -ne 0 && err_has "packages/nodep/src/orphan.ts" && err_has "nothing in this workspace references"'
+reset_tree
+
+# 4e. ... and a source its tests do import stays green there too.
+printf '\n// touch\n' >> "$FIX/packages/nodep/tests/n.test.ts"
+printf '\n// touch\n' >> "$FIX/packages/nodep/src/n.ts"
+run_gate
+check "a referenced source plus a test edit in a node:test workspace stays green" 'test "$RC" -eq 0 && out_has "FAKE npm test in nodep"'
 reset_tree
 
 # 5. A source delta selects the affected vitest files.
