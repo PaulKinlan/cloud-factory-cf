@@ -1,6 +1,6 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { planAgents, sourceMatches } from "../src/canvas-runs";
+import { planAgents, sourceMatches, uniqueClaims } from "../src/canvas-runs";
 import { sinksFor } from "../src/pipeline";
 import { signBody, TEST_SECRET } from "./support/webhook";
 
@@ -196,6 +196,22 @@ describe("canvas run planning", () => {
       ok: false,
       error: "the layout has no agent nodes, so there is nothing to run",
     });
+  });
+
+  it("releases a lease at most once, keeping order (qwo)", () => {
+    const claim = (deliveryId: string, leaseId: string) => ({
+      deliveryId,
+      provider: "github",
+      event: "pull_request",
+      action: "opened",
+      repository: REPOSITORY,
+      actor: "octocat",
+      attempts: 1,
+      leaseId,
+    });
+    const events = [claim("a", "l-a"), claim("b", "l-b"), claim("a", "l-a")];
+    expect(uniqueClaims(events).map((event) => event.deliveryId)).toEqual(["a", "b"]);
+    expect(uniqueClaims([])).toEqual([]);
   });
 
   it("matches sources by provider and event, with * as a wildcard", () => {

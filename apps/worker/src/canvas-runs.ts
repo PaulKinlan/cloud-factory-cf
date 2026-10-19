@@ -203,11 +203,10 @@ async function runAgent(deps: PipelineDeps, agent: AgentPlan, limit: number): Pr
   const matching = claimed.filter((event) =>
     agent.sources.some((source) => sourceMatches(source, event)),
   );
+  // Anything past `limit` stays in `unused` below, so matched-but-deferred
+  // events go straight back on the queue instead of sitting on a lease until it
+  // expires and wasting an attempt (finding cloud-factory-cf-mj7).
   const running = matching.slice(0, limit);
-  // Matched but over this run's limit: they go straight back on the queue rather
-  // than sitting on a lease until it expires and wasting an attempt
-  // (finding cloud-factory-cf-mj7).
-  const deferred = matching.slice(limit);
 
   for (const event of running) {
     // The agent's own prompt and wiring drive the run; the deterministic runtime
@@ -235,8 +234,12 @@ async function runAgent(deps: PipelineDeps, agent: AgentPlan, limit: number): Pr
   // Events that matched nothing this agent may consume, and the ones over its
   // limit, are released back to the queue so another agent (or a later run) can
   // take them.
+  // `unused` is everything that did not run, which already includes the deferred
+  // ones; releasing `[...unused, ...deferred]` listed a deferred claim twice and
+  // inflated the release count (finding cloud-factory-cf-qwo). `release()`
+  // de-duplicates as well, so a future caller cannot reintroduce it.
   const unused = claimed.filter((event) => !running.includes(event));
-  await release(deps, [...unused, ...deferred]);
+  await release(deps, unused);
   return summary;
 }
 
@@ -252,11 +255,21 @@ async function claim(deps: PipelineDeps, limit: number): Promise<ClaimedEvent[]>
 }
 
 /** Puts claimed events back without counting an attempt. */
+/** One claim per delivery id, keeping order; a lease is released at most once. */
+export function uniqueClaims(events: ClaimedEvent[]): ClaimedEvent[] {
+  const seen = new Map<string, ClaimedEvent>();
+  for (const event of events) {
+    if (!seen.has(event.deliveryId)) seen.set(event.deliveryId, event);
+  }
+  return [...seen.values()];
+}
+
 async function release(deps: PipelineDeps, events: ClaimedEvent[]): Promise<void> {
-  if (events.length === 0) return;
+  const unique = uniqueClaims(events);
+  if (unique.length === 0) return;
   await deps.coordinator.fetch("https://repo-coordinator.internal/release", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ claims: events.map((event) => ({ deliveryId: event.deliveryId, leaseId: event.leaseId })) }),
+    body: JSON.stringify({ claims: unique.map((event) => ({ deliveryId: event.deliveryId, leaseId: event.leaseId })) }),
   });
 }
