@@ -1,0 +1,22 @@
+{
+  "name": "@factory-cloud/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Isocan-style infinite canvas for wiring agents, event sources, memory hubs and action sinks",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:file": "vitest run",
+    "deploy": "wrangler deploy -c wrangler.jsonc"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^8.3.4",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.151.1"
+  }
+}

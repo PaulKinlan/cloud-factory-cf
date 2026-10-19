@@ -12,6 +12,7 @@ Cloudflare-native autonomous SDLC agent cloud built on Pi, Cloudflare Durable Ob
 
 ```
 apps/worker/     Cloudflare Worker entry point + per-repo Durable Object
+apps/web/        Agent canvas — Isocan-style infinite canvas that exports agent config
 packages/sdk/    @factory-cloud/sdk — Pi-inspired extension hooks (see epic)
 ```
 
@@ -36,6 +37,22 @@ npm run dev          # wrangler dev on http://localhost:8787
 Deployment secrets are never committed: `wrangler secret put WEBHOOK_SECRET`
 before `npm run deploy`. The Durable Object (`RepoCoordinator`) is created with
 the `new_sqlite_classes` migration in `apps/worker/wrangler.jsonc`.
+
+## Agent canvas (`apps/web`)
+
+An infinite canvas for assembling a run: drag event sources, agents, memory hubs
+and action sinks onto the board, wire them (source → agent → sink/memory, memory →
+agent, enforced in the model), edit each node in the inspector, and **Export
+config** to get the `{ agents: [...] }` JSON the control plane consumes. The
+layout persists in `localStorage`; nothing is sent to the network.
+
+```bash
+npm run dev -w @factory-cloud/web     # http://localhost:5173
+npm run deploy -w @factory-cloud/web  # assets-only Worker: cloud-factory-canvas
+```
+
+See [apps/web/README.md](apps/web/README.md) for the wiring rules, the exported
+contract and the keyboard model.
 
 ## Event pipeline (per repository Durable Object)
 

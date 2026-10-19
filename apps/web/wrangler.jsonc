@@ -1,0 +1,14 @@
+/**
+ * Deployable static host for the canvas. Kept separate from the API worker so
+ * the canvas can ship without changing the Worker's routing or Durable Objects;
+ * serving it from the main Worker is a follow-up once the control plane exists.
+ */
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "cloud-factory-canvas",
+  "compatibility_date": "2026-10-17",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}
