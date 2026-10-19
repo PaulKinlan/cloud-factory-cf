@@ -1,4 +1,19 @@
 import {
+  bindLoadedDocument,
+  describeShareFailure,
+  createShareTracker,
+  documentRequest,
+  listRequest,
+  parseDocumentList,
+  parseShareHint,
+  parseStoredDocument,
+  planSave,
+  restoreCanvas,
+  saveRequest,
+  serializeCanvasState,
+  type ShareTarget,
+} from "./sync";
+import {
   KIND_LABELS,
   NODE_HEIGHT,
   NODE_WIDTH,
@@ -38,14 +53,35 @@ const connectToggle = required<HTMLButtonElement>("connect-toggle");
 const clearButton = required<HTMLButtonElement>("clear");
 const exportDialog = required<HTMLDialogElement>("export-dialog");
 const exportJson = required<HTMLPreElement>("export-json");
+const shareDialog = required<HTMLDialogElement>("share-dialog");
+const shareRepository = required<HTMLInputElement>("share-repository");
+const shareKey = required<HTMLInputElement>("share-key");
+const shareName = required<HTMLInputElement>("share-name");
+const shareStatus = required<HTMLParagraphElement>("share-status");
+const shareList = required<HTMLUListElement>("share-list");
 
-const storedDoc = loadDoc();
-let doc: CanvasDoc = storedDoc ?? createSampleDoc();
+function readStoredCanvas(): string | null {
+  try {
+    return localStorage.getItem(STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+const storedCanvas = readStoredCanvas();
+const restored = restoreCanvas(storedCanvas);
+let doc: CanvasDoc = restored.document;
+// Restored from the same value as the document, so a reload keeps both.
+let boundRepository: string | null = restored.bound;
 let selectedId: string | null = doc.nodes[0]?.id ?? null;
 let connectMode = false;
 let connectFrom: string | null = null;
 let clearArmed = false;
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
+// Repository name and the last saved id survive a reload of the tab; the control
+// key never leaves this variable.
+let shareIds = createShareTracker();
+const SHARE_HINT_KEY = "cloud-factory-canvas:share";
 
 const CONFIG_FIELDS: Record<NodeKind, Array<{ key: string; label: string; control: "text" | "textarea" | "select"; options?: string[] }>> = {
   agent: [
@@ -73,19 +109,9 @@ function required<T extends Element>(id: string): T {
   return element as unknown as T;
 }
 
-function loadDoc(): CanvasDoc | null {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (!stored) return null;
-    return parseDoc(stored);
-  } catch {
-    return null;
-  }
-}
-
 function saveNow(): void {
   try {
-    localStorage.setItem(STORAGE_KEY, serialize(doc));
+    localStorage.setItem(STORAGE_KEY, serializeCanvasState(doc, boundRepository));
   } catch {
     announce("Could not save: browser storage is unavailable");
   }
@@ -397,6 +423,179 @@ required<HTMLButtonElement>("export").addEventListener("click", () => {
 
 required<HTMLButtonElement>("export-close").addEventListener("click", () => exportDialog.close());
 
+// ------------------------------------------------------------------- sharing
+
+function shareTarget(): ShareTarget {
+  return { repository: shareRepository.value.trim(), controlKey: shareKey.value };
+}
+
+function setShareStatus(message: string): void {
+  shareStatus.textContent = message;
+  announce(message);
+}
+
+function shareIdFor(repository: string): string | null {
+  return shareIds.idFor(repository);
+}
+
+function rememberShareTarget(): void {
+  try {
+    sessionStorage.setItem(
+      SHARE_HINT_KEY,
+      JSON.stringify({ ...shareIds.toJSON(), name: shareName.value }),
+    );
+  } catch {
+    // Session storage can be unavailable; sharing still works in this page.
+  }
+}
+
+required<HTMLButtonElement>("share").addEventListener("click", () => {
+  try {
+    const stored = sessionStorage.getItem(SHARE_HINT_KEY);
+    if (stored) {
+      const hint = parseShareHint(JSON.parse(stored));
+      // A hint only restores ids that belong to their own repository; the
+      // repository field itself is left to the operator.
+      shareIds = createShareTracker(hint.ids);
+      if (hint.name !== undefined && shareName.value.length === 0) shareName.value = hint.name;
+    }
+  } catch {
+    // Ignore a corrupt hint: an empty form is fine.
+  }
+  shareStatus.textContent = "";
+  shareDialog.showModal();
+  void refreshDocumentList();
+});
+
+required<HTMLButtonElement>("share-close").addEventListener("click", () => shareDialog.close());
+
+async function sendShare(
+  request: { url: string; init: RequestInit } | { error: string },
+): Promise<{ status: number; payload: unknown } | null> {
+  if ("error" in request) {
+    setShareStatus(request.error);
+    return null;
+  }
+  try {
+    const response = await fetch(request.url, request.init);
+    const payload: unknown = await response.json().catch(() => null);
+    return { status: response.status, payload };
+  } catch {
+    setShareStatus("Could not reach the API — is the canvas being served by the Worker rather than Vite?");
+    return null;
+  }
+}
+
+required<HTMLButtonElement>("share-save").addEventListener("click", async () => {
+  setShareStatus("Saving…");
+  // The id comes from the repository being saved to, never from whichever
+  // repository was last touched (cloud-factory-cf-ci5).
+  const target = shareTarget();
+  const plan = planSave(shareIds, boundRepository, target.repository);
+  const result = await sendShare(
+    saveRequest(location.origin, target, doc, {
+      ...(plan.id === null ? {} : { id: plan.id }),
+      name: shareName.value,
+    }),
+  );
+  if (!result) return;
+  if (result.status !== 200 && result.status !== 201) {
+    setShareStatus(describeShareFailure(result.status, result.payload));
+    return;
+  }
+  const body = result.payload as { id?: unknown; name?: unknown };
+  if (typeof body.id === "string") shareIds.remember(target.repository, body.id);
+  boundRepository = target.repository;
+  // Persist the new binding immediately: the canvas saved above was written with
+  // the old one, and a reload must not come back bound to the wrong repository.
+  saveNow();
+  rememberShareTarget();
+  const savedId = shareIdFor(target.repository) ?? "no id";
+  const copyNote = plan.newCopy ? " as a new copy — that document was loaded from another repository" : "";
+  setShareStatus(`Saved “${typeof body.name === "string" ? body.name : shareName.value}”${copyNote} (${savedId})`);
+  void refreshDocumentList();
+});
+
+required<HTMLButtonElement>("share-refresh").addEventListener("click", () => {
+  void refreshDocumentList();
+});
+
+async function refreshDocumentList(): Promise<void> {
+  shareList.replaceChildren();
+  if (shareRepository.value.trim().length === 0 || shareKey.value.length === 0) {
+    return;
+  }
+  const result = await sendShare(listRequest(location.origin, shareTarget()));
+  if (!result) return;
+  if (result.status !== 200) {
+    setShareStatus(describeShareFailure(result.status, result.payload));
+    return;
+  }
+  const documents = parseDocumentList(result.payload);
+  if (documents === null) {
+    setShareStatus("The document list was not in the expected shape");
+    return;
+  }
+  if (documents.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "muted";
+    empty.textContent = "No documents stored for this repository yet.";
+    shareList.append(empty);
+    return;
+  }
+  for (const entry of documents) {
+    const item = document.createElement("li");
+    const load = document.createElement("button");
+    load.type = "button";
+    load.className = "button button--ghost";
+    load.textContent = `Load “${entry.name}”`;
+    load.addEventListener("click", () => {
+      void loadDocument(entry.id, entry.name);
+    });
+    const meta = document.createElement("span");
+    meta.className = "muted";
+    meta.textContent = entry.updatedAt.length > 0 ? new Date(entry.updatedAt).toLocaleString() : "";
+    item.append(load, meta);
+    shareList.append(item);
+  }
+}
+
+async function loadDocument(id: string, name: string): Promise<void> {
+  setShareStatus(`Loading “${name}”…`);
+  // The repository is captured with the request: the document that comes back
+  // belongs to the repository it was asked of, even if the field is edited while
+  // the request is in flight (finding cloud-factory-cf-qd6). Otherwise an alpha
+  // document would be bound to beta and the next save would write it there.
+  const target = shareTarget();
+  const result = await sendShare(documentRequest(location.origin, target, id));
+  if (!result) return;
+  if (result.status !== 200) {
+    setShareStatus(describeShareFailure(result.status, result.payload));
+    return;
+  }
+  const stored = parseStoredDocument(result.payload);
+  if (!stored) {
+    setShareStatus("That document could not be read by this canvas version");
+    return;
+  }
+  doc = stored.document;
+  selectedId = doc.nodes[0]?.id ?? null;
+  connectFrom = null;
+  const binding = bindLoadedDocument(target.repository, shareRepository.value);
+  shareIds.remember(binding.bound, id);
+  boundRepository = binding.bound;
+  saveNow();
+  shareName.value = stored.name;
+  persist();
+  render();
+  rememberShareTarget();
+  setShareStatus(
+    binding.repositoryChanged
+      ? `Loaded “${stored.name}” from ${binding.bound}; the Repository field changed while loading, so that is the copy this canvas belongs to`
+      : `Loaded “${stored.name}” and replaced the current canvas`,
+  );
+}
+
 required<HTMLButtonElement>("export-copy").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(exportJson.textContent ?? "");
@@ -673,6 +872,7 @@ fieldLabel.addEventListener("input", () => {
   }
 });
 
-if (!storedDoc) fitToContent();
+// A restored canvas keeps its own view; the first one is fitted to its content.
+if (storedCanvas === null) fitToContent();
 render();
 announce(`Canvas ready with ${doc.nodes.length} nodes`);
