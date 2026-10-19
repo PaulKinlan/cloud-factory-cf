@@ -1,6 +1,7 @@
 import type { Env } from "./env";
 import { handleBroker } from "./routes/broker";
 import { handleAdmin } from "./routes/admin";
+import { handleAuth } from "./routes/auth";
 import { handleStudio } from "./routes/studio";
 import { handleCanvas } from "./routes/canvas";
 import { handleRuns } from "./routes/runs";
@@ -35,6 +36,9 @@ export default {
 
     const adminResponse = await handleAdmin(request, env, url);
     if (adminResponse) return adminResponse;
+
+    const authResponse = await handleAuth(request, env, url);
+    if (authResponse) return authResponse;
 
     const studioResponse = await handleStudio(request, env, url);
     if (studioResponse) return studioResponse;

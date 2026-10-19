@@ -147,6 +147,9 @@ describe("markup contract", () => {
     expect(indexHtml).toContain('id="connect-check"');
     expect(indexHtml).toContain('id="connect-status"');
     expect(indexHtml).toContain('aria-live="polite"');
+    expect(indexHtml).toContain('id="connect-oauth"');
+    expect(indexHtml).toContain('href="/auth/github/login"');
+    expect(indexHtml).toContain('id="connect-repo-select"');
   });
 });
 

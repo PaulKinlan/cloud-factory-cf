@@ -134,6 +134,7 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
   const checkButton = $<HTMLButtonElement>("#connect-check");
   const statusNode = $<HTMLParagraphElement>("#connect-status");
   const announcer = $<HTMLSpanElement>("#connect-announcer");
+  const repoSelect = $<HTMLSelectElement>("#connect-repo-select");
   if (pill === null || dialog === null) return null;
 
   const base = options.base ?? (typeof window === "undefined" ? "" : window.location.origin);
@@ -276,6 +277,64 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
 
   applyScope(readScope());
   setStatus("Not checked yet", "muted");
+
+  async function loadAuthorizedRepos(owner: string): Promise<void> {
+    if (!owner || repoSelect === null) return;
+    try {
+      const res = await (options.fetchImpl ?? fetch)(`${base}/api/repos?owner=${encodeURIComponent(owner)}`);
+      if (!res.ok) return;
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        repositories?: Array<{ fullName: string; owner: string; name: string }>;
+      };
+      if (data.ok && Array.isArray(data.repositories) && data.repositories.length > 0) {
+        repoSelect.innerHTML = '<option value="">-- Choose an authorized repository --</option>';
+        for (const r of data.repositories) {
+          const opt = document.createElement("option");
+          opt.value = r.fullName;
+          opt.textContent = r.fullName;
+          repoSelect.appendChild(opt);
+        }
+        repoSelect.hidden = false;
+      }
+    } catch {
+      // Ignore network errors loading authorized repos
+    }
+  }
+
+  repoSelect?.addEventListener("change", () => {
+    if (repoSelect.value) {
+      const parts = repoSelect.value.split("/");
+      if (parts.length === 2 && parts[0] && parts[1]) {
+        if (ownerInput) ownerInput.value = parts[0];
+        if (repoInput) repoInput.value = parts[1];
+        applyScope(readScope());
+      }
+    }
+  });
+
+  ownerInput?.addEventListener("change", () => {
+    const owner = ownerInput.value.trim();
+    if (owner) void loadAuthorizedRepos(owner);
+  });
+
+  if (typeof window !== "undefined" && window.location) {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("connected") === "1") {
+      const owner = params.get("owner");
+      if (owner && ownerInput) {
+        ownerInput.value = owner;
+        void loadAuthorizedRepos(owner);
+      }
+      open();
+      const cleanUrl = new URL(window.location.href);
+      cleanUrl.searchParams.delete("connected");
+      cleanUrl.searchParams.delete("owner");
+      cleanUrl.searchParams.delete("installation_id");
+      window.history.replaceState({}, "", cleanUrl.toString());
+    }
+  }
+
   return { scope: () => scope, open, close, check };
 }
 
