@@ -32,6 +32,21 @@ export const QUOTA_WINDOW_MS = 60_000;
 /** Calls per (agent, service, action) per window when BROKER_QUOTA_PER_MINUTE is unset. */
 export const DEFAULT_QUOTA_PER_MINUTE = 60;
 
+/**
+ * Parses `BROKER_QUOTA_PER_MINUTE`. Only a plain non-negative integer is
+ * honoured, and only an explicit `"0"` disables the throttle: an empty,
+ * whitespace, negative, fractional or non-numeric value falls back to the safe
+ * default rather than silently disabling the limit.
+ */
+export function parseQuotaLimit(raw: unknown): number {
+  if (typeof raw !== "string") return DEFAULT_QUOTA_PER_MINUTE;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return DEFAULT_QUOTA_PER_MINUTE;
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) return DEFAULT_QUOTA_PER_MINUTE;
+  return parsed;
+}
+
 export class CredentialBroker extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -300,12 +315,9 @@ export class CredentialBroker extends DurableObject<Env> {
 
   // --------------------------------------------------------------- quota
 
-  /** `BROKER_QUOTA_PER_MINUTE`; 0 disables the quota, unset/invalid uses the default. */
+  /** `BROKER_QUOTA_PER_MINUTE`; only an explicit "0" disables the quota. */
   private get quotaLimit(): number {
-    const raw = this.env.BROKER_QUOTA_PER_MINUTE;
-    const parsed = typeof raw === "string" ? Number(raw) : Number.NaN;
-    if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_QUOTA_PER_MINUTE;
-    return Math.trunc(parsed);
+    return parseQuotaLimit(this.env.BROKER_QUOTA_PER_MINUTE);
   }
 
   /**

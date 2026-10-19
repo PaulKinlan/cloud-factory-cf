@@ -91,8 +91,12 @@ A valid capability is replayable until it expires, so the broker also rate-limit
 the calls it will make on an agent's behalf:
 
 - Sliding window of 60s per `(agent, service, action)` inside the repository's
-  broker object. `BROKER_QUOTA_PER_MINUTE` sets the limit (default `60`; `0`
-  disables it). Tests bind it to `4`.
+  broker object. `BROKER_QUOTA_PER_MINUTE` sets the limit (default `60`). Tests
+  bind it to `4`.
+- Only a plain non-negative integer is honoured, and only an explicit `"0"`
+  disables the throttle. An empty, whitespace, negative, fractional or
+  non-numeric value falls back to the default `60` instead of failing open
+  (finding `cloud-factory-cf-8ae`).
 - The slot is spent **after** the capability, repository, action and policy
   checks (a denied request costs nothing) and **before** the upstream call (a
   failing upstream call still costs a slot, so failures cannot be used to bypass

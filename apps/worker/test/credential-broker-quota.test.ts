@@ -1,5 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_QUOTA_PER_MINUTE, parseQuotaLimit } from "../src/credential-broker-object";
 
 /**
  * `BROKER_QUOTA_PER_MINUTE` is "4" in `vitest.config.ts` so the 429 path is
@@ -42,6 +43,29 @@ async function audit(repository: string): Promise<Array<{ outcome: string; agent
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("quota limit parsing", () => {
+  const cases: Array<[unknown, number, string]> = [
+    [undefined, DEFAULT_QUOTA_PER_MINUTE, "unset falls back to the default"],
+    [null, DEFAULT_QUOTA_PER_MINUTE, "null falls back to the default"],
+    ["", DEFAULT_QUOTA_PER_MINUTE, "an empty binding never disables the throttle"],
+    ["   ", DEFAULT_QUOTA_PER_MINUTE, "whitespace never disables the throttle"],
+    ["0.5", DEFAULT_QUOTA_PER_MINUTE, "a fractional limit never truncates to 0"],
+    ["-1", DEFAULT_QUOTA_PER_MINUTE, "a negative limit falls back to the default"],
+    ["abc", DEFAULT_QUOTA_PER_MINUTE, "a non-numeric value falls back to the default"],
+    ["1e3", DEFAULT_QUOTA_PER_MINUTE, "only plain digits are accepted"],
+    ["9007199254740993", DEFAULT_QUOTA_PER_MINUTE, "an unsafe integer falls back"],
+    ["0", 0, "an explicit 0 disables the throttle"],
+    ["4", 4, "a plain integer is honoured"],
+    [" 4 ", 4, "surrounding whitespace is trimmed"],
+  ];
+
+  for (const [raw, expected, description] of cases) {
+    it(`${description} (${JSON.stringify(raw)} → ${expected})`, () => {
+      expect(parseQuotaLimit(raw)).toBe(expected);
+    });
+  }
 });
 
 describe("credential broker object: per-agent quota", () => {
