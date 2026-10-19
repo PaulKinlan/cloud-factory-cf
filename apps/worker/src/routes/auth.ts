@@ -24,7 +24,12 @@ function getCookie(headers: Headers, name: string): string | null {
   const cookie = headers.get("cookie");
   if (!cookie) return null;
   const match = cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
-  return match ? decodeURIComponent(match[1]!) : null;
+  if (!match || !match[1]) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
 }
 
 /**
@@ -170,60 +175,63 @@ export async function handleGithubCallback(
   const state = url.searchParams.get("state");
   const returnTo = sanitizeReturnTo(url.searchParams.get("return_to"), url.origin);
 
-  // Verify OAuth state to prevent CSRF attacks
-  if (!state) {
-    return Response.json(
-      { ok: false, error: "Missing required OAuth state parameter" },
-      { status: 400, headers: { "set-cookie": clearCookie } },
-    );
-  }
-
-  const cookieVal = getCookie(request.headers, "cf_oauth_state");
-  if (!cookieVal) {
-    return Response.json(
-      { ok: false, error: "Missing OAuth state cookie" },
-      { status: 400, headers: { "set-cookie": clearCookie } },
-    );
-  }
-
-  const parts = cookieVal.split(".");
-  if (parts.length !== 3) {
-    return Response.json(
-      { ok: false, error: "Malformed OAuth state cookie" },
-      { status: 400, headers: { "set-cookie": clearCookie } },
-    );
-  }
-
-  const [cookieNonce, expStr, sig] = parts as [string, string, string];
-  const dataToSign = `${cookieNonce}.${expStr}`;
-  const expectedSig = await signHmacSha256(signingKey, dataToSign);
-
-  if (!(await sameSecret(expectedSig, sig))) {
-    return Response.json(
-      { ok: false, error: "Invalid OAuth state signature" },
-      { status: 400, headers: { "set-cookie": clearCookie } },
-    );
-  }
-
-  const exp = parseInt(expStr, 10);
-  if (isNaN(exp) || Math.floor(Date.now() / 1000) > exp) {
-    return Response.json(
-      { ok: false, error: "OAuth state expired" },
-      { status: 400, headers: { "set-cookie": clearCookie } },
-    );
-  }
-
-  if (!(await sameSecret(cookieNonce, state))) {
-    return Response.json(
-      { ok: false, error: "OAuth state mismatch (CSRF detected)" },
-      { status: 400, headers: { "set-cookie": clearCookie } },
-    );
-  }
-
   // If no code and no installationId, user cancelled or error
   if (!code && !installationId) {
     const errorDesc = url.searchParams.get("error_description") ?? "No authorization code provided";
     return Response.json({ ok: false, error: errorDesc }, { status: 400, headers: { "set-cookie": clearCookie } });
+  }
+
+  // OAuth code exchange requires strict CSRF verification via state parameter + signed cookie.
+  // When code is present, or when a state cookie is attached, enforce state verification.
+  const cookieVal = getCookie(request.headers, "cf_oauth_state");
+  if (code || cookieVal) {
+    if (!state) {
+      return Response.json(
+        { ok: false, error: "Missing required OAuth state parameter" },
+        { status: 400, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    if (!cookieVal) {
+      return Response.json(
+        { ok: false, error: "Missing OAuth state cookie" },
+        { status: 400, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    const parts = cookieVal.split(".");
+    if (parts.length !== 3) {
+      return Response.json(
+        { ok: false, error: "Malformed OAuth state cookie" },
+        { status: 400, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    const [cookieNonce, expStr, sig] = parts as [string, string, string];
+    const dataToSign = `${cookieNonce}.${expStr}`;
+    const expectedSig = await signHmacSha256(signingKey, dataToSign);
+
+    if (!(await sameSecret(expectedSig, sig))) {
+      return Response.json(
+        { ok: false, error: "Invalid OAuth state signature" },
+        { status: 400, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    const exp = parseInt(expStr, 10);
+    if (isNaN(exp) || Math.floor(Date.now() / 1000) > exp) {
+      return Response.json(
+        { ok: false, error: "OAuth state expired" },
+        { status: 400, headers: { "set-cookie": clearCookie } },
+      );
+    }
+
+    if (!(await sameSecret(cookieNonce, state))) {
+      return Response.json(
+        { ok: false, error: "OAuth state mismatch (CSRF detected)" },
+        { status: 400, headers: { "set-cookie": clearCookie } },
+      );
+    }
   }
 
   const clientId = url.searchParams.get("client_id") ?? env.GITHUB_CLIENT_ID ?? "github_app_client_id";

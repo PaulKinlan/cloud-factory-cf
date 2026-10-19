@@ -135,6 +135,18 @@ describe("GitHub OAuth & App Install Flow", () => {
     );
     expect(tamperedRes.status).toBe(400);
 
+    // 4c. Reject callback with invalid URI-encoded cookie without throwing 500
+    const uriErrorCookieRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/&state=${state}`,
+      {
+        method: "GET",
+        headers: { cookie: "cf_oauth_state=%zz" },
+      },
+    );
+    expect(uriErrorCookieRes.status).toBe(400);
+    const uriErrorJson = (await uriErrorCookieRes.json()) as any;
+    expect(uriErrorJson.error).toContain("Malformed OAuth state cookie");
+
     // 5. Successful callback with matching state and valid signed cookie
     const callbackRes = await SELF.fetch(
       `https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/&state=${state}`,
@@ -251,5 +263,33 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(parsedTarget.origin).toBe("https://example.com");
     expect(parsedTarget.pathname).toBe("/");
     expect(parsedTarget.searchParams.get("connected")).toBe("1");
+  });
+
+  it("/auth/github/callback: accepts external App install callbacks without code exchange", async () => {
+    // 1. Direct install setup URL with state=owner/repo (from onboarding installUrl)
+    const installWithState = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=inst_789&setup_action=install&state=acme%2Fwidget",
+      {
+        method: "GET",
+        redirect: "manual",
+      },
+    );
+    expect(installWithState.status).toBe(302);
+    const loc1 = installWithState.headers.get("location")!;
+    expect(loc1).toContain("connected=1");
+    expect(loc1).toContain("installation_id=inst_789");
+
+    // 2. Direct install setup URL from GitHub App page (no state param, no cookie)
+    const installWithoutState = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=inst_789&setup_action=install",
+      {
+        method: "GET",
+        redirect: "manual",
+      },
+    );
+    expect(installWithoutState.status).toBe(302);
+    const loc2 = installWithoutState.headers.get("location")!;
+    expect(loc2).toContain("connected=1");
+    expect(loc2).toContain("installation_id=inst_789");
   });
 });
