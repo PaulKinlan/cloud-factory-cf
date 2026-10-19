@@ -65,6 +65,14 @@ function wiredLayout(options: { prompt?: string; provider?: string; event?: stri
   return layout(nodes, edges);
 }
 
+/** The per-(event, agent) delivery ledger a repository's coordinator keeps. */
+async function ledger(repository: string, deliveryId: string): Promise<Array<{ agentId: string; status: string; attempts: number }>> {
+  const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+  const response = await coordinator.fetch(`https://repo-coordinator.internal/deliveries?deliveryId=${encodeURIComponent(deliveryId)}`);
+  const payload = (await response.json()) as { deliveries?: Array<{ agentId: string; status: string; attempts: number }> };
+  return payload.deliveries ?? [];
+}
+
 async function storeDocument(repository: string, document: unknown, name = "Layout"): Promise<string> {
   const response = await SELF.fetch(`https://example.com/canvas/${repository}/documents`, {
     method: "PUT",
@@ -508,14 +516,7 @@ describe("idempotent delivery across fan-out retries (cloud-factory-cf-eu3)", ()
     );
   }
 
-  async function ledger(repository: string, deliveryId: string): Promise<Array<{ agentId: string; status: string; attempts: number }>> {
-    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
-    const response = await coordinator.fetch(
-      `https://repo-coordinator.internal/deliveries?deliveryId=${encodeURIComponent(deliveryId)}`,
-    );
-    const payload = (await response.json()) as { deliveries?: Array<{ agentId: string; status: string; attempts: number }> };
-    return payload.deliveries ?? [];
-  }
+
 
   it("claim/complete decides whether a pair still has work", async () => {
     const repository = "acme/idempotency-ledger";
@@ -584,4 +585,85 @@ describe("idempotent delivery across fan-out retries (cloud-factory-cf-eu3)", ()
     // No second provider call: the review was delivered once.
     expect(second.calls).toHaveLength(0);
   });
+});
+
+describe("one ledger for every runner (cloud-factory-cf-7wj, cloud-factory-cf-lbi)", () => {
+  /** Two agents on one PR source; the docs agent always fails so the event retries. */
+  function mixedLayout(): Record<string, unknown> {
+    return layout(
+      [
+        { id: "n-source", kind: "source", label: "Pull requests", config: { provider: "github", event: "pull_request" } },
+        { id: "n-reviewer", kind: "agent", label: "Reviewer", config: { prompt: "Review.", model: "m" } },
+        { id: "n-docs", kind: "agent", label: "Docs", config: { prompt: "Check docs.", model: "m" } },
+        { id: "n-review-sink", kind: "sink", label: "Review", config: { type: "github-pr-review" } },
+        { id: "n-unknown-sink", kind: "sink", label: "Beads", config: { type: "beads-task" } },
+      ],
+      [
+        ["n-source", "n-reviewer"],
+        ["n-source", "n-docs"],
+        ["n-reviewer", "n-review-sink"],
+        ["n-docs", "n-unknown-sink"],
+      ],
+    );
+  }
+
+  function stubUpstream() {
+    const calls: Array<{ url: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        calls.push({ url: String(input) });
+        return new Response(JSON.stringify({ id: 1 }), { status: 201 });
+      }) as unknown as typeof fetch,
+    );
+    return { calls };
+  }
+
+  async function drain(repository: string): Promise<{ claimed: number; skipped: number; ran: number }> {
+    const response = await SELF.fetch(`https://example.com/runs/${repository}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-factory-control-key": CONTROL_KEY },
+      body: JSON.stringify({}),
+    });
+    expect(response.status).toBe(200);
+    return (await response.json()) as { claimed: number; skipped: number; ran: number };
+  }
+
+  it("does not post the review twice when the queue drain retries a canvas event", async () => {
+    const repository = "acme/ledger-drain";
+    await provision(repository, "pr.review");
+    // The docs agent is wired to beads with no beads deployment configured here,
+    // so that pair fails and the event goes back to the queue.
+    const documentId = await storeDocument(repository, mixedLayout(), "Mixed");
+    await enqueue(repository, "drain-1", pullRequest(repository, 61));
+    const first = stubUpstream();
+
+    const firstReport = (await (await runDocument(repository, documentId)).json()) as { failed: number };
+    expect(firstReport.failed).toBe(1);
+    expect(first.calls).toHaveLength(1);
+
+    // The other public runner, which used to bypass the ledger entirely.
+    vi.unstubAllGlobals();
+    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    const second = stubUpstream();
+    const drained = await drain(repository);
+    expect(drained.claimed).toBe(1);
+    // No second review: the reviewer's pair is already delivered, so the drain
+    // has nothing to do and hands the event back for the canvas runner instead of
+    // acknowledging the docs agent's failure.
+    expect(second.calls).toHaveLength(0);
+    expect(drained.skipped).toBe(1);
+    expect(await ledger(repository, "drain-1")).toEqual([
+      { agentId: "n-docs", status: "failed", attempts: 1, updatedAt: expect.any(String) },
+      { agentId: "n-reviewer", status: "delivered", attempts: 1, updatedAt: expect.any(String) },
+    ]);
+    // Still queued, with no attempt spent by the drain.
+    const stats = (await (
+      await env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository)).fetch(
+        "https://repo-coordinator.internal/stats",
+      )
+    ).json()) as { counts: Record<string, number> };
+    expect(stats.counts["pending"]).toBe(1);
+  });
+
 });

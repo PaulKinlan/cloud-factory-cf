@@ -415,6 +415,22 @@ export class RepoCoordinator extends DurableObject<Env> {
       )
       .toArray()[0];
 
+    // A runner with no agent identity of its own (the legacy queue drain) stands
+    // for "the repository's agent": if any agent of this event has already
+    // delivered, running again would repeat a provider call
+    // (cloud-factory-cf-7wj).
+    if (body?.["skipIfAnyDelivered"] === true && existing?.status !== "delivered") {
+      const delivered = this.sql
+        .exec<{ agent_id: string }>(
+          "SELECT agent_id FROM event_deliveries WHERE delivery_id = ? AND status = 'delivered' LIMIT 1",
+          deliveryId,
+        )
+        .toArray()[0];
+      if (delivered !== undefined) {
+        return Response.json({ ok: true, run: false, status: "delivered", deliveredBy: delivered.agent_id });
+      }
+    }
+
     const now = new Date().toISOString();
     if (existing?.status === "delivered") {
       return Response.json({ ok: true, run: false, status: existing.status, deliveredAt: existing.updated_at });

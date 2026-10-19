@@ -195,52 +195,9 @@ export async function runCanvasDocument(
     report.events += 1;
     const outcomes: RunOutcome[] = [];
     for (const agent of agents) {
-      // Idempotency: a redelivered event (partial failure, expired lease, a
-      // provider retry) must not post the same agent's side effects twice, so the
-      // coordinator's delivery ledger decides whether this pair still has work.
-      const permission = await claimDelivery(deps, event.deliveryId, agent.id);
-      if (permission === "skip") {
-        const duplicate: RunOutcome = {
-          deliveryId: event.deliveryId,
-          status: "succeeded",
-          duplicate: true,
-          settled: true,
-          prompt: agent.prompt,
-          actionTypes: [],
-          durationMs: 0,
-        };
-        outcomes.push(duplicate);
-        report.deduped += 1;
-        const summary = report.agents.find((entry) => entry.agentId === agent.id);
-        if (summary) {
-          summary.runs.push(duplicate);
-          if (summary.status !== "failed") summary.status = "ran";
-        }
-        continue;
-      }
-      if (permission === "unavailable") {
-        // Without the ledger we cannot promise idempotency; better to say so than
-        // to risk a duplicate side effect.
-        const blocked: RunOutcome = {
-          deliveryId: event.deliveryId,
-          status: "failed",
-          settled: true,
-          prompt: agent.prompt,
-          error: "delivery ledger unavailable, so the run was not started",
-          actionTypes: [],
-          durationMs: 0,
-        };
-        outcomes.push(blocked);
-        report.failed += 1;
-        const summary = report.agents.find((entry) => entry.agentId === agent.id);
-        if (summary) {
-          summary.runs.push(blocked);
-          summary.status = "failed";
-          summary.error = blocked.error;
-        }
-        continue;
-      }
-
+      // runEvent enforces the delivery ledger for every runner, so a pair that
+      // already delivered comes back as `duplicate` instead of acting again, and
+      // the queue drain cannot bypass it (cloud-factory-cf-7wj / -lbi).
       const outcome = await runEvent(deps, event, {
         agentPrompt: agent.prompt,
         agentId: agent.id,
@@ -248,8 +205,11 @@ export async function runCanvasDocument(
         ...(agent.memoryScope === null ? {} : { memoryScope: agent.memoryScope }),
       });
       outcomes.push(outcome);
-      report.ran += 1;
-      await completeDelivery(deps, event.deliveryId, agent.id, outcome.status === "failed" ? "failed" : "delivered");
+      if (outcome.duplicate === true) {
+        report.deduped += 1;
+      } else {
+        report.ran += 1;
+      }
 
       const summary = report.agents.find((entry) => entry.agentId === agent.id);
       if (summary) {
@@ -299,34 +259,7 @@ export async function runCanvasDocument(
   return { ok: true, report };
 }
 
-/** `run` when this (event, agent) pair still has work, `skip` when it already delivered. */
-async function claimDelivery(
-  deps: PipelineDeps,
-  deliveryId: string,
-  agentId: string,
-): Promise<"run" | "skip" | "unavailable"> {
-  const response = await deps.coordinator.fetch("https://repo-coordinator.internal/deliveries/claim", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ deliveryId, agentId }),
-  });
-  if (!response.ok) return "unavailable";
-  const payload = (await response.json().catch(() => ({}))) as { run?: unknown };
-  return payload.run === false ? "skip" : "run";
-}
 
-async function completeDelivery(
-  deps: PipelineDeps,
-  deliveryId: string,
-  agentId: string,
-  status: "delivered" | "failed",
-): Promise<void> {
-  await deps.coordinator.fetch("https://repo-coordinator.internal/deliveries/complete", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ deliveryId, agentId, status }),
-  });
-}
 
 async function claim(deps: PipelineDeps, limit: number): Promise<ClaimedEvent[]> {
   const response = await deps.coordinator.fetch("https://repo-coordinator.internal/claim", {

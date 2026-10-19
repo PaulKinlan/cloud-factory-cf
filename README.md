@@ -90,6 +90,19 @@ A pair is `started` while a run is in flight, then `delivered`, `failed` (which
 is retried) or `skipped`. A `started` row from a crashed attempt is retried —
 at-least-once is the honest choice when the process may have died mid-request.
 
+The ledger is enforced inside `runEvent`, so **every** runner is covered: the
+canvas run, the queue drain behind `POST /runs/:owner/:repo`, and the scheduled
+handler. The drain has no agent identity of its own, so it asks the ledger to skip
+an event that any agent already delivered and hands it back to the queue
+(`release`) — it neither re-posts a review nor acknowledges a failure belonging to
+a canvas agent.
+
+If the ledger cannot record a run after the side effects happened (a rejected or
+unreachable write), the run is retried three times; if it still fails the outcome
+carries `deliveryError` and the event is acknowledged anyway. That choice is
+deliberate: retrying would post the review twice, so the gap is reported instead
+of hidden.
+
 Today's deterministic runtime can deliver `github-pr-review` and
 `github-issue-comment`; a sink type it does not know is ignored rather than
 invented, and a model runtime can replace the decision function without touching

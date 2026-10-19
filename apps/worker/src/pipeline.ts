@@ -54,6 +54,12 @@ export interface RunOutcome {
   status: "succeeded" | "failed" | "skipped";
   /** True when the (event, agent) pair had already delivered, so this is not a second side effect. */
   duplicate?: boolean;
+  /**
+   * Set when the side effects happened but the delivery ledger could not record
+   * them. The event is still acknowledged — retrying would repeat provider calls
+   * — but the gap is reported instead of hidden (cloud-factory-cf-lbi).
+   */
+  deliveryError?: string;
   /** `false` when the queue rejected the ack/fail, so the event will be redelivered. */
   settled: boolean;
   settlementError?: string;
@@ -421,6 +427,74 @@ export function sinksFor(types: readonly string[] | undefined): ActionSink[] {
 }
 
 /** Runs one agent invocation for a claimed event; never throws. */
+/** Hands a claimed event back to the queue without spending an attempt. */
+async function releaseEvent(deps: PipelineDeps, event: ClaimedEvent): Promise<boolean> {
+  try {
+    const response = await deps.coordinator.fetch("https://repo-coordinator.internal/release", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ claims: [{ deliveryId: event.deliveryId, leaseId: event.leaseId }] }),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Asks the repository's ledger whether this (event, agent) pair still has work.
+ * Anything but a definitive answer is `unavailable`: without the ledger the run
+ * cannot promise idempotency, so it does not start.
+ */
+async function claimDelivery(
+  deps: PipelineDeps,
+  deliveryId: string,
+  agentId: string,
+  skipIfAnyDelivered = false,
+): Promise<"run" | "skip" | "unavailable"> {
+  try {
+    const response = await deps.coordinator.fetch("https://repo-coordinator.internal/deliveries/claim", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deliveryId, agentId, ...(skipIfAnyDelivered ? { skipIfAnyDelivered: true } : {}) }),
+    });
+    if (!response.ok) return "unavailable";
+    const payload = (await response.json().catch(() => ({}))) as { run?: unknown };
+    return payload.run === false ? "skip" : "run";
+  } catch {
+    return "unavailable";
+  }
+}
+
+/**
+ * Records what happened after the side effects. A rejected write is retried, and
+ * if it keeps failing the run reports it (`deliveryError`) instead of pretending
+ * the pair was recorded: the event is acknowledged (a retry would repeat the
+ * provider call) and the gap stays visible to an operator.
+ */
+async function completeDelivery(
+  deps: PipelineDeps,
+  deliveryId: string,
+  agentId: string,
+  status: "delivered" | "failed",
+): Promise<string | null> {
+  let lastError = "delivery ledger did not record the run";
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await deps.coordinator.fetch("https://repo-coordinator.internal/deliveries/complete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deliveryId, agentId, status }),
+      });
+      if (response.ok) return null;
+      lastError = `delivery ledger rejected the completion (${response.status})`;
+    } catch (error) {
+      lastError = `delivery ledger unreachable: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+  return lastError;
+}
+
 export async function runEvent(
   deps: PipelineDeps,
   event: ClaimedEvent,
@@ -444,16 +518,60 @@ export async function runEvent(
     for (const sink of recordingSinks(deps.sinks ?? sinksFor(options.sinks), emitted)) {
       runtime.registerSink(sink);
     }
-    const ctx = buildContext(deps, facts, runtime, options);
     const prompt = promptFor(facts);
 
+    // Enforce the delivery ledger here, not in a caller: every runner shares this
+    // path, so the queue drain cannot bypass idempotency the way it could when
+    // only the canvas route consulted the ledger (cloud-factory-cf-7wj).
+    const agentKey = options.agentId ?? "default";
+    const permission = await claimDelivery(deps, event.deliveryId, agentKey, options.agentId === undefined);
+    if (permission === "skip") {
+      return {
+        ...base,
+        prompt,
+        status: "succeeded",
+        duplicate: true,
+        actionTypes: [],
+        output: `already delivered ${event.deliveryId} as ${agentKey}`,
+      };
+    }
+    if (permission === "unavailable") {
+      return {
+        ...base,
+        prompt,
+        status: "failed",
+        error: "delivery ledger unavailable, so the run was not started",
+      };
+    }
+
+    const ctx = buildContext(deps, facts, runtime, options);
     const summary = await runtime.runAgent(prompt, ctx, executionFn);
 
+    const deliveryError = await completeDelivery(
+      deps,
+      event.deliveryId,
+      agentKey,
+      summary.status === "success" ? "delivered" : "failed",
+    );
     if (summary.status === "failure") {
-      return { ...base, prompt, status: "failed", error: summary.error ?? "run failed", actionTypes: emitted };
+      return {
+        ...base,
+        prompt,
+        status: "failed",
+        error: summary.error ?? "run failed",
+        actionTypes: emitted,
+        ...(deliveryError === null ? {} : { deliveryError }),
+      };
     }
     if (summary.status === "cancelled") {
-      return { ...base, prompt, status: "failed", error: sequenceReason(summary.error), actionTypes: emitted };
+      return {
+        ...base,
+        prompt,
+        status: "failed",
+        error: sequenceReason(summary.error),
+        actionTypes: emitted,
+        ...(deliveryError === null ? {} : { deliveryError }),
+      };
     }
     return {
       ...base,
@@ -464,6 +582,7 @@ export async function runEvent(
       output: summary.output,
       actionTypes: emitted,
       durationMs: Date.now() - startedAt,
+      ...(deliveryError === null ? {} : { deliveryError }),
     };
   } catch (error) {
     return {
@@ -602,6 +721,21 @@ export async function drainRepository(
 
   for (const event of claimed) {
     const outcome = await runEvent(deps, event);
+
+    // An event another runner already delivered is handed back rather than
+    // acknowledged: this drain has no work for it, but a canvas run still might
+    // (it knows which agents the event is wired to and which of them failed).
+    if (outcome.duplicate === true) {
+      const released = await releaseEvent(deps, event);
+      if (!released) {
+        outcome.settled = false;
+        outcome.settlementError = "could not release an already-delivered event";
+      }
+      report.runs.push(outcome);
+      report.skipped += 1;
+      if (!outcome.settled) report.unsettled += 1;
+      continue;
+    }
 
     // The run's own result and the queue's settlement are separate facts: a
     // rejected ack/fail means the event will be redelivered, so the report must
