@@ -20,4 +20,5 @@ export {
   asRecord,
   clampInt,
   safeParseJson,
+  safeDecode,
 } from "./helpers";

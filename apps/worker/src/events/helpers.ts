@@ -8,9 +8,17 @@ export function clampInt(value: unknown, min: number, max: number, fallback: num
   return Math.min(Math.max(Math.trunc(parsed), min), max);
 }
 
-export function safeParseJson(value: string): unknown {
+export function safeParseJson(value: string, fallback: unknown = null): unknown {
   try {
     return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+export function safeDecode(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
   } catch {
     return null;
   }

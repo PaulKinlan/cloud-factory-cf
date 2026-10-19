@@ -11,6 +11,7 @@ import {
   migrateRunAuditTable,
   MAX_ATTEMPTS,
   DEFAULT_VISIBILITY_MS,
+  safeDecode,
 } from "./events";
 import {
   deliveryIdFor,
@@ -297,14 +298,6 @@ export class RepoCoordinator extends DurableObject<Env> {
       return this.memoryHandler.delete(key);
     }
     return new Response("not found", { status: 404 });
-  }
-}
-
-function safeDecode(value: string): string | null {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return null;
   }
 }
 

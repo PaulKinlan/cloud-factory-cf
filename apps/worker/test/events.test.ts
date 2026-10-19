@@ -12,6 +12,7 @@ import {
   asRecord,
   clampInt,
   safeParseJson,
+  safeDecode,
 } from "../src/events";
 
 describe("events domain controllers", () => {
@@ -26,6 +27,9 @@ describe("events domain controllers", () => {
     expect(clampInt(200, 1, 100, 10)).toBe(100);
     expect(safeParseJson('{"ok":true}')).toEqual({ ok: true });
     expect(safeParseJson("invalid")).toBeNull();
+    expect(safeParseJson("raw-string", "raw-string")).toBe("raw-string");
+    expect(safeDecode("hello%20world")).toBe("hello world");
+    expect(safeDecode("%E0%A4%A")).toBeNull();
   });
 
   it("EventQueue.enqueue returns true for new delivery_id and false for duplicate", async () => {
