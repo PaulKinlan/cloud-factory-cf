@@ -377,23 +377,79 @@ test('runPrReview: inspects uncommitted and untracked files on a dirty worktree 
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
-test('runPrReview: degrades to step summary without failing when GitHub API review POST is non-ok (fixes cloud-factory-cf-e2c)', async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-readonly-token-'));
-  await fs.writeFile(path.join(tmpDir, 'README.md'), '# hi\n', 'utf8');
+test('runPrReview: inspects uncommitted untracked directories and quoted paths (fixes cloud-factory-cf-sal)', async () => {
+  const { exec } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execAsync = promisify(exec);
 
-  const logs: string[] = [];
-  // Run with an invalid token against real or mock API
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-untracked-dirs-'));
+  await execAsync('git init -q -b main . && git config user.email "test@example.com" && git config user.name "Test"', { cwd: tmpDir });
+  await fs.mkdir(path.join(tmpDir, 'src'), { recursive: true });
+  await fs.writeFile(path.join(tmpDir, 'src', 'a.ts'), 'export const a = 1;\n', 'utf8');
+  await execAsync('git add -A && git commit -qm "init"', { cwd: tmpDir });
+  await execAsync('git update-ref refs/remotes/origin/main HEAD', { cwd: tmpDir });
+
+  // Add untracked NEW directory with token
+  await fs.mkdir(path.join(tmpDir, 'src', 'features', 'billing'), { recursive: true });
+  await fs.writeFile(
+    path.join(tmpDir, 'src', 'features', 'billing', 'index.ts'),
+    'export const token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";\n',
+    'utf8',
+  );
+
+  // Add untracked file with space in path
+  await fs.mkdir(path.join(tmpDir, 'docs'), { recursive: true });
+  await fs.writeFile(
+    path.join(tmpDir, 'docs', 'my notes.md'),
+    '# my notes\n',
+    'utf8',
+  );
+
   const result = await runPrReview({
     cwd: tmpDir,
-    githubToken: 'ghp_dummy_token_that_returns_401',
+    dryRun: true,
+    io: { stdout: () => {}, stderr: () => {} },
+  });
+
+  assert.ok(result.changedFiles.some((f) => f.includes('billing/index.ts')));
+  assert.ok(result.changedFiles.some((f) => f.includes('my notes.md')));
+  assert.equal(result.verdict, 'REQUEST_CHANGES');
+  assert.ok(result.findings.some((f) => f.includes('Potential credential detected in `src/features/billing/index.ts`')));
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
+test('runPrReview: degrades to step summary with notice without network calls (fixes cloud-factory-cf-e2c, isp, 156)', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-readonly-token-'));
+  await fs.writeFile(path.join(tmpDir, 'README.md'), '# hi\n', 'utf8');
+  const outPath = path.join(tmpDir, 'step-summary.md');
+
+  const logs: string[] = [];
+  const mockFetch: typeof fetch = async () => {
+    return new Response(JSON.stringify({ message: 'Resource not accessible by integration' }), {
+      status: 403,
+      statusText: 'Forbidden',
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  const result = await runPrReview({
+    cwd: tmpDir,
+    githubToken: 'ghp_readonly_fork_token',
+    fetchFn: mockFetch,
     dryRun: false,
+    outPath,
     io: { stdout: (m) => logs.push(m), stderr: (m) => logs.push(m) },
   });
 
-  // Should not throw, should set posted to false, and preserve review body
+  // Should not throw, should set posted to false, and preserve review body with notice
   assert.equal(result.posted, false);
   assert.ok(result.body.includes('Cloud Factory Dogfood Review'));
+  assert.ok(result.body.includes('not submitted to the PR conversation (API status 403)'));
   assert.ok(logs.some((l) => l.includes('Degraded to step summary output')));
+
+  const summaryContent = await fs.readFile(outPath, 'utf8');
+  assert.ok(summaryContent.includes('not submitted to the PR conversation (API status 403)'));
 
   await fs.rm(tmpDir, { recursive: true, force: true });
 });

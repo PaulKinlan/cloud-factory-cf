@@ -27,6 +27,8 @@ export interface PrReviewOptions {
     stdout: (msg: string) => void;
     stderr: (msg: string) => void;
   };
+  fetchFn?: typeof fetch;
+  apiBaseUrl?: string;
 }
 
 export interface PrReviewResult {
@@ -120,9 +122,9 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
     let gitSucceeded = false;
     try {
       // Gather committed diff against base branch (or HEAD~1)
-      const diffCmd = `git diff --name-only origin/${baseRef}...HEAD 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || true`;
-      // Also gather uncommitted/staged/untracked working tree modifications
-      const statusCmd = `git status --porcelain 2>/dev/null || true`;
+      const diffCmd = `git -c core.quotepath=false diff --name-only origin/${baseRef}...HEAD 2>/dev/null || git -c core.quotepath=false diff --name-only HEAD~1 2>/dev/null || true`;
+      // Also gather uncommitted/staged/untracked working tree modifications without collapsing untracked dirs
+      const statusCmd = `git -c core.quotepath=false status --porcelain -uall 2>/dev/null || true`;
 
       const [diffRes, statusRes] = await Promise.all([
         execAsync(diffCmd, { cwd }),
@@ -133,17 +135,54 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
       await execAsync('git rev-parse --is-inside-work-tree', { cwd });
       gitSucceeded = true;
 
+      const unquote = (p: string) => {
+        let clean = p.trim().replace(/^[MADRCU?! ]{1,2}\s+/, '');
+        if (clean.startsWith('"') && clean.endsWith('"')) {
+          clean = clean.slice(1, -1);
+        }
+        return clean;
+      };
+
       const diffFiles = diffRes.stdout
         .split('\n')
-        .map((l) => l.trim())
+        .map(unquote)
         .filter((l) => l.length > 0);
 
       const statusFiles = statusRes.stdout
         .split('\n')
-        .map((l) => l.trim().replace(/^[MADRCU?! ]{1,2}\s+/, ''))
+        .map(unquote)
         .filter((l) => l.length > 0);
 
-      changedFiles = [...diffFiles, ...statusFiles];
+      const rawCandidateFiles = [...diffFiles, ...statusFiles];
+
+      const resolvedFiles: string[] = [];
+      for (const entry of rawCandidateFiles) {
+        const fullPath = path.resolve(cwd, entry);
+        try {
+          const stat = await fs.stat(fullPath);
+          if (stat.isDirectory()) {
+            async function walkDir(d: string, b: string): Promise<string[]> {
+              const ents = await fs.readdir(d, { withFileTypes: true }).catch(() => []);
+              const res: string[] = [];
+              for (const e of ents) {
+                if (e.name === '.git' || e.name === 'node_modules' || e.name === 'dist') continue;
+                const r = path.join(b, e.name);
+                const f = path.join(d, e.name);
+                if (e.isDirectory()) res.push(...(await walkDir(f, r)));
+                else if (e.isFile()) res.push(r);
+              }
+              return res;
+            }
+            resolvedFiles.push(...(await walkDir(fullPath, entry)));
+          } else if (stat.isFile()) {
+            resolvedFiles.push(entry);
+          }
+        } catch {
+          // If stat fails (e.g. deleted file), keep entry for diff tracking
+          resolvedFiles.push(entry);
+        }
+      }
+      changedFiles = resolvedFiles;
     } catch {
       gitSucceeded = false;
     }
@@ -210,24 +249,14 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
     verdict,
   });
 
-  // 7. Write to outPath if requested (e.g. for GITHUB_STEP_SUMMARY)
-  if (options.outPath) {
-    try {
-      const targetPath = path.resolve(cwd, options.outPath);
-      await fs.mkdir(path.dirname(targetPath), { recursive: true });
-      await fs.writeFile(targetPath, reviewBody, 'utf8');
-      io.stdout(`[dogfood review] Wrote review summary to ${targetPath}`);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      io.stderr(`[dogfood review] Failed to write outPath: ${msg}`);
-    }
-  }
-
-  // 8. Dispatch via GitHubPRReviewSink through LocalAgentRunner
+  // 7. Dispatch via GitHubPRReviewSink through LocalAgentRunner
   const token = options.githubToken ?? process.env['GITHUB_TOKEN'];
   const isDryRun = options.dryRun ?? (!token);
+  const customFetch = options.fetchFn ?? globalThis.fetch;
+  const apiBase = options.apiBaseUrl ?? 'https://api.github.com';
 
   let posted = false;
+  let submissionStatus: number | undefined;
   let reviewId: string | number | undefined;
 
   const reviewSink: ActionSink = new GitHubPRReviewSink({
@@ -240,9 +269,9 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
       }
 
       // Live GitHub API request
-      const apiUrl = `https://api.github.com/repos/${owner}/${repoName}/pulls/${payload.prNumber}/reviews`;
+      const apiUrl = `${apiBase}/repos/${owner}/${repoName}/pulls/${payload.prNumber}/reviews`;
       io.stdout(`[dogfood review] Submitting review to GitHub API: ${apiUrl}...`);
-      const res = await fetch(apiUrl, {
+      const res = await customFetch(apiUrl, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -258,6 +287,7 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
         }),
       });
 
+      submissionStatus = res.status;
       if (!res.ok) {
         const errorText = await res.text().catch(() => '');
         io.stderr(`[dogfood review] Warning: GitHub API review submission failed (${res.status}): ${errorText}`);
@@ -316,12 +346,30 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
     throw new Error(runSummary.error ?? 'Dogfood PR review runner failed');
   }
 
+  // 8. Write to outPath (e.g. GITHUB_STEP_SUMMARY) with degradation notice if review posting was skipped/failed
+  let finalBody = reviewBody;
+  if (!posted && !isDryRun && token) {
+    finalBody += `\n\n> ⚠️ **Note:** Automated review was generated as a GitHub Step Summary only and was not submitted to the PR conversation (API status ${submissionStatus ?? 'non-ok'}).\n`;
+  }
+
+  if (options.outPath) {
+    try {
+      const targetPath = path.resolve(cwd, options.outPath);
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.writeFile(targetPath, finalBody, 'utf8');
+      io.stdout(`[dogfood review] Wrote review summary to ${targetPath}`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      io.stderr(`[dogfood review] Failed to write outPath: ${msg}`);
+    }
+  }
+
   return {
     prNumber,
     repo: { owner, name: repoName },
     commitSha,
     verdict,
-    body: reviewBody,
+    body: finalBody,
     findings,
     posted,
     reviewId,
