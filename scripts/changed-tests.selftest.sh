@@ -209,6 +209,20 @@ run_gate
 check "deleting a *.spec.* workspace's only tests is a named no-op" 'test "$RC" -eq 0 && out_has "packages/specp: no test files remain"'
 reset_tree
 
+# 9d. Deleting a workspace's last test must not vouch for a source change beside it:
+#     with no test files left that source runs no suite at all (u8k review follow-up).
+rm -rf "$FIX/apps/web/test"
+printf 'export const orphan = 1;\n' > "$FIX/apps/web/src/orphan.ts"
+run_gate
+check "a deleted last test cannot hide an uncovered source beside it" 'test "$RC" -ne 0 && err_has "apps/web has no test files left" && err_has "apps/web/src/orphan.ts"'
+reset_tree
+
+# 9e. ... and the same delta with no source change stays the named no-op.
+rm -rf "$FIX/apps/web/test"
+run_gate
+check "deleting tests alone is still a no-op, not a red" 'test "$RC" -eq 0 && out_has "apps/web: no test files remain"'
+reset_tree
+
 # 10. --list on an affected-source delta reports the selection and stays green (it runs
 #     nothing, so "ran nothing" must not be read as "nothing covers this").
 printf '\n// touch\n' >> "$FIX/apps/web/src/m.ts"

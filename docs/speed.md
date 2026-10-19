@@ -72,7 +72,9 @@ contract:
   reason, not a broken change (bead `cloud-factory-cf-u8k`). The no-op is reported by
   `--list` too, the smoke set skips that workspace and names the removal, and still runs
   the others; a genuinely failing test stays red. Test files are recognised by vitest's
-  own defaults, `*.test.*` and `*.spec.*` (bead `cloud-factory-cf-a5s`, `r0r`);
+  own defaults, `*.test.*` and `*.spec.*` (bead `cloud-factory-cf-a5s`, `r0r`). A
+  deleted last test does **not** vouch for a source change beside it: with no test files
+  left in the workspace that source is named as a failure, not skipped;
 - a test-file delta does **not** vouch for a source change in the same workspace: if the
   workspace's tests and sources reference that module nowhere, the source still fails by
   name, because a whole-suite run cannot invent a test for it (bead `cloud-factory-cf-9ef`);

@@ -260,8 +260,23 @@ for ws in "${WS_ORDER[@]}"; do
   if [ -n "$ws_tests" ]; then
     # Checked before the --list report: a workspace whose tests were just deleted is a
     # no-op, not a "whole suite" run that has nothing to pick up (cloud-factory-cf-a5s).
+    # A deleted last test does NOT vouch for the changed sources beside it: with no test
+    # files left they run no suite at all, whatever their references say (u8k review,
+    # cloud-factory-cf-9ef follow-up).
     if ! has_test_files "$ws"; then
-      echo "changed-tests: ${ws}: no test files remain — nothing to run (this delta removes the workspace's only coverage; say why on the bead)"
+      if [ -n "$ws_sources" ]; then
+        while IFS= read -r path; do
+          [ -n "$path" ] || continue
+          if is_declared "$path"; then
+            echo "changed-tests: DECLARED UNVERIFIED $path (no suite yet — cloud-factory-cf-5e8, cloud-factory-cf-d8s)"
+            continue
+          fi
+          echo "changed-tests: FAIL ${path} — ${ws} has no test files left, so this source change runs no suite" >&2
+          status=1
+        done <<< "$ws_sources"
+      else
+        echo "changed-tests: ${ws}: no test files remain — nothing to run (this delta removes the workspace's only coverage; say why on the bead)"
+      fi
       noop_ws+=" ${ws}"
       continue
     fi
