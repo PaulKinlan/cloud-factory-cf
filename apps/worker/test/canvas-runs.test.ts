@@ -1,6 +1,6 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { planAgents, sourceMatches, uniqueClaims } from "../src/canvas-runs";
+import { chooseSettlement, planAgents, sourceMatches, uniqueClaims } from "../src/canvas-runs";
 import { sinksFor } from "../src/pipeline";
 import { signBody, TEST_SECRET } from "./support/webhook";
 
@@ -63,6 +63,14 @@ function wiredLayout(options: { prompt?: string; provider?: string; event?: stri
     edges.push(["n-agent", "n-memory"]);
   }
   return layout(nodes, edges);
+}
+
+/** The per-(event, agent) delivery ledger a repository's coordinator keeps. */
+async function ledger(repository: string, deliveryId: string): Promise<Array<{ agentId: string; status: string; attempts: number }>> {
+  const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+  const response = await coordinator.fetch(`https://repo-coordinator.internal/deliveries?deliveryId=${encodeURIComponent(deliveryId)}`);
+  const payload = (await response.json()) as { deliveries?: Array<{ agentId: string; status: string; attempts: number }> };
+  return payload.deliveries ?? [];
 }
 
 async function storeDocument(repository: string, document: unknown, name = "Layout"): Promise<string> {
@@ -483,5 +491,217 @@ describe("fan-out: one event, several agents (cloud-factory-cf-sdq)", () => {
     const stats = await coordinator.fetch("https://repo-coordinator.internal/stats");
     const counts = ((await stats.json()) as { counts?: Record<string, number> }).counts ?? {};
     expect(counts["pending"]).toBe(1);
+  });
+});
+
+describe("idempotent delivery across fan-out retries (cloud-factory-cf-eu3)", () => {
+  function mixedLayout(): Record<string, unknown> {
+    // Reviewer delivers; the "docs" agent is wired to a sink type this worker
+    // does not implement, so it always fails. That makes the event fail after the
+    // reviewer already delivered — the exact partial-failure case.
+    return layout(
+      [
+        { id: "n-source", kind: "source", label: "Pull requests", config: { provider: "github", event: "pull_request" } },
+        { id: "n-reviewer", kind: "agent", label: "Reviewer", config: { prompt: "Review.", model: "m" } },
+        { id: "n-docs", kind: "agent", label: "Docs", config: { prompt: "Check docs.", model: "m" } },
+        { id: "n-review-sink", kind: "sink", label: "Review", config: { type: "github-pr-review" } },
+        { id: "n-unknown-sink", kind: "sink", label: "Beads", config: { type: "beads-task" } },
+      ],
+      [
+        ["n-source", "n-reviewer"],
+        ["n-source", "n-docs"],
+        ["n-reviewer", "n-review-sink"],
+        ["n-docs", "n-unknown-sink"],
+      ],
+    );
+  }
+
+
+
+  it("claim/complete decides whether a pair still has work", async () => {
+    const repository = "acme/idempotency-ledger";
+    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+    const post = async (path: string, body: unknown) =>
+      (await (
+        await coordinator.fetch(`https://repo-coordinator.internal${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        })
+      ).json()) as { ok: boolean; run?: boolean; status?: string; error?: string };
+
+    expect(await post("/deliveries/claim", { deliveryId: "ev-1", agentId: "a" })).toMatchObject({ ok: true, run: true });
+    expect(await post("/deliveries/complete", { deliveryId: "ev-1", agentId: "a", status: "delivered" })).toMatchObject({ ok: true });
+    // The second claim for the same pair does not run again.
+    expect(await post("/deliveries/claim", { deliveryId: "ev-1", agentId: "a" })).toMatchObject({ ok: true, run: false });
+    // A failed pair is retried.
+    expect(await post("/deliveries/complete", { deliveryId: "ev-1", agentId: "a", status: "failed" })).toMatchObject({ ok: true });
+    expect(await post("/deliveries/claim", { deliveryId: "ev-1", agentId: "a" })).toMatchObject({ ok: true, run: true });
+    // Validation and the listing.
+    expect((await post("/deliveries/claim", {})).ok).toBe(false);
+    expect((await post("/deliveries/complete", { deliveryId: "ev-1", agentId: "a", status: "nonsense" })).ok).toBe(false);
+    // Two runs claimed the pair (the skipped claim does not count); it is
+    // currently started again, so a crash mid-flight is retried.
+    expect(await ledger(repository, "ev-1")).toEqual([{ agentId: "a", status: "started", attempts: 2, updatedAt: expect.any(String) }]);
+  });
+
+  it("does not post a review twice when a partially failed event is retried", async () => {
+    const repository = "acme/idempotency-retry";
+    await provision(repository, "pr.review");
+    const documentId = await storeDocument(repository, mixedLayout(), "Mixed");
+    await enqueue(repository, "retry-1", pullRequest(repository, 51));
+    const first = stubUpstream();
+
+    const firstReport = (await (await runDocument(repository, documentId)).json()) as {
+      ran: number;
+      failed: number;
+      agents: Array<{ agentId: string; status: string; error?: string }>;
+    };
+    expect(firstReport.ran).toBe(2);
+    expect(firstReport.failed).toBe(1);
+    expect(firstReport.agents.find((agent) => agent.agentId === "n-reviewer")?.status).toBe("ran");
+    expect(firstReport.agents.find((agent) => agent.agentId === "n-docs")?.status).toBe("failed");
+    expect(first.calls).toHaveLength(1);
+    expect(await ledger(repository, "retry-1")).toEqual([
+      { agentId: "n-docs", status: "failed", attempts: 1, updatedAt: expect.any(String) },
+      { agentId: "n-reviewer", status: "delivered", attempts: 1, updatedAt: expect.any(String) },
+    ]);
+
+    // The failed event comes back after its backoff; the reviewer must not post
+    // a second review, and the docs agent retries.
+    vi.unstubAllGlobals();
+    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    const second = stubUpstream();
+    const secondReport = (await (await runDocument(repository, documentId)).json()) as {
+      ran: number;
+      deduped: number;
+      failed: number;
+      agents: Array<{ agentId: string; status: string; runs: Array<{ duplicate?: boolean }> }>;
+    };
+    expect(secondReport.deduped).toBe(1);
+    expect(secondReport.ran).toBe(1);
+    expect(secondReport.failed).toBe(1);
+    expect(secondReport.agents.find((agent) => agent.agentId === "n-reviewer")?.runs[0]?.duplicate).toBe(true);
+    // No second provider call: the review was delivered once.
+    expect(second.calls).toHaveLength(0);
+  });
+});
+
+describe("one ledger for every runner (cloud-factory-cf-7wj, cloud-factory-cf-lbi)", () => {
+  /** Two agents on one PR source; the docs agent always fails so the event retries. */
+  function mixedLayout(): Record<string, unknown> {
+    return layout(
+      [
+        { id: "n-source", kind: "source", label: "Pull requests", config: { provider: "github", event: "pull_request" } },
+        { id: "n-reviewer", kind: "agent", label: "Reviewer", config: { prompt: "Review.", model: "m" } },
+        { id: "n-docs", kind: "agent", label: "Docs", config: { prompt: "Check docs.", model: "m" } },
+        { id: "n-review-sink", kind: "sink", label: "Review", config: { type: "github-pr-review" } },
+        { id: "n-unknown-sink", kind: "sink", label: "Beads", config: { type: "beads-task" } },
+      ],
+      [
+        ["n-source", "n-reviewer"],
+        ["n-source", "n-docs"],
+        ["n-reviewer", "n-review-sink"],
+        ["n-docs", "n-unknown-sink"],
+      ],
+    );
+  }
+
+  function stubUpstream() {
+    const calls: Array<{ url: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        calls.push({ url: String(input) });
+        return new Response(JSON.stringify({ id: 1 }), { status: 201 });
+      }) as unknown as typeof fetch,
+    );
+    return { calls };
+  }
+
+  async function drain(repository: string): Promise<{ claimed: number; skipped: number; ran: number }> {
+    const response = await SELF.fetch(`https://example.com/runs/${repository}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-factory-control-key": CONTROL_KEY },
+      body: JSON.stringify({}),
+    });
+    expect(response.status).toBe(200);
+    return (await response.json()) as { claimed: number; skipped: number; ran: number };
+  }
+
+  it("does not post the review twice when the queue drain retries a canvas event", async () => {
+    const repository = "acme/ledger-drain";
+    await provision(repository, "pr.review");
+    // The docs agent is wired to beads with no beads deployment configured here,
+    // so that pair fails and the event goes back to the queue.
+    const documentId = await storeDocument(repository, mixedLayout(), "Mixed");
+    await enqueue(repository, "drain-1", pullRequest(repository, 61));
+    const first = stubUpstream();
+
+    const firstReport = (await (await runDocument(repository, documentId)).json()) as { failed: number };
+    expect(firstReport.failed).toBe(1);
+    expect(first.calls).toHaveLength(1);
+
+    // The other public runner, which used to bypass the ledger entirely.
+    vi.unstubAllGlobals();
+    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    const second = stubUpstream();
+    const drained = await drain(repository);
+    expect(drained.claimed).toBe(1);
+    // No second review: the reviewer's pair is already delivered, so the drain
+    // has nothing to do and hands the event back for the canvas runner instead of
+    // acknowledging the docs agent's failure.
+    expect(second.calls).toHaveLength(0);
+    expect(drained.skipped).toBe(1);
+    expect(await ledger(repository, "drain-1")).toEqual([
+      { agentId: "n-docs", status: "failed", attempts: 1, updatedAt: expect.any(String) },
+      { agentId: "n-reviewer", status: "delivered", attempts: 1, updatedAt: expect.any(String) },
+    ]);
+    // Still queued, with no attempt spent by the drain.
+    const stats = (await (
+      await env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository)).fetch(
+        "https://repo-coordinator.internal/stats",
+      )
+    ).json()) as { counts: Record<string, number> };
+    expect(stats.counts["pending"]).toBe(1);
+  });
+
+});
+
+describe("fan-out settlement when a ledger write is lost (cloud-factory-cf-lbi)", () => {
+  const outcome = (overrides: Partial<{ status: "succeeded" | "failed" | "skipped"; deliveryError: string }>) => ({
+    deliveryId: "d-1",
+    status: "succeeded" as const,
+    settled: true,
+    prompt: "",
+    actionTypes: [] as string[],
+    durationMs: 0,
+    ...overrides,
+  });
+
+  it("retries the event when an agent simply failed", () => {
+    const chosen = chooseSettlement([outcome({}), outcome({ status: "failed" })]);
+    expect(chosen.retry).toBe(true);
+    expect(chosen.outcome.status).toBe("failed");
+    expect(chosen.ledgerErrors).toEqual([]);
+  });
+
+  it("acknowledges instead of retrying when a delivered agent's ledger write was lost", () => {
+    // The reviewer delivered but its completion was rejected; the docs agent
+    // failed. Retrying would post the review a second time, so the event is
+    // acknowledged and the gap reported.
+    const chosen = chooseSettlement([
+      outcome({ deliveryError: "delivery ledger rejected the completion (503)" }),
+      outcome({ status: "failed" }),
+    ]);
+    expect(chosen.retry).toBe(false);
+    expect(chosen.outcome.status).toBe("succeeded");
+    expect(chosen.ledgerErrors).toEqual(["delivery ledger rejected the completion (503)"]);
+  });
+
+  it("acknowledges when every agent delivered", () => {
+    const chosen = chooseSettlement([outcome({}), outcome({})]);
+    expect(chosen.retry).toBe(false);
+    expect(chosen.outcome.status).toBe("succeeded");
   });
 });

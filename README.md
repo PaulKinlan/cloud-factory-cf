@@ -72,15 +72,41 @@ document into work — the layout *is* the agent configuration:
    then **fan out**: each event runs *every* agent whose sources name it
    (`provider` + `event`, `*` matches all), with that agent's prompt, wired
    sinks and memory scope. The event is settled once — ack only when every
-   agent succeeded, otherwise `/fail` (so the agents that succeeded run again on
-   the retry; sinks are not idempotent yet). Events no agent wanted are
-   **released** back to the queue without counting an attempt;
+   agent succeeded, otherwise `/fail`. A retry is **idempotent per
+   (event, agent)**: the coordinator keeps a delivery ledger and skips a pair that
+   already delivered, so only the agent that failed runs again. Events no agent
+   wanted are **released** back to the queue without counting an attempt;
 4. one `run_audit` row records the document, the agents and the delivery ids
    each one consumed (`GET /runs/audit` on the coordinator lists them).
 
 Response: `{ ok, documentId, name, ran, events, failed, agents: [{ agentId, name, sources, sinks, runs, status, error? }] }`
 — `ran` counts agent executions (an event wired to two agents counts twice),
-`events` counts the events claimed and settled.
+`events` counts the events claimed and settled, and `deduped` counts agent
+executions skipped because that pair had already delivered.
+
+The delivery ledger is `event_deliveries` in the repository's coordinator
+(`POST /deliveries/claim`, `POST /deliveries/complete`, `GET /deliveries?deliveryId=`).
+A pair is `started` while a run is in flight, then `delivered`, `failed` (which
+is retried) or `skipped`. A `started` row from a crashed attempt is retried —
+at-least-once is the honest choice when the process may have died mid-request.
+
+The ledger is enforced inside `runEvent`, so **every** runner is covered: the
+canvas run, the queue drain behind `POST /runs/:owner/:repo`, and the scheduled
+handler. The drain has no agent identity of its own, so it asks the ledger to skip
+an event that any agent already delivered and hands it back to the queue
+(`release`) — it neither re-posts a review nor acknowledges a failure belonging to
+a canvas agent.
+
+If the ledger cannot record a run after the side effects happened (a rejected or
+unreachable write), the run is retried three times; if it still fails the outcome
+carries `deliveryError` and the event is acknowledged anyway. That choice is
+deliberate: retrying would post the review twice, so the gap is reported instead
+of hidden (`ledgerErrors` in the run report).
+
+In a fan-out that cuts both ways: if one agent delivered but its ledger write was
+lost, the event is acknowledged even when another agent failed — retrying would
+repeat the delivered agent — and the report names both the failed agent and the
+ledger gap.
 
 Today's deterministic runtime can deliver `github-pr-review` and
 `github-issue-comment`; a sink type it does not know is ignored rather than

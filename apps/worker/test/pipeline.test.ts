@@ -356,6 +356,10 @@ describe("settlement and retry semantics (cloud-factory-cf-cyk)", () => {
           return Response.json({ ok: true, payload: { number: 3, title: "T", pull_request: { number: 3 } } });
         }
         if (path === "/ack" || path === "/fail") return settlement();
+        // Delivery ledger: the drain goes through the same idempotency path as a
+        // canvas run, so the first claim for a pair is "run".
+        if (path === "/deliveries/claim") return Response.json({ ok: true, run: true });
+        if (path === "/deliveries/complete") return Response.json({ ok: true });
         return Response.json({ ok: false, error: "unexpected" }, { status: 500 });
       },
     };
@@ -441,5 +445,78 @@ describe("settlement and retry semantics (cloud-factory-cf-cyk)", () => {
     expect(retried.status).toBe("success");
     // A retry counts as the first review, not the second.
     expect(memory.get("review-count")).toBe(1);
+  });
+});
+
+describe("delivery ledger completion failures (cloud-factory-cf-lbi)", () => {
+  const claimedEvent = {
+    deliveryId: "evt-1",
+    provider: "github",
+    event: "pull_request",
+    action: "opened",
+    repository: "acme/ledger",
+    actor: "octocat",
+    attempts: 1,
+    leaseId: "lease-1",
+  };
+
+  function ledgerStub(options: { completeStatus: number }): {
+    fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+    paths: string[];
+  } {
+    const paths: string[] = [];
+    return {
+      paths,
+      fetch: async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        paths.push(path);
+        if (path === "/claim") {
+          return Response.json({ ok: true, claimed: [claimedEvent], leaseUntil: "later" });
+        }
+        if (path === "/events/evt-1/payload") {
+          return Response.json({ ok: true, payload: { number: 3, title: "T", pull_request: { number: 3 } } });
+        }
+        if (path === "/deliveries/claim") return Response.json({ ok: true, run: true });
+        if (path === "/deliveries/complete") {
+          return options.completeStatus === 200
+            ? Response.json({ ok: true })
+            : Response.json({ ok: false, error: "write unavailable" }, { status: options.completeStatus });
+        }
+        if (path === "/ack" || path === "/fail") return Response.json({ ok: true });
+        return Response.json({ ok: false, error: `unexpected ${path}` }, { status: 500 });
+      },
+    };
+  }
+
+  it("reports a rejected completion instead of pretending the pair was recorded", async () => {
+    const coordinator = ledgerStub({ completeStatus: 503 });
+    const report = await drainRepository({
+      repository: "acme/ledger",
+      controlKey: "k",
+      coordinator,
+      broker: { fetch: async () => Response.json({ ok: true }) },
+      executionFn: async () => ({ status: "success", output: "done", toolCallsCount: 0 }),
+    });
+
+    const outcome = report.runs[0];
+    // The completion was retried, then reported — not swallowed.
+    expect(coordinator.paths.filter((path) => path === "/deliveries/complete")).toHaveLength(3);
+    expect(outcome?.deliveryError ?? "").toContain("delivery ledger rejected the completion");
+    // The event is still settled: retrying would repeat the provider call.
+    expect(outcome?.settled).toBe(true);
+    expect(report.unsettled).toBe(0);
+  });
+
+  it("records the pair when the completion succeeds, so a redelivery is skipped", async () => {
+    const coordinator = ledgerStub({ completeStatus: 200 });
+    await drainRepository({
+      repository: "acme/ledger",
+      controlKey: "k",
+      coordinator,
+      broker: { fetch: async () => Response.json({ ok: true }) },
+      executionFn: async () => ({ status: "success", output: "done", toolCallsCount: 0 }),
+    });
+    expect(coordinator.paths).toContain("/deliveries/complete");
+    expect(coordinator.paths.filter((path) => path === "/deliveries/complete")).toHaveLength(1);
   });
 });
