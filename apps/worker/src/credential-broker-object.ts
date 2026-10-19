@@ -90,6 +90,14 @@ export class CredentialBroker extends DurableObject<Env> {
     if (url.pathname === "/settings") {
       return this.handleSettings(request);
     }
+    if (url.pathname === "/effective-webhook-secret") {
+      const stored = this.getSetting("webhook.secret");
+      const effective = stored ?? this.env.WEBHOOK_SECRET ?? null;
+      if (!effective) {
+        return Response.json({ ok: false, error: "no webhook secret configured" }, { status: 503 });
+      }
+      return Response.json({ ok: true, secret: effective });
+    }
     if (request.method === "POST" && url.pathname === "/proxy") {
       return this.proxy(request);
     }
@@ -335,6 +343,11 @@ export class CredentialBroker extends DurableObject<Env> {
       {
         fetchImpl: fetch,
         readCredential: (envName) => {
+          const settingKey = this.settingKeyForEnv(envName);
+          if (settingKey) {
+            const stored = this.getSetting(settingKey);
+            if (stored) return stored;
+          }
           const value = (this.env as unknown as Record<string, unknown>)[envName];
           return typeof value === "string" ? value : undefined;
         },
@@ -806,7 +819,14 @@ export class CredentialBroker extends DurableObject<Env> {
       const deepseekKey = settingsMap.get("ai.deepseek_key") ?? "";
       const geminiKey = settingsMap.get("ai.gemini_key") ?? "";
 
-      const webhookSecret = settingsMap.get("webhook.secret") ?? this.env.WEBHOOK_SECRET ?? "";
+      const storedWebhookSecret = settingsMap.get("webhook.secret");
+      const hasEnvWebhookSecret = Boolean(this.env.WEBHOOK_SECRET);
+      const isWebhookConfigured = Boolean(storedWebhookSecret || hasEnvWebhookSecret);
+      const webhookSecretMasked = storedWebhookSecret
+        ? maskSecret(storedWebhookSecret)
+        : hasEnvWebhookSecret
+          ? "•••••••• (environment default)"
+          : "";
 
       return Response.json({
         ok: true,
@@ -817,7 +837,7 @@ export class CredentialBroker extends DurableObject<Env> {
           hasClientSecret: clientSecret.length > 0,
           clientSecretMasked: maskSecret(clientSecret),
           hasPrivateKey: privateKey.length > 0,
-          privateKeyFingerprint: privateKey ? computePemFingerprint(privateKey) : null,
+          privateKeyFingerprint: privateKey ? await computePemFingerprint(privateKey) : null,
         },
         aiProviders: {
           anthropic: {
@@ -842,8 +862,9 @@ export class CredentialBroker extends DurableObject<Env> {
           },
         },
         webhook: {
-          configured: webhookSecret.length > 0,
-          secretMasked: maskSecret(webhookSecret),
+          configured: isWebhookConfigured,
+          isRepoOverride: Boolean(storedWebhookSecret),
+          secretMasked: webhookSecretMasked,
           url: `/webhooks/github/${this.repository}`,
         },
       });
@@ -865,10 +886,16 @@ export class CredentialBroker extends DurableObject<Env> {
           updatedKeys.push("github.client_id");
         }
         if (typeof clientSecret === "string" && clientSecret.trim().length > 0) {
+          if (clientSecret.includes("••••")) {
+            return Response.json({ ok: false, error: "Masked values cannot be stored as secrets" }, { status: 400 });
+          }
           this.setSetting("github.client_secret", clientSecret.trim(), now);
           updatedKeys.push("github.client_secret");
         }
         if (typeof privateKey === "string" && privateKey.trim().length > 0) {
+          if (privateKey.includes("••••")) {
+            return Response.json({ ok: false, error: "Masked values cannot be stored as secrets" }, { status: 400 });
+          }
           if (!isValidPem(privateKey)) {
             return Response.json(
               {
@@ -886,6 +913,12 @@ export class CredentialBroker extends DurableObject<Env> {
       if (body.aiProviders && typeof body.aiProviders === "object") {
         const { anthropic, openai, deepseek, gemini } = body.aiProviders;
         if (typeof anthropic?.key === "string" && anthropic.key.trim().length > 0) {
+          if (anthropic.key.includes("••••")) {
+            return Response.json({ ok: false, error: "Masked values cannot be stored as keys" }, { status: 400 });
+          }
+          if (!anthropic.key.startsWith("sk-ant-") || anthropic.key.length < 20) {
+            return Response.json({ ok: false, error: "Anthropic API key must start with sk-ant- and be at least 20 chars" }, { status: 400 });
+          }
           this.setSetting("ai.anthropic_key", anthropic.key.trim(), now);
           updatedKeys.push("ai.anthropic_key");
         }
@@ -894,6 +927,12 @@ export class CredentialBroker extends DurableObject<Env> {
           updatedKeys.push("ai.anthropic_model");
         }
         if (typeof openai?.key === "string" && openai.key.trim().length > 0) {
+          if (openai.key.includes("••••")) {
+            return Response.json({ ok: false, error: "Masked values cannot be stored as keys" }, { status: 400 });
+          }
+          if (!openai.key.startsWith("sk-") || openai.key.length < 20) {
+            return Response.json({ ok: false, error: "OpenAI API key must start with sk- and be at least 20 chars" }, { status: 400 });
+          }
           this.setSetting("ai.openai_key", openai.key.trim(), now);
           updatedKeys.push("ai.openai_key");
         }
@@ -902,6 +941,12 @@ export class CredentialBroker extends DurableObject<Env> {
           updatedKeys.push("ai.openai_model");
         }
         if (typeof deepseek?.key === "string" && deepseek.key.trim().length > 0) {
+          if (deepseek.key.includes("••••")) {
+            return Response.json({ ok: false, error: "Masked values cannot be stored as keys" }, { status: 400 });
+          }
+          if (!deepseek.key.startsWith("sk-") || deepseek.key.length < 20) {
+            return Response.json({ ok: false, error: "DeepSeek API key must start with sk- and be at least 20 chars" }, { status: 400 });
+          }
           this.setSetting("ai.deepseek_key", deepseek.key.trim(), now);
           updatedKeys.push("ai.deepseek_key");
         }
@@ -910,6 +955,12 @@ export class CredentialBroker extends DurableObject<Env> {
           updatedKeys.push("ai.deepseek_model");
         }
         if (typeof gemini?.key === "string" && gemini.key.trim().length > 0) {
+          if (gemini.key.includes("••••")) {
+            return Response.json({ ok: false, error: "Masked values cannot be stored as keys" }, { status: 400 });
+          }
+          if (!gemini.key.startsWith("AIza") || gemini.key.length < 20) {
+            return Response.json({ ok: false, error: "Gemini API key must start with AIza and be at least 20 chars" }, { status: 400 });
+          }
           this.setSetting("ai.gemini_key", gemini.key.trim(), now);
           updatedKeys.push("ai.gemini_key");
         }
@@ -920,6 +971,9 @@ export class CredentialBroker extends DurableObject<Env> {
       }
 
       if (typeof body.webhookSecret === "string" && body.webhookSecret.trim().length > 0) {
+        if (body.webhookSecret.includes("••••")) {
+          return Response.json({ ok: false, error: "Masked values cannot be stored as secrets" }, { status: 400 });
+        }
         this.setSetting("webhook.secret", body.webhookSecret.trim(), now);
         updatedKeys.push("webhook.secret");
       }
@@ -950,6 +1004,30 @@ export class CredentialBroker extends DurableObject<Env> {
       now,
     );
   }
+
+  private settingKeyForEnv(envName: string): string | null {
+    switch (envName) {
+      case "ANTHROPIC_API_KEY":
+        return "ai.anthropic_key";
+      case "OPENAI_API_KEY":
+        return "ai.openai_key";
+      case "DEEPSEEK_API_KEY":
+        return "ai.deepseek_key";
+      case "GEMINI_API_KEY":
+        return "ai.gemini_key";
+      case "GITHUB_TOKEN":
+        return "github.token";
+      default:
+        return null;
+    }
+  }
+
+  private getSetting(key: string): string | null {
+    const rows = this.sql
+      .exec<{ value: string }>(`SELECT value FROM repo_settings WHERE key = ?`, key)
+      .toArray();
+    return rows.length > 0 && rows[0] ? rows[0].value : null;
+  }
 }
 
 export function maskSecret(secret: string): string {
@@ -960,19 +1038,17 @@ export function maskSecret(secret: string): string {
   return `${start}••••••••${end}`;
 }
 
-export function computePemFingerprint(pem: string): string {
+export async function computePemFingerprint(pem: string): Promise<string> {
   const clean = pem.replace(/-----[A-Z ]*-----/g, "").replace(/\s+/g, "");
   if (!clean) return "unknown";
-  return `sha256:${clean.slice(0, 8)}...${clean.slice(-8)}`;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(clean));
+  const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `sha256:${hex.slice(0, 16)}`;
 }
 
 export function isValidPem(pem: string): boolean {
   const trimmed = pem.trim();
-  return (
-    trimmed.startsWith("-----BEGIN ") &&
-    trimmed.includes("PRIVATE KEY-----") &&
-    trimmed.includes("-----END ")
-  );
+  return /^-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----\r?\n[\s\S]+\r?\n-----END (?:[A-Z ]+ )?PRIVATE KEY-----$/.test(trimmed);
 }
 
 type OverrideKind = "credential_binding" | "allowed_actions";

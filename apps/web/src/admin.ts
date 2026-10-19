@@ -280,6 +280,42 @@ export function initAdminDashboard(): void {
       }
     }
 
+    const anthropicKey = anthropicKeyInput?.value.trim();
+    if (anthropicKey && !anthropicKey.includes('••••')) {
+      const v = validateApiKey('anthropic', anthropicKey);
+      if (!v.valid) {
+        showStatus(v.error ?? 'Invalid Anthropic API key', true);
+        return;
+      }
+    }
+
+    const openaiKey = openaiKeyInput?.value.trim();
+    if (openaiKey && !openaiKey.includes('••••')) {
+      const v = validateApiKey('openai', openaiKey);
+      if (!v.valid) {
+        showStatus(v.error ?? 'Invalid OpenAI API key', true);
+        return;
+      }
+    }
+
+    const deepseekKey = deepseekKeyInput?.value.trim();
+    if (deepseekKey && !deepseekKey.includes('••••')) {
+      const v = validateApiKey('deepseek', deepseekKey);
+      if (!v.valid) {
+        showStatus(v.error ?? 'Invalid DeepSeek API key', true);
+        return;
+      }
+    }
+
+    const geminiKey = geminiKeyInput?.value.trim();
+    if (geminiKey && !geminiKey.includes('••••')) {
+      const v = validateApiKey('gemini', geminiKey);
+      if (!v.valid) {
+        showStatus(v.error ?? 'Invalid Gemini API key', true);
+        return;
+      }
+    }
+
     const payload: any = {
       githubApp: {
         appId: appIdInput?.value.trim() || undefined,

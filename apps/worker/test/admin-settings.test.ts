@@ -63,7 +63,48 @@ describe("Admin Dashboard & Settings API", () => {
     expect(settings.githubApp.clientSecretMasked).toContain("••••••••");
     expect(settings.githubApp.clientSecretMasked).not.toBe("github_secret_abcdef987654321");
     expect(settings.githubApp.hasPrivateKey).toBe(true);
-    expect(settings.githubApp.privateKeyFingerprint).toMatch(/^sha256:/);
+    expect(settings.githubApp.privateKeyFingerprint).toMatch(/^sha256:[a-f0-9]{16}$/);
+    expect(settings.githubApp.privateKeyFingerprint).not.toContain("MIIEow");
+  });
+
+  it("DELETE ?key= removes only the specified setting, leaving others intact", async () => {
+    // 1. Delete only github.client_secret
+    const delRes = await SELF.fetch(`https://example.com/api/admin/settings/${REPOSITORY}?key=github.client_secret`, {
+      method: "DELETE",
+      headers: { "x-factory-control-key": CONTROL_KEY },
+    });
+    expect(delRes.status).toBe(200);
+    const delBody = (await delRes.json()) as { ok: boolean; deleted: string };
+    expect(delBody.ok).toBe(true);
+    expect(delBody.deleted).toBe("github.client_secret");
+
+    // 2. Verify github.app_id is still present, but client secret is gone
+    const getRes = await SELF.fetch(`https://example.com/api/admin/settings/${REPOSITORY}`, {
+      method: "GET",
+      headers: { "x-factory-control-key": CONTROL_KEY },
+    });
+    const settings = (await getRes.json()) as any;
+    expect(settings.githubApp.appId).toBe("123456");
+    expect(settings.githubApp.hasClientSecret).toBe(false);
+  });
+
+  it("rejects masked placeholder values with 400", async () => {
+    const res = await SELF.fetch(`https://example.com/api/admin/settings/${REPOSITORY}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-factory-control-key": CONTROL_KEY,
+      },
+      body: JSON.stringify({
+        aiProviders: {
+          openai: { key: "sk-••••••••1234" },
+        },
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Masked values cannot be stored");
   });
 
   it("rejects invalid PEM private key format with 400", async () => {
@@ -119,7 +160,18 @@ describe("Admin Dashboard & Settings API", () => {
     expect(settings.aiProviders.gemini.configured).toBe(true);
   });
 
-  it("triggers test ping webhook and returns delivery confirmation", async () => {
+  it("triggers test ping webhook and returns delivery confirmation with custom secret", async () => {
+    // Set a custom repository webhook secret
+    const customSecret = "custom-repo-webhook-secret-456";
+    await SELF.fetch(`https://example.com/api/admin/settings/${REPOSITORY}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-factory-control-key": CONTROL_KEY,
+      },
+      body: JSON.stringify({ webhookSecret: customSecret }),
+    });
+
     const pingRes = await SELF.fetch(`https://example.com/api/admin/test-ping/${REPOSITORY}`, {
       method: "POST",
       headers: {

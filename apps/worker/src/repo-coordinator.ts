@@ -441,7 +441,25 @@ export class RepoCoordinator extends DurableObject<Env> {
     body: string,
   ): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
     if (provider === "github") {
-      const secret = this.env.WEBHOOK_SECRET;
+      let secret: string | undefined = undefined;
+      const repoName = this.ctx.id.name;
+      if (this.env.CREDENTIAL_BROKER && repoName) {
+        try {
+          const broker = this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(repoName));
+          const res = await broker.fetch("https://credential-broker.internal/effective-webhook-secret");
+          if (res.ok) {
+            const data = (await res.json().catch(() => ({}))) as { secret?: string };
+            if (typeof data.secret === "string" && data.secret.length > 0) {
+              secret = data.secret;
+            }
+          }
+        } catch {
+          // Fall back to env.WEBHOOK_SECRET
+        }
+      }
+      if (!secret) {
+        secret = this.env.WEBHOOK_SECRET;
+      }
       if (!secret) return { ok: false, status: 503, error: "webhook secret not configured" };
       const valid = await verifyGithubSignature(secret, body, headers.get("x-hub-signature-256"));
       return valid ? { ok: true } : { ok: false, status: 401, error: "invalid signature" };

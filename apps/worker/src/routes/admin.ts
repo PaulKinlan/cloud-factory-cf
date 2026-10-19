@@ -21,7 +21,7 @@ export async function handleAdmin(
   const settingsMatch = ADMIN_SETTINGS_PATH.exec(url.pathname);
   if (settingsMatch?.groups) {
     const { owner, repo } = settingsMatch.groups as { owner: string; repo: string };
-    return routeAdminSettings(request, env, owner, repo);
+    return routeAdminSettings(request, env, owner, repo, url.search);
   }
 
   // 3. /api/admin/test-ping/:owner/:repo
@@ -39,6 +39,7 @@ export async function routeAdminSettings(
   env: Env,
   owner: string,
   repo: string,
+  search = "",
 ): Promise<Response> {
   const repository = `${owner}/${repo}`;
   const stub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository));
@@ -47,7 +48,7 @@ export async function routeAdminSettings(
   const controlKey = request.headers.get("x-factory-control-key");
   if (controlKey !== null) headers.set("x-factory-control-key", controlKey);
 
-  const forwarded = new Request("https://credential-broker.internal/settings", {
+  const forwarded = new Request(`https://credential-broker.internal/settings${search}`, {
     method: request.method,
     headers,
     body: request.method === "POST" || request.method === "DELETE" ? await request.text() : undefined,
@@ -76,7 +77,32 @@ export async function routeAdminTestPing(
   }
 
   const repository = `${owner}/${repo}`;
-  const secret = env.WEBHOOK_SECRET ?? "test-webhook-secret";
+  let secret: string | undefined = undefined;
+
+  const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository));
+  try {
+    const secretRes = await broker.fetch("https://credential-broker.internal/effective-webhook-secret");
+    if (secretRes.ok) {
+      const data = (await secretRes.json().catch(() => ({}))) as { secret?: string };
+      if (typeof data.secret === "string" && data.secret.length > 0) {
+        secret = data.secret;
+      }
+    }
+  } catch {
+    // Fall back to env.WEBHOOK_SECRET
+  }
+
+  if (!secret) {
+    secret = env.WEBHOOK_SECRET;
+  }
+
+  if (!secret) {
+    return Response.json(
+      { ok: false, error: "webhook secret not configured for this repository or deployment" },
+      { status: 503 },
+    );
+  }
+
   const deliveryId = `test-ping-${crypto.randomUUID().slice(0, 8)}`;
   const payload = JSON.stringify({
     zen: "Keep it logically awesome.",
