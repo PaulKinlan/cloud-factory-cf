@@ -47,26 +47,42 @@ export function sanitizeReturnTo(target: string | null | undefined, origin: stri
     return "/";
   }
 
+  let candidate: string | null = null;
   if (trimmed.startsWith("/")) {
     try {
       const parsed = new URL(trimmed, origin);
-      if (parsed.origin !== origin) return "/";
-      return parsed.pathname + parsed.search + parsed.hash;
+      if (parsed.origin === origin) {
+        candidate = parsed.pathname + parsed.search + parsed.hash;
+      }
+    } catch {
+      return "/";
+    }
+  } else {
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.origin === origin) {
+        candidate = parsed.pathname + parsed.search + parsed.hash;
+      }
     } catch {
       return "/";
     }
   }
 
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.origin === origin) {
-      return parsed.pathname + parsed.search + parsed.hash;
-    }
-  } catch {
-    // Malformed URL
+  if (!candidate) return "/";
+
+  // Ensure candidate never starts with '//' or '/\' or contains backslashes
+  if (!candidate.startsWith("/") || candidate.startsWith("//") || candidate.startsWith("/\\") || candidate.includes("\\")) {
+    return "/";
   }
 
-  return "/";
+  try {
+    const check = new URL(candidate, origin);
+    if (check.origin !== origin) return "/";
+  } catch {
+    return "/";
+  }
+
+  return candidate;
 }
 
 export async function handleAuth(

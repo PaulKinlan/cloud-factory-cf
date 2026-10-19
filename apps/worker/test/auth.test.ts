@@ -244,6 +244,16 @@ describe("GitHub OAuth & App Install Flow", () => {
     const parsedProtoUri = new URL(new URL(protoLocation).searchParams.get("redirect_uri")!);
     expect(parsedProtoUri.searchParams.get("return_to")).toBe("/");
 
+    // 2b. Same-origin URL with protocol-relative double-slash path is neutralized (cloud-factory-cf-zmm)
+    const doubleSlashLogin = await SELF.fetch(
+      "https://example.com/auth/github/login?client_id=gh_test_client_id&redirect_uri=https://example.com//evil.example/steal",
+      { method: "GET", redirect: "manual" },
+    );
+    expect(doubleSlashLogin.status).toBe(302);
+    const doubleSlashLocation = doubleSlashLogin.headers.get("location")!;
+    const parsedDoubleSlash = new URL(new URL(doubleSlashLocation).searchParams.get("redirect_uri")!);
+    expect(parsedDoubleSlash.searchParams.get("return_to")).toBe("/");
+
     // 3. Off-origin return_to in callback is neutralized and never redirects off-site
     const validLogin = await SELF.fetch(
       "https://example.com/auth/github/login?client_id=gh_test_client_id",
@@ -263,6 +273,25 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(parsedTarget.origin).toBe("https://example.com");
     expect(parsedTarget.pathname).toBe("/");
     expect(parsedTarget.searchParams.get("connected")).toBe("1");
+
+    // 4. Protocol-relative and backslash direct injection in callback
+    const protoCallback = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&state=${validState}&return_to=//evil.example/steal`,
+      { method: "GET", headers: { cookie: cookieHeader }, redirect: "manual" },
+    );
+    expect(protoCallback.status).toBe(302);
+    const protoTarget = new URL(protoCallback.headers.get("location")!);
+    expect(protoTarget.origin).toBe("https://example.com");
+    expect(protoTarget.pathname).toBe("/");
+
+    const backslashCallback = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&state=${validState}&return_to=/\\\\evil.example/steal`,
+      { method: "GET", headers: { cookie: cookieHeader }, redirect: "manual" },
+    );
+    expect(backslashCallback.status).toBe(302);
+    const backslashTarget = new URL(backslashCallback.headers.get("location")!);
+    expect(backslashTarget.origin).toBe("https://example.com");
+    expect(backslashTarget.pathname).toBe("/");
   });
 
   it("/auth/github/callback: accepts external App install callbacks without code exchange", async () => {
