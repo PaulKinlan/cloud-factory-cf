@@ -172,8 +172,10 @@ describe("agent configuration export", () => {
     assert.equal(config.agents[0]?.id, agent.id);
     assert.equal(config.agents[0]?.name, "Reviewer");
     assert.equal(config.agents[0]?.prompt, "Review carefully");
+    assert.equal(config.agents[0]?.sources.length, 1);
     assert.equal(config.agents[0]?.sources[0]?.id, source.id);
     assert.equal(config.agents[0]?.sources[0]?.label, "PRs");
+    assert.equal(config.agents[0]?.sinks.length, 1);
     assert.equal(config.agents[0]?.sinks[0]?.id, sink.id);
     assert.equal(config.agents[0]?.sinks[0]?.label, "Review sink");
     assert.deepEqual(config.agents[0]?.memory.map((entry) => entry.id), [memory.id]);

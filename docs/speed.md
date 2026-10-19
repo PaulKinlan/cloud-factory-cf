@@ -11,14 +11,16 @@ served by `fleet-deps`.
 | --- | --- | --- |
 | `npm run build` | `vite build` for `apps/web`, then `wrangler deploy --dry-run` — bundles the Worker, validates `wrangler.jsonc`, DO bindings, migrations and the `ASSETS` directory | 2.0–2.3s |
 | `npm run typecheck` | `tsc --noEmit` per workspace (sdk, cli, worker, web) | 4.0–4.4s |
-| `npm test` | `vitest run` inside workerd (`@cloudflare/vitest-plugin`) + node-mode model tests for `apps/web` | 7.5–9s |
+| `npm test` | `vitest run` inside workerd (`@cloudflare/vitest-plugin`), `node:test` for packages (`canvas-model`, `sdk`, `cli`), and Vitest for `apps/web` | 7.5–9s |
 | `npm run ci` | build + typecheck + test | 14–17s idle VM; 45s+ when the VM is loaded |
 | `npm run test:file -- test/<file>.test.ts` | one workerd test file | 2–3s |
-| `npm run test -w @factory-cloud/web` | one node-mode test file set (canvas model) | 0.9s |
+| `npm run test -w @factory-cloud/canvas-model` | `node:test` model tests (`packages/canvas-model`) | 0.2s |
+| `npm run test -w @factory-cloud/web` | Vitest sync tests (`apps/web`) | 0.7s |
 | `vitest run --changed` | dev-loop only, **not a gate** — see below | selects 0 tests in a committed worktree |
 
-`apps/web` is in those numbers: its unit tests run in plain Node (≈0.2s) and its
-build is a 0.1s `vite build`. `apps/worker` builds the canvas before its own
+`apps/web` and `packages/canvas-model` are in those numbers: canvas model unit
+tests run in plain Node via `node:test` (≈0.2s), web sync tests run in Vitest
+(≈0.1-0.2s), and the web build is a 0.1s `vite build`. `apps/worker` builds the canvas before its own
 dry-run deploy and before its tests (`prebuild`/`pretest`), which is what keeps
 `ASSETS` pointing at a directory that exists; the cost is that `vite build` runs
 twice per `npm run ci` (≈0.2s total). Measured 2026-10-19: the assets binding
