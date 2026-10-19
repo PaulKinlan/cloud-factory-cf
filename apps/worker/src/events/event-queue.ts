@@ -456,6 +456,18 @@ export class EventQueue {
     return (rows[0]?.due ?? 0) > 0;
   }
 
+  /** The provider events that are due now, so a caller can decide who owns them. */
+  dueProviderEvents(now: string = new Date().toISOString(), limit = 25): Array<{ provider: string; event: string }> {
+    return this.sql
+      .exec<{ provider: string; event: string }>(
+        `SELECT DISTINCT provider, event FROM events
+         WHERE status = 'pending' AND available_at <= ? LIMIT ?`,
+        now,
+        limit,
+      )
+      .toArray();
+  }
+
   /**
    * Arms the alarm for the next thing that needs work, **including work that is due
    * now**. The old query only looked at `available_at > now`, so a fresh delivery

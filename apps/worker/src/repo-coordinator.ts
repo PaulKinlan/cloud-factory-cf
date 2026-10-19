@@ -1,5 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
+import { planAgents, sourceMatches } from "./canvas-runs";
+import { safeParseJson } from "./events/helpers";
 import { corePrReviewer, drainRepository } from "./pipeline";
 import { reviewRuntime } from "./review/model";
 import { CanvasStore, migrateCanvasTable } from "./canvas-store";
@@ -280,9 +282,30 @@ export class RepoCoordinator extends DurableObject<Env> {
     await this.eventQueue.armAlarm();
   }
 
+  /**
+   * Whether a canvas in this repository has an agent wired to the event. The canvas
+   * is the reviewer of record for its own events, so the default reviewer stands down
+   * rather than posting a second review of the same pull request
+   * (cloud-factory-cf-7or, coord's option B).
+   */
+  private canvasHandles(event: { provider: string; event: string }): boolean {
+    const rows = this.sql.exec<{ document: string }>("SELECT document FROM canvas_documents").toArray();
+    return rows.some((row) => {
+      const document = safeParseJson(row.document);
+      if (document === null) return false;
+      const plan = planAgents(document);
+      if (!plan.ok) return false;
+      return plan.plan.some((agent) => agent.sources.some((source) => sourceMatches(source, event)));
+    });
+  }
+
   /** Runs due events through the pipeline, in this object's own context. */
   private async autoDrain(): Promise<void> {
     if (!this.eventQueue.hasDue()) return;
+    // Exactly one review per pull request: if a canvas agent is wired to every due
+    // event, the canvas owns them and the default reviewer stays out of the way.
+    const due = this.eventQueue.dueProviderEvents();
+    if (due.length > 0 && due.every((event) => this.canvasHandles(event))) return;
     const repository = this.ctx.id.name ?? "";
     const controlKey = this.env.BROKER_CONTROL_KEY;
     // Without a control key no capability can be minted, so a drain would fail every
