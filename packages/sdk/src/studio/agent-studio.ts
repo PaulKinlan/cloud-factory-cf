@@ -3,17 +3,18 @@
  */
 
 import { PromptToAgentCompiler } from './prompt-compiler.ts';
-import type {
-  AgentManifest,
-  AgentCapabilityRequest,
-  StudioContext,
-  SimulationRequest,
-  SimulationResult,
-  SimulationContext,
-  SimulatedToolCall,
-  SimulatedMemoryMutation,
-  SimulatedPermissionCheck,
-  AgentSynthesisFn,
+import {
+  STANDARD_SINK_TYPES,
+  type AgentManifest,
+  type AgentCapabilityRequest,
+  type StudioContext,
+  type SimulationRequest,
+  type SimulationResult,
+  type SimulationContext,
+  type SimulatedToolCall,
+  type SimulatedMemoryMutation,
+  type SimulatedPermissionCheck,
+  type AgentSynthesisFn,
 } from '../types/studio.ts';
 import type { Extension, ExtensionAPI } from '../types/extension.ts';
 import type {
@@ -113,7 +114,12 @@ export class AgentStudio {
     const memoryMutations: SimulatedMemoryMutation[] = [];
     const permissionChecks: SimulatedPermissionCheck[] = [];
 
-    if (!request.manifest || typeof request.manifest !== 'object') {
+    if (
+      !request ||
+      typeof request !== 'object' ||
+      !request.manifest ||
+      typeof request.manifest !== 'object'
+    ) {
       return {
         runId,
         status: 'failed',
@@ -122,7 +128,7 @@ export class AgentStudio {
         sinkActions,
         memoryMutations,
         permissionChecks,
-        error: 'Invalid manifest: manifest must be an object',
+        error: 'Invalid request: manifest must be a non-null object',
         durationMs: 0,
       };
     }
@@ -217,6 +223,91 @@ export class AgentStudio {
     const manifestCapabilities = request.manifest.capabilities ?? [];
     const manifestTools = request.manifest.tools ?? [];
     const manifestSinks = request.manifest.sinks ?? [];
+    const manifestTriggers = request.manifest.triggers ?? [];
+
+    for (const cap of manifestCapabilities) {
+      if (
+        !cap ||
+        typeof cap !== 'object' ||
+        typeof cap.service !== 'string' ||
+        !cap.service ||
+        typeof cap.action !== 'string' ||
+        !cap.action
+      ) {
+        return {
+          runId,
+          status: 'failed',
+          logs,
+          toolCalls,
+          sinkActions,
+          memoryMutations,
+          permissionChecks,
+          error:
+            'Invalid manifest: field "capabilities" must contain objects with string service and action',
+          durationMs: 0,
+        };
+      }
+    }
+
+    for (const tool of manifestTools) {
+      if (typeof tool !== 'string' || !tool) {
+        return {
+          runId,
+          status: 'failed',
+          logs,
+          toolCalls,
+          sinkActions,
+          memoryMutations,
+          permissionChecks,
+          error: 'Invalid manifest: field "tools" must contain string tool names',
+          durationMs: 0,
+        };
+      }
+    }
+
+    for (const sink of manifestSinks) {
+      if (
+        !sink ||
+        typeof sink !== 'object' ||
+        typeof sink.type !== 'string' ||
+        !sink.type
+      ) {
+        return {
+          runId,
+          status: 'failed',
+          logs,
+          toolCalls,
+          sinkActions,
+          memoryMutations,
+          permissionChecks,
+          error:
+            'Invalid manifest: field "sinks" must contain objects with string type',
+          durationMs: 0,
+        };
+      }
+    }
+
+    for (const trigger of manifestTriggers) {
+      if (
+        !trigger ||
+        typeof trigger !== 'object' ||
+        typeof trigger.event !== 'string' ||
+        !trigger.event
+      ) {
+        return {
+          runId,
+          status: 'failed',
+          logs,
+          toolCalls,
+          sinkActions,
+          memoryMutations,
+          permissionChecks,
+          error:
+            'Invalid manifest: field "triggers" must contain objects with string event',
+          durationMs: 0,
+        };
+      }
+    }
 
     // 1. Build sandboxed memory tracking
     const innerMemory = options.memoryStore ?? new InMemoryHierarchicalMemoryStore();
@@ -301,10 +392,7 @@ export class AgentStudio {
     // Pre-validate required sinks exist in simulation environment
     const callerSinks = options.sinks ?? [];
     const knownSinkTypes = new Set([
-      'github-pr-review',
-      'github-issue',
-      'beads-task',
-      'cloud-telemetry',
+      ...STANDARD_SINK_TYPES,
       ...callerSinks.flatMap((s) => [s.name, ...s.supportedActions]),
     ]);
 
