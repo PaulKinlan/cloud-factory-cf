@@ -271,15 +271,35 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
 
   // A hidden tab has no business polling; the state is re-read on return.
   if (typeof document !== "undefined") {
-    document.addEventListener("visibilitychange", () => {
-      if (document.hidden) poller.stop();
-      else poller.start();
-    });
+    wireVisibility(poller, document);
   }
 
   applyScope(readScope());
   setStatus("Not checked yet", "muted");
   return { scope: () => scope, open, close, check };
+}
+
+/**
+ * Keeps the indicator honest across tab switches: stop while hidden (no point polling
+ * a page nobody is looking at), and read once *immediately* on return, because the
+ * pill was frozen for however long the tab was away and waiting up to a full idle
+ * interval leaves a lie on screen (cloud-factory-cf-7gq.4).
+ */
+export function wireVisibility(
+  poller: Pick<ConnectPoller, "start" | "stop" | "check">,
+  doc: {
+    hidden: boolean;
+    addEventListener(type: "visibilitychange", listener: () => void): void;
+  },
+): void {
+  doc.addEventListener("visibilitychange", () => {
+    if (doc.hidden) {
+      poller.stop();
+      return;
+    }
+    poller.start();
+    void poller.check();
+  });
 }
 
 /** How often the indicator re-reads: brisk while the dialog is open, slow behind it. */
@@ -323,6 +343,12 @@ export class ConnectPoller {
   state: PollerState = { evidence: null, error: null, checking: false, paused: false };
   private timer: ReturnType<typeof setInterval> | null = null;
   private mode: PollMode = "idle";
+  /**
+   * Bumped whenever the key or scope is replaced. A read that started before the
+   * change has an answer to a question nobody is asking any more, so it is dropped
+   * rather than written over the newer state (cloud-factory-cf-7gq.4).
+   */
+  private generation = 0;
   private options: Required<Pick<ConnectPollerOptions, "dialogMs" | "idleMs">> & ConnectPollerOptions;
 
   constructor(options: ConnectPollerOptions) {
@@ -353,6 +379,7 @@ export class ConnectPoller {
 
   /** The key or scope changed: whatever was refused might now be right. */
   reset(): void {
+    this.generation += 1;
     this.update({ paused: false, error: null });
   }
 
@@ -378,7 +405,12 @@ export class ConnectPoller {
     return scope !== null && this.options.key() !== "" && !this.state.paused;
   }
 
-  /** One read. Never throws: a transport failure is reported, not propagated. */
+  /**
+   * One read. Never throws: a transport failure is reported, not propagated.
+   *
+   * A read that was in flight when the key or scope changed is discarded — including
+   * its 401, which must not re-pause a poller the operator has just fixed.
+   */
   async check(): Promise<void> {
     const scope = this.options.scope();
     const key = this.options.key();
@@ -387,6 +419,21 @@ export class ConnectPoller {
       return;
     }
     if (this.state.checking) return; // one request at a time, however slow the network
+    const generation = this.generation;
+    const isStale = (): boolean => {
+      if (generation !== this.generation || key !== this.options.key()) return true;
+      const current = this.options.scope();
+      return current === null || current.owner !== scope.owner || current.repo !== scope.repo;
+    };
+    // Our own request has finished even if its answer is stale, so `checking` is
+    // always cleared; only the answer is withheld.
+    const settle = (patch: Partial<PollerState>): void => {
+      if (isStale()) {
+        this.update({ checking: false });
+        return;
+      }
+      this.update({ checking: false, ...patch });
+    };
     this.update({ checking: true });
     try {
       const response = await this.fetchImpl(
@@ -394,18 +441,22 @@ export class ConnectPoller {
         { headers: { "x-factory-control-key": key } },
       );
       if (response.status === 401) {
+        if (isStale()) {
+          settle({});
+          return;
+        }
         this.stop();
         this.update({ checking: false, evidence: null, error: "control key rejected (401)", paused: true });
         return;
       }
       if (!response.ok) {
-        this.update({ checking: false, error: `could not read the connection state (${response.status})` });
+        settle({ error: `could not read the connection state (${response.status})` });
         return;
       }
       const body = (await response.json()) as { connect?: ConnectEvidence };
-      this.update({ checking: false, evidence: body.connect ?? null, error: null });
+      settle({ evidence: body.connect ?? null, error: null });
     } catch (error) {
-      this.update({ checking: false, error: `could not reach the factory: ${error instanceof Error ? error.message : String(error)}` });
+      settle({ error: `could not reach the factory: ${error instanceof Error ? error.message : String(error)}` });
     }
   }
 }

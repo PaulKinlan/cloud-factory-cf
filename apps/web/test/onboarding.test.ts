@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import indexHtml from "../index.html?raw";
 import {
   ConnectPoller,
+  wireVisibility,
   DIALOG_POLL_MS,
   IDLE_POLL_MS,
   STALE_AFTER_MS,
@@ -214,6 +215,83 @@ describe("live indicator poller", () => {
     expect(poller.active).toBe(false);
     await vi.advanceTimersByTimeAsync(IDLE_POLL_MS * 3);
     expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("discards a read that was in flight when the key changed", async () => {
+    // A slow answer to the OLD key must not overwrite the state the operator is now
+    // looking at — including its 401, which would re-pause a fixed poller (7gq.4).
+    let key = "wrong";
+    // A property, not a `let`: assignments inside a Promise executor are invisible to
+    // control-flow narrowing, so a captured `let` reads as null at the call site.
+    const pending: { release: (() => void) | null } = { release: null };
+    const fetchImpl = vi.fn(
+      async () =>
+        new Promise<Response>((resolve) => {
+          pending.release = () => resolve(connectResponse(null, 401));
+        }),
+    );
+    const poller = new ConnectPoller({
+      base: "https://factory.example",
+      scope: () => ({ owner: "acme", repo: "widget" }),
+      key: () => key,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+    });
+
+    const slow = poller.check();
+    key = "right";
+    poller.reset();
+    pending.release?.();
+    await slow;
+
+    expect(poller.state.paused).toBe(false);
+    expect(poller.state.error).toBeNull();
+    expect(poller.state.checking).toBe(false);
+  });
+
+  it("reads a stale error into nothing when the scope changed mid-flight", async () => {
+    let scope = { owner: "acme", repo: "widget" };
+    const pending: { release: (() => void) | null } = { release: null };
+    const poller = new ConnectPoller({
+      base: "https://factory.example",
+      scope: () => scope,
+      key: () => "k",
+      fetchImpl: (async () =>
+        new Promise<Response>((resolve) => {
+          pending.release = () => resolve(new Response("boom", { status: 500 }));
+        })) as unknown as typeof fetch,
+      now: () => NOW,
+    });
+
+    const slow = poller.check();
+    scope = { owner: "acme", repo: "gadget" };
+    pending.release?.();
+    await slow;
+
+    // The 500 belonged to the repository the operator has navigated away from.
+    expect(poller.state.error).toBeNull();
+    expect(poller.state.checking).toBe(false);
+  });
+
+  it("reads immediately when the tab comes back, instead of waiting an interval", () => {
+    const calls: string[] = [];
+    const slot: { listener: (() => void) | null } = { listener: null };
+    const doc = {
+      hidden: true,
+      addEventListener: (_type: "visibilitychange", fn: () => void) => {
+        slot.listener = fn;
+      },
+    };
+    const poller = { start: () => calls.push("start"), stop: () => calls.push("stop"), check: async () => void calls.push("check") };
+    wireVisibility(poller, doc);
+
+    slot.listener?.();
+    expect(calls).toEqual(["stop"]);
+
+    doc.hidden = false;
+    slot.listener?.();
+    // start() first so the interval is running, then the immediate read.
+    expect(calls).toEqual(["stop", "start", "check"]);
   });
 
   it("stops hammering a refused key until it changes", async () => {
