@@ -40,7 +40,7 @@ cloud-factory-cf/
 ```
 packages/canvas-model ──────┬──► apps/web ──(ASSETS)──┐
                             │                         ▼
-                            └──► apps/worker ◄── packages/sdk ◄── packages/cli
+                            └──► apps/worker ◄── packages/sdk ──► packages/cli
 ```
 
 - **`packages/canvas-model`**: standalone document model (no internal dependencies).
