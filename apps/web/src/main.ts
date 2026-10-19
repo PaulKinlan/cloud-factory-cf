@@ -60,6 +60,7 @@ const shareKey = required<HTMLInputElement>("share-key");
 const shareName = required<HTMLInputElement>("share-name");
 const shareStatus = required<HTMLParagraphElement>("share-status");
 const shareList = required<HTMLUListElement>("share-list");
+const emptyState = required<HTMLDivElement>("empty-state");
 
 function readStoredCanvas(): string | null {
   try {
@@ -143,6 +144,7 @@ function render(): void {
   renderNodes();
   renderEdges();
   renderInspector();
+  emptyState.hidden = doc.nodes.length > 0;
 }
 
 function renderNodes(): void {
@@ -171,7 +173,16 @@ function renderNodes(): void {
     body.className = "node__body";
     body.textContent = summary(node);
 
-    element.append(kind, label, body);
+    // Decorative in/out ports: the magnetic-snap affordance in connect mode.
+    // Wiring itself stays click-node-to-node, so ports need no behaviour.
+    const portIn = document.createElement("span");
+    portIn.className = "node__port node__port--in";
+    portIn.setAttribute("aria-hidden", "true");
+    const portOut = document.createElement("span");
+    portOut.className = "node__port node__port--out";
+    portOut.setAttribute("aria-hidden", "true");
+
+    element.append(portIn, kind, label, body, portOut);
     nodeLayer.append(element);
   }
 
@@ -714,6 +725,14 @@ viewport.addEventListener("pointermove", (event) => {
   doc.view.x = pan.originX + (event.clientX - pan.startX);
   doc.view.y = pan.originY + (event.clientY - pan.startY);
   applyView();
+});
+
+// Cursor spotlight: feed the dot-grid glow layer (--gx/--gy in styles.css).
+// Purely decorative; hidden under prefers-reduced-motion.
+viewport.addEventListener("pointermove", (event) => {
+  const rect = viewport.getBoundingClientRect();
+  viewport.style.setProperty("--gx", `${event.clientX - rect.left}px`);
+  viewport.style.setProperty("--gy", `${event.clientY - rect.top}px`);
 });
 
 const endPan = (event: PointerEvent): void => {
