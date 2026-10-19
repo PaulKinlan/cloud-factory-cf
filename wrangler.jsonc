@@ -1,0 +1,54 @@
+/**
+ * Root Wrangler configuration for Cloud Factory CF monorepo.
+ * Enables zero-config Cloudflare Git Builds directly from the repository root.
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cloud-factory-cf",
+  "main": "apps/worker/src/index.ts",
+  "compatibility_date": "2026-10-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": "apps/web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "none",
+    "run_worker_first": true
+  },
+  "vars": {
+    "ENVIRONMENT": "development"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REPO_COORDINATOR",
+        "class_name": "RepoCoordinator"
+      },
+      {
+        "name": "CREDENTIAL_BROKER",
+        "class_name": "CredentialBroker"
+      },
+      {
+        "name": "ORG_COORDINATOR",
+        "class_name": "OrgCoordinator"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RepoCoordinator"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["CredentialBroker"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["OrgCoordinator"]
+    }
+  ]
+}
