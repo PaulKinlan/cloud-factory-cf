@@ -70,15 +70,28 @@ contract:
   suite, `apps/worker`'s `worker`/`assets` tests) instead of nothing: a gate that
   executes no suite at all cannot be distinguished from one whose selection broke,
   which is exactly how the fleet gate reports `coverage UNKNOWN`;
+- workspaces are **discovered from the root `package.json`** `workspaces` globs and
+  each workspace's runner is read from its own `test` script (`vitest` → affected
+  files only, `node --test`/any other script → whole suite). Nothing in the gate
+  lists workspace names, so a new workspace is covered the day it lands: a source
+  change in a directory that is no workspace, or in a workspace with no `test`
+  script, is a **FAILURE named on stderr** (bead `cloud-factory-cf-9uu`);
+- tests and sources are decided **per workspace**: a test-file change in one
+  workspace still runs that workspace's suite when another workspace's source also
+  changed (the old gate only consulted test files when *no* source changed, so a
+  failing test delta rode in green behind an unrelated source edit);
+- for `vitest` workspaces it asks `vitest list --changed --filesOnly` what is
+  affected; `node:test` workspaces are seconds, so a change there runs their whole
+  suite;
 - a source delta that runs nothing exits non-zero rather than reporting green;
-- for `apps/web`/`apps/worker` it asks `vitest list --changed --filesOnly` what is
-  affected; the `node:test` packages (`sdk`, `cli`, `canvas-model`) are seconds, so
-  a change there runs their whole suite.
+- the gate's own logic has no workspace suite, so `scripts/changed-tests.selftest.sh`
+  (fake runners in a throwaway repo — no deps, ~5s) runs whenever the gate changes.
 
 Measured on an ordinary source-only delta it selects a handful of files instead of
 19; for a manifest change vitest conservatively selects the whole workspace, which
 is the honest answer rather than a guess. The merger's full gate remains the oracle
-for the merged union.
+for the merged union. Discovered workspaces also mean the gate no longer pays for a
+`vitest list` query in a workspace the delta never touched.
 
 ### Build each workspace once
 
