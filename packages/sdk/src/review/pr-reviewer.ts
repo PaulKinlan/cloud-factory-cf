@@ -251,12 +251,10 @@ export async function generatePrReview(
         summary = rawOutput.trim();
       }
     } catch (err: unknown) {
+      // Fail closed (cloud-factory-cf-r9b): a model that cannot answer must not be
+      // turned into a template review that reads as if the model had reviewed.
       const msg = err instanceof Error ? err.message : String(err);
-      findings.push({
-        category: 'general',
-        severity: 'info',
-        message: `LLM review inference encountered a fallback: ${msg}`,
-      });
+      throw new Error(`model review failed: ${msg}`);
     }
   }
 
@@ -314,6 +312,17 @@ export function createPrReviewerExecutionFn(options: PrReviewerOptions = {}): Ag
         : typeof (facts['payload'] as any)?.['number'] === 'number'
         ? (facts['payload'] as any)['number']
         : undefined;
+
+    const providerName = typeof facts['provider'] === 'string' ? facts['provider'] : 'github';
+    if (providerName !== 'github') {
+      // The engine's broker actions are GitHub routes, so anything else must be
+      // skipped rather than pointed at the wrong forge (cloud-factory-cf-6sa).
+      return {
+        status: 'success',
+        output: `Skipped ${providerName} event: this engine reviews GitHub pull requests`,
+        toolCallsCount: 0,
+      };
+    }
 
     if (eventName !== 'pull_request' || typeof prNumber !== 'number' || prNumber <= 0) {
       // Not a reviewable pull request event
@@ -411,6 +420,16 @@ export function createPrReviewerExecutionFn(options: PrReviewerOptions = {}): Ag
         diff = payload['diff'];
         diffFetched = true;
       }
+    }
+
+    if (!diffFetched) {
+      // Fail closed (cloud-factory-cf-c23): reviewing nothing must never produce an
+      // APPROVE. The event is retried instead.
+      return {
+        status: 'failure',
+        error: 'could not read the pull-request diff',
+        toolCallsCount: 0,
+      };
     }
 
     // 2. Resolve LLM client and instructions
