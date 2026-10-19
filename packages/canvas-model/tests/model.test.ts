@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
 import {
   MAX_ZOOM,
   MIN_ZOOM,
@@ -15,7 +16,7 @@ import {
   setNodeConfig,
   toAgentConfig,
   zoomAt,
-} from "../src/model";
+} from "../src/index.ts";
 
 let counter = 0;
 const idGen = () => `t${(counter += 1)}`;
@@ -24,26 +25,30 @@ describe("canvas doc", () => {
   it("adds nodes with kind defaults and a stable id prefix", () => {
     const doc = createDoc();
     const agent = createNode(doc, "agent", { x: 10.4, y: -20.6 }, { idGen });
-    expect(agent).toMatchObject({ id: "n-t1", kind: "agent", x: 10, y: -21 });
-    expect(agent.config["prompt"]).toBe("");
-    expect(doc.nodes).toHaveLength(1);
+    assert.equal(agent.id, "n-t1");
+    assert.equal(agent.kind, "agent");
+    assert.equal(agent.x, 10);
+    assert.equal(agent.y, -21);
+    assert.equal(agent.config["prompt"], "");
+    assert.equal(doc.nodes.length, 1);
   });
 
   it("moves, renames and configures a node, refusing invalid values", () => {
     const doc = createDoc();
     const node = createNode(doc, "source", { x: 0, y: 0 }, { idGen });
 
-    expect(moveNode(doc, node.id, 40.7, 12.2)).toBe(true);
-    expect(node).toMatchObject({ x: 41, y: 12 });
-    expect(moveNode(doc, node.id, Number.NaN, 0)).toBe(false);
+    assert.equal(moveNode(doc, node.id, 40.7, 12.2), true);
+    assert.equal(node.x, 41);
+    assert.equal(node.y, 12);
+    assert.equal(moveNode(doc, node.id, Number.NaN, 0), false);
 
-    expect(renameNode(doc, node.id, "  Push events  ")).toBe(true);
-    expect(node.label).toBe("Push events");
-    expect(renameNode(doc, node.id, "   ")).toBe(false);
+    assert.equal(renameNode(doc, node.id, "  Push events  "), true);
+    assert.equal(node.label, "Push events");
+    assert.equal(renameNode(doc, node.id, "   "), false);
 
-    expect(setNodeConfig(doc, node.id, "event", "push")).toBe(true);
-    expect(node.config["event"]).toBe("push");
-    expect(setNodeConfig(doc, node.id, "unknownKey", "x")).toBe(false);
+    assert.equal(setNodeConfig(doc, node.id, "event", "push"), true);
+    assert.equal(node.config["event"], "push");
+    assert.equal(setNodeConfig(doc, node.id, "unknownKey", "x"), false);
   });
 
   it("removes attached edges with the node", () => {
@@ -51,12 +56,12 @@ describe("canvas doc", () => {
     const source = createNode(doc, "source", { x: 0, y: 0 }, { idGen });
     const agent = createNode(doc, "agent", { x: 300, y: 0 }, { idGen });
     connect(doc, source.id, agent.id, { idGen });
-    expect(doc.edges).toHaveLength(1);
+    assert.equal(doc.edges.length, 1);
 
-    expect(removeNode(doc, source.id)).toBe(true);
-    expect(doc.nodes).toHaveLength(1);
-    expect(doc.edges).toHaveLength(0);
-    expect(removeNode(doc, "missing")).toBe(false);
+    assert.equal(removeNode(doc, source.id), true);
+    assert.equal(doc.nodes.length, 1);
+    assert.equal(doc.edges.length, 0);
+    assert.equal(removeNode(doc, "missing"), false);
   });
 });
 
@@ -68,14 +73,14 @@ describe("wiring rules", () => {
     const memory = createNode(doc, "memory", { x: 0, y: 400 }, { idGen });
     const sink = createNode(doc, "sink", { x: 0, y: 600 }, { idGen });
 
-    expect(canConnect(doc, source.id, agent.id).ok).toBe(true);
-    expect(canConnect(doc, agent.id, sink.id).ok).toBe(true);
-    expect(canConnect(doc, agent.id, memory.id).ok).toBe(true);
-    expect(canConnect(doc, memory.id, agent.id).ok).toBe(true);
+    assert.equal(canConnect(doc, source.id, agent.id).ok, true);
+    assert.equal(canConnect(doc, agent.id, sink.id).ok, true);
+    assert.equal(canConnect(doc, agent.id, memory.id).ok, true);
+    assert.equal(canConnect(doc, memory.id, agent.id).ok, true);
 
-    expect(canConnect(doc, source.id, sink.id)).toMatchObject({ ok: false, reason: "not allowed" });
-    expect(canConnect(doc, sink.id, agent.id)).toMatchObject({ ok: false, reason: "not allowed" });
-    expect(canConnect(doc, memory.id, sink.id)).toMatchObject({ ok: false, reason: "not allowed" });
+    assert.deepEqual(canConnect(doc, source.id, sink.id), { ok: false, reason: "not allowed" });
+    assert.deepEqual(canConnect(doc, sink.id, agent.id), { ok: false, reason: "not allowed" });
+    assert.deepEqual(canConnect(doc, memory.id, sink.id), { ok: false, reason: "not allowed" });
   });
 
   it("refuses self links, duplicates and unknown nodes", () => {
@@ -83,13 +88,13 @@ describe("wiring rules", () => {
     const agent = createNode(doc, "agent", { x: 0, y: 0 }, { idGen });
     const sink = createNode(doc, "sink", { x: 0, y: 200 }, { idGen });
 
-    expect(canConnect(doc, agent.id, agent.id)).toMatchObject({ ok: false, reason: "self" });
-    expect(canConnect(doc, agent.id, "nope")).toMatchObject({ ok: false, reason: "unknown node" });
+    assert.deepEqual(canConnect(doc, agent.id, agent.id), { ok: false, reason: "self" });
+    assert.deepEqual(canConnect(doc, agent.id, "nope"), { ok: false, reason: "unknown node" });
 
     const first = connect(doc, agent.id, sink.id, { idGen });
-    expect(first.ok).toBe(true);
-    expect(connect(doc, agent.id, sink.id, { idGen })).toMatchObject({ ok: false, reason: "duplicate" });
-    expect(doc.edges).toHaveLength(1);
+    assert.equal(first.ok, true);
+    assert.deepEqual(connect(doc, agent.id, sink.id, { idGen }), { ok: false, reason: "duplicate" });
+    assert.equal(doc.edges.length, 1);
   });
 });
 
@@ -99,15 +104,15 @@ describe("view", () => {
     doc.view = { x: 0, y: 0, zoom: 1 };
 
     zoomAt(doc, 2, { x: 100, y: 100 });
-    expect(doc.view.zoom).toBe(2);
+    assert.equal(doc.view.zoom, 2);
     // The point under the cursor stays at the same world position.
-    expect(doc.view.x).toBe(-100);
-    expect(doc.view.y).toBe(-100);
+    assert.equal(doc.view.x, -100);
+    assert.equal(doc.view.y, -100);
 
     zoomAt(doc, 100, { x: 0, y: 0 });
-    expect(doc.view.zoom).toBe(MAX_ZOOM);
+    assert.equal(doc.view.zoom, MAX_ZOOM);
     zoomAt(doc, 0.0001, { x: 0, y: 0 });
-    expect(doc.view.zoom).toBe(MIN_ZOOM);
+    assert.equal(doc.view.zoom, MIN_ZOOM);
   });
 });
 
@@ -116,16 +121,16 @@ describe("persistence", () => {
     counter = 0;
     const original = createSampleDoc({ idGen });
     const parsed = parseDoc(serialize(original));
-    expect(parsed).not.toBeNull();
-    expect(parsed?.nodes).toHaveLength(original.nodes.length);
-    expect(parsed?.edges).toHaveLength(original.edges.length);
-    expect(parsed?.nodes.map((node) => node.kind).sort()).toEqual(["agent", "memory", "sink", "source"]);
+    assert.notEqual(parsed, null);
+    assert.equal(parsed?.nodes.length, original.nodes.length);
+    assert.equal(parsed?.edges.length, original.edges.length);
+    assert.deepEqual(parsed?.nodes.map((node) => node.kind).sort(), ["agent", "memory", "sink", "source"]);
   });
 
   it("rejects malformed or unsafe documents", () => {
-    expect(parseDoc("not json")).toBeNull();
-    expect(parseDoc(JSON.stringify({ version: 2, nodes: [], edges: [] }))).toBeNull();
-    expect(parseDoc(JSON.stringify({ version: 1, nodes: "nope", edges: [] }))).toBeNull();
+    assert.equal(parseDoc("not json"), null);
+    assert.equal(parseDoc(JSON.stringify({ version: 2, nodes: [], edges: [] })), null);
+    assert.equal(parseDoc(JSON.stringify({ version: 1, nodes: "nope", edges: [] })), null);
 
     const cleaned = parseDoc(JSON.stringify({
       version: 1,
@@ -142,10 +147,10 @@ describe("persistence", () => {
       ],
       view: { x: 12, y: -4, zoom: 99 },
     }));
-    expect(cleaned?.nodes.map((node) => node.id)).toEqual(["a", "c"]);
-    expect(cleaned?.nodes[0]?.config).toEqual({ prompt: "p" });
-    expect(cleaned?.edges).toHaveLength(1);
-    expect(cleaned?.view.zoom).toBe(MAX_ZOOM);
+    assert.deepEqual(cleaned?.nodes.map((node) => node.id), ["a", "c"]);
+    assert.deepEqual(cleaned?.nodes[0]?.config, { prompt: "p" });
+    assert.equal(cleaned?.edges.length, 1);
+    assert.equal(cleaned?.view.zoom, MAX_ZOOM);
   });
 });
 
@@ -163,21 +168,23 @@ describe("agent configuration export", () => {
     connect(doc, agent.id, sink.id, { idGen });
 
     const config = toAgentConfig(doc);
-    expect(config.agents).toHaveLength(1);
-    expect(config.agents[0]).toMatchObject({
-      id: agent.id,
-      name: "Reviewer",
-      prompt: "Review carefully",
-      sources: [{ id: source.id, label: "PRs" }],
-      sinks: [{ id: sink.id, label: "Review sink" }],
-    });
-    expect(config.agents[0]?.memory.map((entry) => entry.id)).toEqual([memory.id]);
+    assert.equal(config.agents.length, 1);
+    assert.equal(config.agents[0]?.id, agent.id);
+    assert.equal(config.agents[0]?.name, "Reviewer");
+    assert.equal(config.agents[0]?.prompt, "Review carefully");
+    assert.equal(config.agents[0]?.sources.length, 1);
+    assert.equal(config.agents[0]?.sources[0]?.id, source.id);
+    assert.equal(config.agents[0]?.sources[0]?.label, "PRs");
+    assert.equal(config.agents[0]?.sinks.length, 1);
+    assert.equal(config.agents[0]?.sinks[0]?.id, sink.id);
+    assert.equal(config.agents[0]?.sinks[0]?.label, "Review sink");
+    assert.deepEqual(config.agents[0]?.memory.map((entry) => entry.id), [memory.id]);
   });
 
   it("ignores unwired nodes", () => {
     const doc = createDoc();
     createNode(doc, "source", { x: 0, y: 0 }, { idGen });
     const config = toAgentConfig(doc);
-    expect(config.agents).toEqual([]);
+    assert.deepEqual(config.agents, []);
   });
 });

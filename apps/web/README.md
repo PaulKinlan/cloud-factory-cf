@@ -113,17 +113,17 @@ tests (`prebuild` / `pretest`), so `npm run ci` at the root always has a fresh
 ## Layout
 
 ```
-src/model.ts   Pure document model: nodes, edges, wiring rules, view maths,
-               serialize/parse, toAgentConfig()
+src/model.ts   Re-exports @factory-cloud/canvas-model (the shared DOM-free document model)
 src/main.ts    DOM renderer + interactions (pan, zoom, drag, connect, inspector,
                persistence, export)
 src/styles.css Dark canvas theme, node accents per kind, reduced-motion support
-test/model.test.ts  10 tests over the model (ids injected, no DOM)
+test/sync.test.ts   Canvas sync tests with Cloudflare Worker
 
 The boundary between the canvas and the API is pinned by
 `apps/worker/test/assets.test.ts`: `/` serves the canvas HTML, `/health` and
 `/webhooks/*` still reach the Worker, and unknown paths stay 404 (not HTML).
 ```
 
-The model is deliberately DOM-free: the same rules are unit-tested in Node and
-reused by the renderer, and the exported contract is testable without a browser.
+The model is deliberately DOM-free: the same rules are unit-tested in Node (in
+`packages/canvas-model/tests/model.test.ts`) and reused by the renderer, and the
+exported contract is testable without a browser.

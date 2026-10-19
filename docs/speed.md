@@ -11,9 +11,10 @@ served by `fleet-deps`.
 | --- | --- | --- |
 | `npm run build` | `vite build` for `apps/web`, then `wrangler deploy --dry-run` — bundles the Worker, validates `wrangler.jsonc`, DO bindings, migrations and the `ASSETS` directory | 2.0–2.3s |
 | `npm run typecheck` | `tsc --noEmit` per workspace (sdk, cli, worker, web) | 4.0–4.4s |
-| `npm test` | `vitest run` inside workerd (`@cloudflare/vitest-plugin`) + node-mode model tests for `apps/web` | 7.5–9s |
+| `npm test` | `vitest run` inside workerd (`@cloudflare/vitest-plugin`), `node:test` for packages (`canvas-model`, `sdk`, `cli`), and Vitest for `apps/web` | 7.5–9s |
 | `npm run ci` | build + typecheck + test | 14–17s idle VM; 45s+ when the VM is loaded |
 | `npm run test:file -- test/<file>.test.ts` | one workerd test file | 2–3s |
+| `npm run test -w @factory-cloud/canvas-model` | `node:test` model tests (`packages/canvas-model`) | 0.2s |
 | `npm run test -w @factory-cloud/web` | one node-mode test file set (canvas model) | 0.9s |
 | `npm run test:changed` | dev-loop only, **not the gate** — see "Fast tier" | affected suites; fails when a source change maps to none |
 
