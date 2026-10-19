@@ -11,6 +11,7 @@ import {
   parseShareHint,
   parseStoredDocument,
   planSave,
+  restoreCanvas,
   saveRequest,
   serializeCanvasState,
 } from "../src/sync";
@@ -237,5 +238,39 @@ describe("canvas binding survives a reload (cloud-factory-cf-aju)", () => {
     expect("url" in request && request.url).toBe("https://canvas.test/canvas/owner/alpha/documents");
     // A canvas whose binding matches updates in place as before.
     expect(planSave(tracker, "owner/beta", "owner/beta")).toEqual({ id: "beta-original", newCopy: false });
+  });
+});
+
+describe("restoring a page (cloud-factory-cf-aju reload regression)", () => {
+  it("returns the document and its binding from one stored value", () => {
+    const doc = createSampleDoc();
+    const restored = restoreCanvas(serializeCanvasState(doc, "owner/alpha"));
+    expect(restored.bound).toBe("owner/alpha");
+    expect(restored.document.nodes.map((n) => n.id)).toEqual(doc.nodes.map((n) => n.id));
+  });
+
+  it("starts empty, with no binding, when nothing is stored", () => {
+    const restored = restoreCanvas(null);
+    expect(restored.bound).toBeNull();
+    expect(restored.document.nodes).toEqual([]);
+    expect(restored.document.version).toBe(1);
+  });
+
+  it("starts empty rather than half-restored when storage is corrupt", () => {
+    expect(restoreCanvas("{not json").bound).toBeNull();
+    expect(restoreCanvas("{not json").document.nodes).toEqual([]);
+    expect(restoreCanvas(JSON.stringify({ document: { version: 2 } })).bound).toBeNull();
+  });
+
+  it("keeps the binding across a save/reload/save cycle", () => {
+    const doc = createSampleDoc();
+    const tracker = createShareTracker({ "owner/beta2": "beta-original", "owner/alpha2": "alpha-original" });
+    // Page 1: canvas saved into beta2 -> stored with its binding.
+    const stored = serializeCanvasState(doc, "owner/beta2");
+    // Reload: both come back together, so the next save is in place...
+    const reloaded = restoreCanvas(stored);
+    expect(planSave(tracker, reloaded.bound, "owner/beta2")).toEqual({ id: "beta-original", newCopy: false });
+    // ...while any other repository still gets a copy.
+    expect(planSave(tracker, reloaded.bound, "owner/alpha2")).toEqual({ id: null, newCopy: true });
   });
 });

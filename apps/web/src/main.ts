@@ -3,11 +3,11 @@ import {
   createShareTracker,
   documentRequest,
   listRequest,
-  parseCanvasState,
   parseDocumentList,
   parseShareHint,
   parseStoredDocument,
   planSave,
+  restoreCanvas,
   saveRequest,
   serializeCanvasState,
   type ShareTarget,
@@ -59,8 +59,19 @@ const shareName = required<HTMLInputElement>("share-name");
 const shareStatus = required<HTMLParagraphElement>("share-status");
 const shareList = required<HTMLUListElement>("share-list");
 
-const storedDoc = loadDoc();
-let doc: CanvasDoc = storedDoc ?? createSampleDoc();
+function readStoredCanvas(): string | null {
+  try {
+    return localStorage.getItem(STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+const storedCanvas = readStoredCanvas();
+const restored = restoreCanvas(storedCanvas);
+let doc: CanvasDoc = restored.document;
+// Restored from the same value as the document, so a reload keeps both.
+let boundRepository: string | null = restored.bound;
 let selectedId: string | null = doc.nodes[0]?.id ?? null;
 let connectMode = false;
 let connectFrom: string | null = null;
@@ -69,8 +80,6 @@ let saveTimer: ReturnType<typeof setTimeout> | undefined;
 // Repository name and the last saved id survive a reload of the tab; the control
 // key never leaves this variable.
 let shareIds = createShareTracker();
-/** Repository whose document the current canvas came from (null: never loaded/saved). */
-let boundRepository: string | null = null;
 const SHARE_HINT_KEY = "cloud-factory-canvas:share";
 
 const CONFIG_FIELDS: Record<NodeKind, Array<{ key: string; label: string; control: "text" | "textarea" | "select"; options?: string[] }>> = {
@@ -97,21 +106,6 @@ function required<T extends Element>(id: string): T {
   const element = document.getElementById(id);
   if (!element) throw new Error(`missing element #${id}`);
   return element as unknown as T;
-}
-
-function loadDoc(): CanvasDoc | null {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (!stored) return null;
-    const state = parseCanvasState(stored);
-    if (!state) return null;
-    // Document and binding are restored together: a canvas must never come
-    // back without the repository whose copy it is.
-    boundRepository = state.bound;
-    return state.document;
-  } catch {
-    return null;
-  }
 }
 
 function saveNow(): void {
@@ -511,6 +505,9 @@ required<HTMLButtonElement>("share-save").addEventListener("click", async () => 
   const body = result.payload as { id?: unknown; name?: unknown };
   if (typeof body.id === "string") shareIds.remember(target.repository, body.id);
   boundRepository = target.repository;
+  // Persist the new binding immediately: the canvas saved above was written with
+  // the old one, and a reload must not come back bound to the wrong repository.
+  saveNow();
   rememberShareTarget();
   const savedId = shareIdFor(target.repository) ?? "no id";
   const copyNote = plan.newCopy ? " as a new copy — that document was loaded from another repository" : "";
@@ -580,6 +577,7 @@ async function loadDocument(id: string, name: string): Promise<void> {
   connectFrom = null;
   shareIds.remember(shareTarget().repository, id);
   boundRepository = shareTarget().repository;
+  saveNow();
   shareName.value = stored.name;
   persist();
   render();
@@ -863,6 +861,7 @@ fieldLabel.addEventListener("input", () => {
   }
 });
 
-if (!storedDoc) fitToContent();
+// A restored canvas keeps its own view; the first one is fitted to its content.
+if (storedCanvas === null) fitToContent();
 render();
 announce(`Canvas ready with ${doc.nodes.length} nodes`);

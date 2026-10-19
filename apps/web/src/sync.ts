@@ -3,7 +3,7 @@
  * without a DOM. The canvas stays local-first: these helpers only build requests
  * and interpret responses; `main.ts` decides what to do with them.
  */
-import { parseDoc, serialize, type CanvasDoc } from "./model";
+import { createDoc, parseDoc, serialize, type CanvasDoc } from "./model";
 
 const REPOSITORY_PATTERN = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/;
 
@@ -167,6 +167,18 @@ export function parseCanvasState(json: string): PersistedCanvas | null {
   }
   const document = parseDoc(json);
   return document === null ? null : { document, bound: null };
+}
+
+/**
+ * The canvas state a page should start from: the persisted document with the
+ * repository it belongs to, or an empty document when nothing is stored.
+ * Reading it is a pure value, so no module state has to be assigned while the
+ * page is still initialising (a reload lost its canvas when the binding was
+ * assigned from `loadDoc` before its declaration — finding cloud-factory-cf-aju).
+ */
+export function restoreCanvas(stored: string | null): PersistedCanvas {
+  const parsed = stored === null ? null : parseCanvasState(stored);
+  return parsed ?? { document: createDoc(), bound: null };
 }
 
 /**
