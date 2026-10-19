@@ -16,7 +16,9 @@ packages/sdk/    @factory-cloud/sdk — Pi-inspired extension hooks (see epic)
 ```
 
 Gate commands, their measured cost and the test-tier rules live in
-[docs/speed.md](docs/speed.md).
+[docs/speed.md](docs/speed.md). The credential broker (zero raw secrets in
+agent prompts or runtimes) is described in
+[docs/credentials.md](docs/credentials.md).
 
 ## Local development
 
