@@ -75,6 +75,10 @@ npm test -w @factory-cloud/web          # model unit tests (Node, no browser)
   current canvas was loaded from, or last saved to, the repository being saved
   to. Otherwise it creates a new document and says so in the status line, so
   editing the repository field can never overwrite another repository's layout.
+- The repository a canvas belongs to is persisted **with the canvas** in
+  `localStorage`, so a reload restores both together. A canvas restored from an
+  older format (document only) has no binding, and a save then creates a copy
+  rather than overwriting a restored id.
 - **Refresh list** shows the repository's stored documents; **Load** replaces the
   current canvas with one of them (validated through the same `parseDoc` the
   local copy uses) and writes it back to `localStorage`.

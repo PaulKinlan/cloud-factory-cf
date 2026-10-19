@@ -1,16 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { createSampleDoc } from "../src/model";
+import { createSampleDoc, serialize } from "../src/model";
 import {
   createShareTracker,
   describeShareFailure,
   documentRequest,
   isValidRepository,
   listRequest,
+  parseCanvasState,
   parseDocumentList,
   parseShareHint,
   parseStoredDocument,
   planSave,
   saveRequest,
+  serializeCanvasState,
 } from "../src/sync";
 
 const target = { repository: "acme/widgets", controlKey: "test-control-key" };
@@ -187,7 +189,53 @@ describe("share tracker (cloud-factory-cf-ci5)", () => {
       "https://canvas.test/canvas/owner/alpha/documents/alpha-1",
     );
 
-    // A restored hint with no canvas binding still updates that repository's own id.
-    expect(planSave(tracker, null, "owner/beta")).toEqual({ id: "beta-1", newCopy: false });
+    // Without a binding (reload, older hint) nothing is overwritten.
+    expect(planSave(tracker, null, "owner/beta")).toEqual({ id: null, newCopy: true });
+  });
+});
+
+describe("canvas binding survives a reload (cloud-factory-cf-aju)", () => {
+  it("persists the document and its repository together", () => {
+    const doc = createSampleDoc();
+    const json = serializeCanvasState(doc, "owner/alpha");
+    const restored = parseCanvasState(json);
+    expect(restored?.bound).toBe("owner/alpha");
+    expect(restored?.document.nodes.length).toBe(doc.nodes.length);
+    expect(restored?.document.nodes.map((n) => n.id)).toEqual(doc.nodes.map((n) => n.id));
+    expect(parseCanvasState(serializeCanvasState(doc, null))?.bound).toBeNull();
+    expect(parseCanvasState(serializeCanvasState(doc, "  "))?.bound).toBeNull();
+  });
+
+  it("reads the pre-binding format but with no binding", () => {
+    const doc = createSampleDoc();
+    const restored = parseCanvasState(serialize(doc));
+    expect(restored?.bound).toBeNull();
+    expect(restored?.document.nodes.length).toBe(doc.nodes.length);
+  });
+
+  it("rejects junk instead of restoring a half state", () => {
+    expect(parseCanvasState("not json")).toBeNull();
+    expect(parseCanvasState(JSON.stringify({ document: { version: 99 } }))).toBeNull();
+    expect(parseCanvasState(JSON.stringify(null))).toBeNull();
+  });
+
+  it("replays the reload repro: a restored canvas cannot overwrite alpha's copy", () => {
+    const doc = createSampleDoc();
+    const tracker = createShareTracker({ "owner/alpha": "alpha-original", "owner/beta": "beta-original" });
+    // Reload restores the canvas (beta's) and, with the fix, its binding.
+    const restored = parseCanvasState(serializeCanvasState(doc, "owner/beta"));
+    expect(restored).not.toBeNull();
+
+    // Switching the repository field to alpha now creates a copy instead of
+    // PUTting over alpha-original.
+    const plan = planSave(tracker, restored?.bound ?? null, "owner/alpha");
+    expect(plan).toEqual({ id: null, newCopy: true });
+    const request = saveRequest("https://canvas.test", { repository: "owner/alpha", controlKey: "k" }, doc, {
+      ...(plan.id === null ? {} : { id: plan.id }),
+      name: "Canvas B",
+    });
+    expect("url" in request && request.url).toBe("https://canvas.test/canvas/owner/alpha/documents");
+    // A canvas whose binding matches updates in place as before.
+    expect(planSave(tracker, "owner/beta", "owner/beta")).toEqual({ id: "beta-original", newCopy: false });
   });
 });

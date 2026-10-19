@@ -3,11 +3,13 @@ import {
   createShareTracker,
   documentRequest,
   listRequest,
+  parseCanvasState,
   parseDocumentList,
   parseShareHint,
   parseStoredDocument,
   planSave,
   saveRequest,
+  serializeCanvasState,
   type ShareTarget,
 } from "./sync";
 import {
@@ -101,7 +103,12 @@ function loadDoc(): CanvasDoc | null {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (!stored) return null;
-    return parseDoc(stored);
+    const state = parseCanvasState(stored);
+    if (!state) return null;
+    // Document and binding are restored together: a canvas must never come
+    // back without the repository whose copy it is.
+    boundRepository = state.bound;
+    return state.document;
   } catch {
     return null;
   }
@@ -109,7 +116,7 @@ function loadDoc(): CanvasDoc | null {
 
 function saveNow(): void {
   try {
-    localStorage.setItem(STORAGE_KEY, serialize(doc));
+    localStorage.setItem(STORAGE_KEY, serializeCanvasState(doc, boundRepository));
   } catch {
     announce("Could not save: browser storage is unavailable");
   }

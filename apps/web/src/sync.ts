@@ -122,6 +122,54 @@ export function parseStoredDocument(payload: unknown): { document: CanvasDoc; na
 }
 
 /**
+ * What the canvas persists: the document **and** the repository whose stored
+ * copy it is. They are written and read as one value, because a canvas restored
+ * without its binding let a restored id `PUT` over another repository's
+ * document after a reload (finding cloud-factory-cf-aju).
+ */
+export interface PersistedCanvas {
+  document: CanvasDoc;
+  bound: string | null;
+}
+
+export function serializeCanvasState(document: CanvasDoc, bound: string | null): string {
+  const boundRepository = bound === null ? null : bound.trim();
+  return JSON.stringify(
+    {
+      version: 1,
+      document: JSON.parse(serialize(document)) as unknown,
+      bound: boundRepository === "" ? null : boundRepository,
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * Reads persisted state. A bare document (the pre-binding format) is still
+ * accepted, but it restores with `bound: null`, which `planSave` treats as
+ * "do not overwrite anything".
+ */
+export function parseCanvasState(json: string): PersistedCanvas | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  const candidate = raw as { document?: unknown; bound?: unknown };
+  if (candidate.document !== undefined) {
+    const document = parseDoc(JSON.stringify(candidate.document));
+    if (document === null) return null;
+    const bound = typeof candidate.bound === "string" && candidate.bound.trim().length > 0 ? candidate.bound.trim() : null;
+    return { document, bound };
+  }
+  const document = parseDoc(json);
+  return document === null ? null : { document, bound: null };
+}
+
+/**
  * Which document id belongs to which repository.
  *
  * A saved id is only meaningful inside the repository it came from: carrying it
@@ -184,8 +232,10 @@ export interface SavePlan {
 export function planSave(tracker: ShareTracker, boundRepository: string | null, repository: string): SavePlan {
   const existing = tracker.idFor(repository);
   if (existing === null) return { id: null, newCopy: false };
-  const bound = boundRepository === null ? null : normaliseRepository(boundRepository);
-  if (bound !== null && bound !== normaliseRepository(repository)) {
+  // No proof that this canvas came from that repository (a reload without a
+  // restored binding, an id restored from an older hint) means no overwrite.
+  if (boundRepository === null) return { id: null, newCopy: true };
+  if (normaliseRepository(boundRepository) !== normaliseRepository(repository)) {
     return { id: null, newCopy: true };
   }
   return { id: existing, newCopy: false };
