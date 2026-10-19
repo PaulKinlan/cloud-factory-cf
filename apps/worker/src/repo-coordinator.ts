@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
+import { CanvasStore, migrateCanvasTable } from "./canvas-store";
 import { MemoryHandler, migrateMemoryTable } from "./memory";
 import {
   deliveryIdFor,
@@ -38,6 +39,7 @@ const RETRY_BACKOFF_CAP_MS = 60_000;
  */
 export class RepoCoordinator extends DurableObject<Env> {
   private memoryHandler!: MemoryHandler;
+  private canvasStore!: CanvasStore;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -45,6 +47,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       this.migrate();
     });
     this.memoryHandler = new MemoryHandler(this.ctx.storage.sql);
+    this.canvasStore = new CanvasStore(this.ctx.storage.sql, this.ctx.id.name ?? "");
   }
 
   private get sql(): SqlStorage {
@@ -76,6 +79,14 @@ export class RepoCoordinator extends DurableObject<Env> {
       const requeued = await this.requeueExpiredLeases();
       return Response.json({ ok: true, requeued });
     }
+    if (url.pathname === "/canvas" || url.pathname.startsWith("/canvas/")) {
+      // No id means "list" for GET and "create with a generated id" for PUT.
+      const id = url.pathname === "/canvas" ? "" : decodeURIComponent(url.pathname.slice("/canvas/".length));
+      if (request.method === "GET") return id ? this.canvasStore.get(id) : this.canvasStore.list(url);
+      if (request.method === "PUT") return this.canvasStore.put(id, await readJson(request));
+      if (request.method === "DELETE") return this.canvasStore.remove(id);
+      return new Response("method not allowed", { status: 405 });
+    }
     if (url.pathname.startsWith("/memory")) {
       const scope = url.searchParams.get("scope") ?? "repo";
       if (scope === "org") {
@@ -98,6 +109,7 @@ export class RepoCoordinator extends DurableObject<Env> {
 
   private migrate(): void {
     migrateMemoryTable(this.sql);
+    migrateCanvasTable(this.sql);
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS events (
         delivery_id TEXT PRIMARY KEY,

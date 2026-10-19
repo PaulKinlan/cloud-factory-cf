@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { sameSecret } from "./secrets";
 import { MAX_WEBHOOK_BYTES } from "./webhooks";
 import { AgentStudio, type AgentManifest } from "@factory-cloud/sdk";
 import { SERVICES } from "./credentials/policy";
@@ -10,10 +11,26 @@ export { OrgCoordinator } from "./org-coordinator";
 export { RepoCoordinator } from "./repo-coordinator";
 
 const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
+const CANVAS_PATH = /^\/canvas\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/documents(?:\/(?<id>[^/]+))?$/;
 const BROKER_PATH =
   /^\/broker\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>capabilities|permissions|proxy|audit)$/;
 const STUDIO_PATH =
   /^\/studio\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>author|simulate|agents)(?:\/(?<agentName>[^/]+))?$/;
+
+/**
+ * Serves the built canvas from the ASSETS binding. Unknown paths stay a 404 (the
+ * canvas is a single route at "/", so there is no SPA fallback to lean on) and
+ * writes are refused for assets: only GET/HEAD pass through.
+ */
+async function serveAsset(request: Request, env: Env): Promise<Response> {
+  if (!env.ASSETS) return new Response("not found", { status: 404 });
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response("method not allowed", { status: 405 });
+  }
+  const asset = await env.ASSETS.fetch(request);
+  if (asset.status === 404) return new Response("not found", { status: 404 });
+  return asset;
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -48,9 +65,15 @@ export default {
       return routeStudio(request, env, owner, repo, operation, agentName);
     }
 
+    const canvas = CANVAS_PATH.exec(url.pathname);
+    if (canvas?.groups) {
+      const { owner, repo, id } = canvas.groups as { owner: string; repo: string; id?: string };
+      return routeCanvas(request, env, owner, repo, id);
+    }
+
     const match = WEBHOOK_PATH.exec(url.pathname);
     if (!match?.groups) {
-      return new Response("not found", { status: 404 });
+      return serveAsset(request, env);
     }
     if (request.method !== "POST") {
       return new Response("method not allowed", { status: 405 });
@@ -91,6 +114,40 @@ export default {
  * Routes to the per-repository credential broker. The agent's request carries a
  * capability, never a credential; the object in front of the secrets decides.
  */
+/**
+ * Canvas documents live in the repository's coordinator object. They are
+ * control-plane data (a layout names agents and actions), so every method needs
+ * the same control key the broker uses.
+ */
+async function routeCanvas(
+  request: Request,
+  env: Env,
+  owner: string,
+  repo: string,
+  id: string | undefined,
+): Promise<Response> {
+  const controlKey = env.BROKER_CONTROL_KEY;
+  if (!controlKey) {
+    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
+  }
+  if (!(await sameSecret(controlKey, request.headers.get("x-factory-control-key")))) {
+    return Response.json({ ok: false, error: "not authorised to read or write canvas documents" }, { status: 401 });
+  }
+  if (!["GET", "PUT", "DELETE"].includes(request.method)) {
+    return new Response("method not allowed", { status: 405 });
+  }
+
+  const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`${owner}/${repo}`));
+  const target = id === undefined ? "/canvas" : `/canvas/${encodeURIComponent(id)}`;
+  return stub.fetch(
+    new Request(`https://repo-coordinator.internal${target}`, {
+      method: request.method,
+      headers: { "content-type": "application/json" },
+      body: request.method === "PUT" ? await request.text() : undefined,
+    }),
+  );
+}
+
 async function routeBroker(
   request: Request,
   env: Env,

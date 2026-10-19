@@ -3,6 +3,12 @@ import type { CredentialBroker } from "./credential-broker-object";
 import type { RepoCoordinator } from "./repo-coordinator";
 
 export interface FactoryEnv {
+  /**
+   * Static assets for the agent canvas (`apps/web/dist`). Requests that match a
+   * file are served by the asset layer before the Worker runs, except for the
+   * API prefixes listed in `assets.run_worker_first`.
+   */
+  ASSETS?: Fetcher;
   /** One Durable Object per repository, addressed by `idFromName("<owner>/<repo>")`. */
   REPO_COORDINATOR: DurableObjectNamespace<RepoCoordinator>;
   /** One Durable Object per organization, addressed by `idFromName("<owner>")`. */

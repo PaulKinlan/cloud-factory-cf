@@ -63,16 +63,23 @@ npm run preview -w @factory-cloud/web   # serve the built bundle on :4173
 npm test -w @factory-cloud/web          # model unit tests (Node, no browser)
 ```
 
-Deployment is an assets-only Worker (`wrangler.jsonc`, name
-`cloud-factory-canvas`) so the canvas can ship without touching the API Worker's
-routing or Durable Object migrations:
+## Serving it
+
+The canvas is served by the API Worker itself (`apps/worker/wrangler.jsonc`):
+`assets.directory` points at `apps/web/dist`, `assets.binding` is `ASSETS`, and
+`run_worker_first: true` sends every request through the Worker, whose `fetch`
+delegates non-API paths to the asset binding. That means one origin for the
+canvas and the API (`/`, `/assets/*`, `/health`, `/webhooks/*`, `/broker/*`), one
+routing path to reason about, and no SPA fallback: unknown paths stay a 404 and
+non-GET/HEAD requests to asset paths are 405.
 
 ```bash
-npm run deploy -w @factory-cloud/web
+npm run dev -w @factory-cloud/worker   # http://localhost:8787 serves the canvas
 ```
 
-Serving the canvas from the main Worker (single origin with `/webhooks`,
-`/broker`) is a follow-up, tracked as its own bead.
+`apps/worker` builds the canvas before its own dry-run deploy and before its
+tests (`prebuild` / `pretest`), so `npm run ci` at the root always has a fresh
+`dist` to serve and to test.
 
 ## Layout
 
@@ -83,6 +90,10 @@ src/main.ts    DOM renderer + interactions (pan, zoom, drag, connect, inspector,
                persistence, export)
 src/styles.css Dark canvas theme, node accents per kind, reduced-motion support
 test/model.test.ts  10 tests over the model (ids injected, no DOM)
+
+The boundary between the canvas and the API is pinned by
+`apps/worker/test/assets.test.ts`: `/` serves the canvas HTML, `/health` and
+`/webhooks/*` still reach the Worker, and unknown paths stay 404 (not HTML).
 ```
 
 The model is deliberately DOM-free: the same rules are unit-tested in Node and

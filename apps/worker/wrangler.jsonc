@@ -14,6 +14,16 @@
   "observability": {
     "enabled": true
   },
+  // The agent canvas (apps/web) is served from this same origin. The Worker runs
+  // for every request (`run_worker_first`) and delegates non-API paths to the
+  // ASSETS binding, so there is exactly one routing path to reason about and to
+  // test - see the asset fallback at the end of `fetch`.
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "none",
+    "run_worker_first": true
+  },
   "vars": {
     "ENVIRONMENT": "development"
   },

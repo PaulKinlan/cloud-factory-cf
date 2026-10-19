@@ -46,13 +46,36 @@ agent, enforced in the model), edit each node in the inspector, and **Export
 config** to get the `{ agents: [...] }` JSON the control plane consumes. The
 layout persists in `localStorage`; nothing is sent to the network.
 
+The canvas is served by the API Worker on the same origin (`apps/worker/wrangler.jsonc`
+binds `apps/web/dist` as `ASSETS`, with `run_worker_first: true`):
+
 ```bash
-npm run dev -w @factory-cloud/web     # http://localhost:5173
-npm run deploy -w @factory-cloud/web  # assets-only Worker: cloud-factory-canvas
+npm run dev -w @factory-cloud/worker  # http://localhost:8787 → canvas + API
+npm run dev -w @factory-cloud/web     # Vite dev server on :5173 (canvas only)
 ```
 
 See [apps/web/README.md](apps/web/README.md) for the wiring rules, the exported
 contract and the keyboard model.
+
+## Canvas documents (per repository Durable Object)
+
+A canvas layout can be stored with the repository so it is not stuck in one
+operator's browser. Documents live in the repository's `RepoCoordinator` SQLite
+and are control-plane data (a layout names agents and actions), so every call
+needs `x-factory-control-key`:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /canvas/:owner/:repo/documents` | list (id, name, timestamps) |
+| `PUT /canvas/:owner/:repo/documents` | create — server assigns the id (201) |
+| `PUT /canvas/:owner/:repo/documents/:id` | create-or-update that id (200/201) |
+| `GET /canvas/:owner/:repo/documents/:id` | fetch name + document |
+| `DELETE /canvas/:owner/:repo/documents/:id` | delete (404 when absent) |
+
+The document is validated before storage: `version: 1`, `nodes`/`edges` arrays,
+at most 500 nodes and 2 000 edges, at most 256 KiB, names under 120 characters,
+and at most 200 documents per repository. A body the canvas could not load is a
+400 rather than a stored trap.
 
 ## Event pipeline (per repository Durable Object)
 
