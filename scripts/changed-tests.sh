@@ -36,9 +36,19 @@ is_source() { case "$1" in apps/*/src/*|packages/*/src/*) return 0 ;; *) return 
 
 sources=$(echo "$changed" | while read -r path; do is_source "$path" && echo "$path"; done)
 if [ -z "$sources" ]; then
-  echo "changed-tests: $(echo "$changed" | wc -l | tr -d ' ') changed path(s), none of them source — nothing to run"
+  # Build/config/docs only: nothing maps to a suite, but a gate that runs no suite
+  # at all cannot be told apart from one whose selection broke (the fleet gate
+  # reports coverage UNKNOWN). Run a fixed smoke set so the verdict has evidence.
+  echo "changed-tests: $(echo "$changed" | wc -l | tr -d ' ') changed path(s), none of them source — running the smoke set"
   echo "$changed" | sed 's/^/  /'
-  exit 0
+  if [ "$LIST" -eq 1 ]; then
+    echo "changed-tests: smoke = apps/web (whole node suite), apps/worker test/worker.test.ts test/assets.test.ts"
+    exit 0
+  fi
+  smoke_status=0
+  (cd apps/web && npx vitest run) || smoke_status=1
+  (cd apps/worker && npx vitest run test/worker.test.ts test/assets.test.ts) || smoke_status=1
+  exit "$smoke_status"
 fi
 
 status=0

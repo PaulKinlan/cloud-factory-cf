@@ -57,8 +57,11 @@ contract:
   findings `cloud-factory-cf-gy5`/`l0q`);
 - a changed **source** file (`apps/*/src`, `packages/*/src`) that selects **no**
   suite is a **failure named on stderr**, not a silent pass;
-- a delta with no source changes is exempt and says so;
-- a delta that runs nothing exits non-zero rather than reporting green;
+- a delta with no source changes runs a fixed **smoke set** (`apps/web`'s node
+  suite, `apps/worker`'s `worker`/`assets` tests) instead of nothing: a gate that
+  executes no suite at all cannot be distinguished from one whose selection broke,
+  which is exactly how the fleet gate reports `coverage UNKNOWN`;
+- a source delta that runs nothing exits non-zero rather than reporting green;
 - for `apps/web`/`apps/worker` it asks `vitest list --changed --filesOnly` what is
   affected; the `node:test` packages (`sdk`, `cli`, `canvas-model`) are seconds, so
   a change there runs their whole suite.
