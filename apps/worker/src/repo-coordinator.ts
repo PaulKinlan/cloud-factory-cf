@@ -3,10 +3,12 @@ import type { Env } from "./env";
 import { CanvasStore, migrateCanvasTable } from "./canvas-store";
 import { MemoryHandler, migrateMemoryTable } from "./memory";
 import {
+  ConnectStore,
   EventQueue,
   DeliveryLedger,
   RunAuditStore,
   RunTraceStore,
+  migrateConnectTable,
   migrateEventQueueTable,
   migrateDeliveryLedgerTable,
   migrateRunAuditTable,
@@ -47,6 +49,8 @@ export class RepoCoordinator extends DurableObject<Env> {
   private deliveryLedger!: DeliveryLedger;
   private runAuditStore!: RunAuditStore;
   private runTrace!: RunTraceStore;
+  // Named `connectState`, not `connect`: DurableObject already declares connect(socket).
+  private connectState!: ConnectStore;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -60,6 +64,9 @@ export class RepoCoordinator extends DurableObject<Env> {
     // The trace store broadcasts to this object's open sockets, so a viewer sees a
     // step as it is recorded rather than on the next poll (cloud-factory-cf-2ng).
     this.runTrace = new RunTraceStore(this.ctx.storage.sql, (step) => this.broadcastStep(step));
+    // Webhook connection evidence for the onboarding UI: one row per repository,
+    // written on every authorised delivery and on the provider's `ping` (7gq).
+    this.connectState = new ConnectStore(this.ctx.storage.sql, this.ctx.id.name ?? "");
     this.eventQueue = new EventQueue(this.ctx.storage.sql, {
       setAlarm: (ts: number) => this.ctx.storage.setAlarm(ts),
       deleteAlarm: () => this.ctx.storage.deleteAlarm(),
@@ -154,6 +161,9 @@ export class RepoCoordinator extends DurableObject<Env> {
     if (request.method === "GET" && url.pathname === "/trace/socket") {
       return this.traceSocket(request);
     }
+    if (request.method === "GET" && url.pathname === "/connect") {
+      return this.connectState.status();
+    }
     if (request.method === "GET" && url.pathname === "/stats") {
       return this.stats();
     }
@@ -233,6 +243,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     migrateEventQueueTable(this.sql);
     migrateRunAuditTable(this.sql);
     migrateRunTraceTable(this.sql);
+    migrateConnectTable(this.sql);
     migrateDeliveryLedgerTable(this.sql);
   }
 
@@ -293,6 +304,20 @@ export class RepoCoordinator extends DurableObject<Env> {
     const now = new Date().toISOString();
     const headerEvent = eventNameFor(provider, request.headers);
     const eventName = headerEvent !== "unknown" ? headerEvent : (normalised.payloadEvent ?? "unknown");
+
+    // A delivery that got this far is connection evidence in its own right, and a
+    // `ping` is the provider's explicit handshake — the strongest evidence there
+    // is that a hook is pointed here (cloud-factory-cf-7gq).
+    this.connectState.recordEvent(eventName, now);
+    if (eventName === "ping") {
+      this.connectState.recordPing(now);
+      // A ping carries no work: acknowledge the handshake rather than queueing a
+      // delivery the pipeline would only have to skip.
+      return Response.json(
+        { ok: true, ping: true, deliveryId, connect: this.connectState.snapshot() },
+        { status: 202 },
+      );
+    }
 
     const enqueued = this.eventQueue.enqueue(
       deliveryId,

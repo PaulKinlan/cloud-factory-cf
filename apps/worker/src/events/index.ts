@@ -31,6 +31,12 @@ export {
 } from "./trace";
 
 export {
+  ConnectStore,
+  migrateConnectTable,
+  type ConnectStatus,
+} from "./connect";
+
+export {
   asRecord,
   clampInt,
   safeParseJson,

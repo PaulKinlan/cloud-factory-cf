@@ -87,6 +87,32 @@ thought stream (socket, with polling fallback when the socket cannot connect), a
 artifact inspector for the selected step, and the cost HUD. The control key is typed
 into the panel and kept in memory only — it is never written to `localStorage`.
 
+## Connection evidence
+
+GitHub sends exactly one `ping` event when a webhook is created, and nothing else
+proves a hook is actually pointed at a repository's Durable Object. The coordinator
+records it (and the last delivery of any kind) in the same SQLite database as the
+trace, so onboarding can report a connection instead of asking an operator to trust
+a hunch.
+
+```
+GET /trace/:owner/:repo/connect        (header x-factory-control-key)
+→ {"ok":true,
+   "connect":{"repository":"acme/widget",
+              "lastPingAt":"2026-10-19T16:14:09.512Z",
+              "lastEventAt":"2026-10-19T16:14:09.512Z",
+              "lastEvent":"ping",
+              "pings":1}}
+```
+
+`lastPingAt` is null until the provider's handshake arrives; `pings` counts them, so a
+re-created hook is visible as a new ping rather than an unchanged timestamp.
+`lastEvent`/`lastEventAt` cover every authorised delivery, including ones that arrive
+before the ping. A `ping` is acknowledged with `202` and **not queued**: it carries no
+work, so queueing it would only give the pipeline a delivery to skip. This route is
+control-plane only, like the rest of `/trace` — it says whether a repository's hook is
+live, which must not be world-readable on a public Worker.
+
 ## Operator example
 
 ```bash

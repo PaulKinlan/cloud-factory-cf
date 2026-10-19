@@ -7,13 +7,14 @@ import { sameSecret } from "../secrets";
  *   GET /trace/:owner/:repo            recent ordered steps (optionally ?deliveryId=)
  *   GET /trace/:owner/:repo/usage      cost HUD aggregates (tokens are estimates)
  *   GET /trace/:owner/:repo/socket     live step stream (WebSocket upgrade)
+ *   GET /trace/:owner/:repo/connect    webhook connection evidence (ping/event)
  *
- * All three are control-plane reads, so they require the broker control key: a
- * trace carries prompts and agent output, which is exactly what must not be
- * world-readable on a public Worker.
+ * All of these are control-plane reads, so they require the broker control key: a
+ * trace carries prompts and agent output, and the connection state says whether a
+ * repository's hook is live, which must not be world-readable on a public Worker.
  */
 export const TRACE_PATH =
-  /^\/trace\/(?<owner>[^/]+)\/(?<repo>[^/]+)(?:\/(?<operation>usage|socket))?$/;
+  /^\/trace\/(?<owner>[^/]+)\/(?<repo>[^/]+)(?:\/(?<operation>usage|socket|connect))?$/;
 
 export async function handleTrace(request: Request, env: Env, url: URL): Promise<Response | null> {
   const match = TRACE_PATH.exec(url.pathname);
@@ -56,6 +57,9 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
   }
   if (operation === "usage") {
     return stub.fetch("https://repo-coordinator.internal/trace/usage");
+  }
+  if (operation === "connect") {
+    return stub.fetch("https://repo-coordinator.internal/connect");
   }
   const query = url.searchParams.toString();
   return stub.fetch(`https://repo-coordinator.internal/trace${query === "" ? "" : `?${query}`}`);
