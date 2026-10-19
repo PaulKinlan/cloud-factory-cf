@@ -1,6 +1,7 @@
 import type { Env } from "../env";
 import { AgentStudio, type AgentManifest } from "@factory-cloud/sdk";
 import { SERVICES } from "../credentials/policy";
+import { sameSecret } from "../secrets";
 
 export const STUDIO_PATH =
   /^\/studio\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>author|simulate|agents)(?:\/(?<agentName>[^/]+))?$/;
@@ -179,6 +180,17 @@ export async function handleStudio(
 ): Promise<Response | null> {
   const studio = STUDIO_PATH.exec(url.pathname);
   if (!studio?.groups) return null;
+
+  const controlKey = env.BROKER_CONTROL_KEY;
+  if (!controlKey) {
+    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
+  }
+
+  const providedKey = request.headers.get("x-factory-control-key");
+  if (!(await sameSecret(controlKey, providedKey))) {
+    return Response.json({ ok: false, error: "not authorised to access agent studio" }, { status: 401 });
+  }
+
   const { owner, repo, operation, agentName } = studio.groups as {
     owner: string;
     repo: string;

@@ -3,11 +3,45 @@ import { describe, expect, it } from "vitest";
 import worker from "../src/index";
 import type { AgentManifest } from "@factory-cloud/sdk";
 
+const authHeaders = {
+  "Content-Type": "application/json",
+  "x-factory-control-key": "test-control-key",
+};
+
 describe("Prompt-to-Agent Studio Worker API", () => {
+  it("rejects unauthenticated requests and bad control keys with 401/503 (cloud-factory-cf-17qf)", async () => {
+    // 1. Missing control key -> 401
+    const missingReq = new Request("https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/agents", {
+      method: "GET",
+    });
+    const missingRes = await worker.fetch(missingReq, env);
+    expect(missingRes.status).toBe(401);
+    const missingJson = (await missingRes.json()) as any;
+    expect(missingJson.ok).toBe(false);
+    expect(missingJson.error).toContain("not authorised");
+
+    // 2. Bad control key -> 401
+    const badKeyReq = new Request("https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/agents", {
+      method: "GET",
+      headers: { "x-factory-control-key": "wrong-key" },
+    });
+    const badKeyRes = await worker.fetch(badKeyReq, env);
+    expect(badKeyRes.status).toBe(401);
+
+    // 3. Unconfigured control key -> 503
+    const unconfigRes = await worker.fetch(
+      new Request("https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/agents", {
+        headers: { "x-factory-control-key": "test-control-key" },
+      }),
+      { ...env, BROKER_CONTROL_KEY: undefined } as any,
+    );
+    expect(unconfigRes.status).toBe(503);
+  });
+
   it("authors an agent manifest from natural language prompt", async () => {
     const req = new Request("https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/author", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders,
       body: JSON.stringify({
         prompt: "Create an agent called pr-triage that reviews pull requests and reads code files",
       }),
@@ -27,7 +61,7 @@ describe("Prompt-to-Agent Studio Worker API", () => {
   it("simulates authored agent execution inside Workers runtime", async () => {
     const authorReq = new Request("https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/author", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders,
       body: JSON.stringify({
         prompt: "Create an agent called pr-auditor that reviews PRs",
       }),
@@ -37,7 +71,7 @@ describe("Prompt-to-Agent Studio Worker API", () => {
 
     const simReq = new Request("https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/simulate", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders,
       body: JSON.stringify({
         manifest,
         event: {
@@ -74,7 +108,7 @@ describe("Prompt-to-Agent Studio Worker API", () => {
       "https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/agents",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders,
         body: JSON.stringify({ manifest }),
       }
     );
@@ -84,7 +118,7 @@ describe("Prompt-to-Agent Studio Worker API", () => {
     // List agents
     const listReq = new Request(
       "https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/agents",
-      { method: "GET" }
+      { method: "GET", headers: { "x-factory-control-key": "test-control-key" } }
     );
     const listRes = await worker.fetch(listReq, env);
     expect(listRes.status).toBe(200);
@@ -96,7 +130,7 @@ describe("Prompt-to-Agent Studio Worker API", () => {
     // Get specific installed agent
     const getReq = new Request(
       "https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/agents/issue-responder",
-      { method: "GET" }
+      { method: "GET", headers: { "x-factory-control-key": "test-control-key" } }
     );
     const getRes = await worker.fetch(getReq, env);
     expect(getRes.status).toBe(200);
@@ -113,7 +147,7 @@ describe("Prompt-to-Agent Studio Worker API", () => {
       "https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/agents",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders,
         body: JSON.stringify({
           manifest: {
             ...manifest,
@@ -131,7 +165,7 @@ describe("Prompt-to-Agent Studio Worker API", () => {
       "https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/agents",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders,
         body: JSON.stringify({
           manifest: {
             ...manifest,
@@ -149,7 +183,7 @@ describe("Prompt-to-Agent Studio Worker API", () => {
       "https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/agents",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders,
         body: JSON.stringify({
           manifest: {
             ...manifest,

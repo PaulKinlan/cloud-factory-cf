@@ -569,7 +569,7 @@ describe("GitHub OAuth & App Install Flow", () => {
       "fetch",
       (async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/installations/") || url.includes("/installation/repositories")) {
+        if (url.includes("/installations") || url.includes("/installation/repositories")) {
           return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 });
         }
         return new Response("Not found", { status: 404 });
@@ -687,5 +687,69 @@ describe("GitHub OAuth & App Install Flow", () => {
     // Must use env credentials, NOT query params
     expect(capturedBody.client_id).toBe("gh_test_client_id");
     expect(capturedBody.client_secret).toBe("gh_test_client_secret");
+  });
+
+  it("flow=install: exercises PAT fallback when App endpoints reject with 401 (cloud-factory-cf-pyis)", async () => {
+    const installOwner = "patorg";
+    const installId = 555;
+    const installRepos = [
+      { id: 101, full_name: "patorg/service-x", name: "service-x", private: false, default_branch: "main", owner: { login: installOwner } },
+    ];
+
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        // App endpoints 401 for PAT tokens
+        if (url.includes("/app/installations/")) {
+          return new Response(JSON.stringify({ message: "A regular PAT cannot access /app/installations" }), { status: 401 });
+        }
+        if (url.includes("/installation/repositories")) {
+          return new Response(JSON.stringify({ message: "A regular PAT cannot access /installation/repositories" }), { status: 401 });
+        }
+        // User endpoints succeed for PAT
+        if (url === "https://api.github.com/user/installations") {
+          return new Response(
+            JSON.stringify({
+              total_count: 1,
+              installations: [{ id: installId, account: { login: installOwner, type: "Organization" } }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (url.includes(`/user/installations/${installId}/repositories`)) {
+          return new Response(
+            JSON.stringify({
+              total_count: 1,
+              repositories: installRepos,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const installRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?installation_id=${installId}&setup_action=install&return_to=/`,
+      { method: "GET", redirect: "manual" },
+    );
+
+    expect(installRes.status).toBe(302);
+    const loc = installRes.headers.get("location")!;
+    expect(loc).toContain("connected=1");
+    expect(loc).toContain(`owner=${installOwner}`);
+    expect(loc).toContain(`installation_id=${installId}`);
+    expect(loc).toContain("count=1");
+
+    // Verify repositories were persisted in OrgCoordinator
+    const orgReposRes = await SELF.fetch(`https://example.com/api/repos?owner=${installOwner}`, {
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(orgReposRes.status).toBe(200);
+    const orgReposData = (await orgReposRes.json()) as any;
+    expect(orgReposData.ok).toBe(true);
+    expect(orgReposData.count).toBe(1);
+    expect(orgReposData.repositories[0].fullName).toBe("patorg/service-x");
   });
 });

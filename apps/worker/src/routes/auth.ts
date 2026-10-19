@@ -401,7 +401,7 @@ export async function handleGithubCallback(
         },
       });
       if (!instRes.ok && token.startsWith("ghp_")) {
-        instRes = await fetch(`https://api.github.com/user/installations/${installationId}`, {
+        instRes = await fetch("https://api.github.com/user/installations", {
           headers: {
             authorization: `Bearer ${token}`,
             accept: "application/vnd.github+json",
@@ -424,7 +424,12 @@ export async function handleGithubCallback(
     }
 
     const instData = (await instRes.json().catch(() => ({}))) as any;
-    const account = instData.account ?? instData.installation?.account;
+    const account =
+      instData.account ??
+      instData.installation?.account ??
+      (Array.isArray(instData.installations)
+        ? instData.installations.find((i: any) => String(i.id) === String(installationId))?.account
+        : null);
     if (!account?.login) {
       return Response.json(
         { ok: false, error: "GitHub App installation response contains no valid account login" },
