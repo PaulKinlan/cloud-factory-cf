@@ -21,6 +21,7 @@ import {
   type AgentExecutionFn,
   type CredentialBroker,
   type CredentialCapabilityRequest,
+  type MemoryScope,
 } from "@factory-cloud/sdk";
 
 /** How many events one drain handles, and how long a claim is held. */
@@ -261,9 +262,10 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
   // The counter is the number of reviews that actually reached the provider; it
   // is read before the emit and written only after it succeeds, so a failed run
   // that is retried reports the same number instead of skipping one.
+  const memoryScope: MemoryScope = ctx.state["memoryScope"] === "org" ? "org" : "repo";
   let reviewCount = 0;
   if (facts.event === "pull_request") {
-    const previous = await ctx.memory.get("repo", "review-count");
+    const previous = await ctx.memory.get(memoryScope, "review-count");
     reviewCount = typeof previous === "number" ? previous + 1 : 1;
     decision.payload["body"] = reviewBody(facts, reviewCount);
   }
@@ -281,7 +283,7 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
     };
   }
   if (reviewCount > 0) {
-    await ctx.memory.set("repo", "review-count", reviewCount, { event: facts.deliveryId });
+    await ctx.memory.set(memoryScope, "review-count", reviewCount, { event: facts.deliveryId });
   }
   return {
     status: "success",
@@ -378,6 +380,7 @@ export function buildContext(
       event: facts,
       ...(options.agentId === undefined ? {} : { agentId: options.agentId }),
       ...(options.agentPrompt === undefined ? {} : { agentPrompt: options.agentPrompt }),
+      ...(options.memoryScope === undefined ? {} : { memoryScope: options.memoryScope }),
     },
   });
   return ctx;
@@ -389,6 +392,8 @@ export interface RunEventOptions {
   sinks?: readonly string[];
   agentPrompt?: string;
   agentId?: string;
+  /** Memory scope from the agent's wiring (`repo` unless a hub says otherwise). */
+  memoryScope?: string;
 }
 
 /**
@@ -403,10 +408,14 @@ const SINK_TYPES: Record<string, string> = {
 
 export function sinksFor(types: readonly string[] | undefined): ActionSink[] {
   const all = defaultSinks();
-  if (types === undefined || types.length === 0) return all;
+  // No wiring at all means "the default agent" (the queue route), which uses the
+  // standard sinks. Wiring that names sinks means only those: if none of the
+  // names is one we implement, the agent gets no sink and the run fails loudly
+  // instead of quietly posting to a provider the layout never asked for
+  // (finding cloud-factory-cf-xkg).
+  if (types === undefined) return all;
   const names = new Set(types.map((type) => SINK_TYPES[type]).filter((name): name is string => name !== undefined));
-  const selected = all.filter((sink) => names.has(sink.name));
-  return selected.length === 0 ? all : selected;
+  return all.filter((sink) => names.has(sink.name));
 }
 
 /** Runs one agent invocation for a claimed event; never throws. */

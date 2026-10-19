@@ -1,6 +1,7 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { planAgents, sourceMatches } from "../src/canvas-runs";
+import { sinksFor } from "../src/pipeline";
 import { signBody, TEST_SECRET } from "./support/webhook";
 
 /**
@@ -304,5 +305,95 @@ describe("canvas run route", () => {
     expect(report.failed).toBe(1);
     expect(report.agents[0]?.error ?? "").toContain("not provisioned");
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("canvas findings (xkg, mj7, olu)", () => {
+  it("an agent wired to no supported sink gets no sink, and the run fails loudly", async () => {
+    const repository = "acme/canvas-no-sink";
+    await provision(repository, "pr.review");
+    // Wiring names a sink type the worker does not implement.
+    const documentId = await storeDocument(repository, wiredLayout({ sink: "beads-task" }), "Unsupported sink");
+    await enqueue(repository, "nosink-1", pullRequest(repository, 31));
+    const { calls } = stubUpstream();
+
+    const report = (await (await runDocument(repository, documentId)).json()) as {
+      failed: number;
+      agents: Array<{ status: string; error?: string; runs: Array<{ error?: string }> }>;
+    };
+    expect(report.failed).toBe(1);
+    expect(report.agents[0]?.error ?? "").toContain("no sink accepted");
+    // Nothing reached the provider: the layout never wired a provider sink.
+    expect(calls).toHaveLength(0);
+    expect(sinksFor([])).toHaveLength(0);
+    expect(sinksFor(["beads-task"])).toHaveLength(0);
+    expect(sinksFor(undefined).map((sink) => sink.name)).toEqual(["github-pr-review-sink", "github-issue-comment-sink"]);
+  });
+
+  it("releases matched events beyond the limit instead of leaving them on a lease", async () => {
+    const repository = "acme/canvas-limit";
+    await provision(repository, "pr.review");
+    const documentId = await storeDocument(repository, wiredLayout(), "Limited");
+    await enqueue(repository, "limit-1", pullRequest(repository, 32));
+    await enqueue(repository, "limit-2", pullRequest(repository, 33));
+    const { calls } = stubUpstream();
+
+    const report = (await (await runDocument(repository, documentId, { limit: 1 })).json()) as {
+      ran: number;
+      agents: Array<{ runs: Array<{ deliveryId: string; settled: boolean }> }>;
+    };
+    expect(report.ran).toBe(1);
+    expect(report.agents[0]?.runs[0]?.settled).toBe(true);
+    expect(calls).toHaveLength(1);
+
+    // The second delivery is back on the queue, not stuck processing with an
+    // attempt spent.
+    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+    const stats = await coordinator.fetch("https://repo-coordinator.internal/stats");
+    const counts = ((await stats.json()) as { counts?: Record<string, number> }).counts ?? {};
+    expect(counts["processing"] ?? 0).toBe(0);
+    expect(counts["pending"]).toBe(1);
+    const events = await coordinator.fetch("https://repo-coordinator.internal/events?limit=10");
+    const listed = ((await events.json()) as { events?: Array<{ deliveryId: string; status: string; attempts: number }> }).events ?? [];
+    const deferred = listed.find((event) => event.deliveryId === "limit-2");
+    expect(deferred?.status).toBe("pending");
+    expect(deferred?.attempts).toBe(0);
+  });
+
+  it("writes the review counter in the memory scope the layout wires", async () => {
+    const repository = "acme/canvas-org-memory";
+    await provision(repository, "pr.review");
+    const documentId = await storeDocument(
+      repository,
+      wiredLayout({ withMemory: true }),
+      "Org memory",
+    );
+    // wiredLayout wires a repo-scoped hub; switch it to org.
+    const stored = await SELF.fetch(`https://example.com/canvas/${repository}/documents/${documentId}`, {
+      headers: { "x-factory-control-key": CONTROL_KEY },
+    });
+    const body = (await stored.json()) as { document: { nodes: Array<{ id: string; config: Record<string, string> }> } };
+    const memoryNode = body.document.nodes.find((node) => node.id === "n-memory");
+    if (memoryNode) memoryNode.config = { scope: "org" };
+    const put = await SELF.fetch(`https://example.com/canvas/${repository}/documents/${documentId}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", "x-factory-control-key": CONTROL_KEY },
+      body: JSON.stringify({ name: "Org memory", document: body.document }),
+    });
+    expect(put.status).toBe(200);
+
+    await enqueue(repository, "org-1", pullRequest(repository, 34));
+    stubUpstream();
+    expect((await runDocument(repository, documentId)).status).toBe(200);
+    vi.unstubAllGlobals();
+    await enqueue(repository, "org-2", pullRequest(repository, 35));
+    const second = stubUpstream();
+    expect((await runDocument(repository, documentId)).status).toBe(200);
+    // The second run counts in org memory, which is what the wiring says.
+    expect(String((second.calls[0]?.body as { body?: string }).body)).toContain("review #2");
+
+    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+    const repoMemory = await coordinator.fetch("https://repo-coordinator.internal/memory?scope=repo");
+    expect(((await repoMemory.json()) as { total?: number }).total ?? 0).toBe(0);
   });
 });

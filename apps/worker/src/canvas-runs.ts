@@ -203,14 +203,20 @@ async function runAgent(deps: PipelineDeps, agent: AgentPlan, limit: number): Pr
   const matching = claimed.filter((event) =>
     agent.sources.some((source) => sourceMatches(source, event)),
   );
+  const running = matching.slice(0, limit);
+  // Matched but over this run's limit: they go straight back on the queue rather
+  // than sitting on a lease until it expires and wasting an attempt
+  // (finding cloud-factory-cf-mj7).
+  const deferred = matching.slice(limit);
 
-  for (const event of matching.slice(0, limit)) {
+  for (const event of running) {
     // The agent's own prompt and wiring drive the run; the deterministic runtime
     // still decides what it can actually deliver today.
     const outcome = await runEvent(deps, event, {
       agentPrompt: agent.prompt,
       agentId: agent.id,
       sinks: agent.sinks,
+      ...(agent.memoryScope === null ? {} : { memoryScope: agent.memoryScope }),
     });
     summary.runs.push(outcome);
     if (outcome.status === "failed") {
@@ -226,10 +232,11 @@ async function runAgent(deps: PipelineDeps, agent: AgentPlan, limit: number): Pr
     }
   }
 
-  // Events that matched nothing this agent may consume are released back to the
-  // queue so another agent (or a later run) can take them.
-  const unused = claimed.filter((event) => !matching.includes(event));
-  await release(deps, unused);
+  // Events that matched nothing this agent may consume, and the ones over its
+  // limit, are released back to the queue so another agent (or a later run) can
+  // take them.
+  const unused = claimed.filter((event) => !running.includes(event));
+  await release(deps, [...unused, ...deferred]);
   return summary;
 }
 
