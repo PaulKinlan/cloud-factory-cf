@@ -98,7 +98,9 @@ const CONFIG_FIELDS: Record<NodeKind, Array<{ key: string; label: string; contro
       key: "type",
       label: "Sink",
       control: "select",
-      options: ["github-pr-review", "github-issue", "beads", "telemetry"],
+      // The sink types the worker actually serves; the canvas keeps its older
+      // names working, but new documents should pick from these.
+      options: ["github-pr-review", "github-issue-comment", "github-issue-create", "beads-task", "telemetry"],
     },
   ],
 };

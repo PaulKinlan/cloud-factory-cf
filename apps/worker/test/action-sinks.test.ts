@@ -146,6 +146,10 @@ describe("canvas sink catalogue", () => {
       "beads-task": "beads-task-sink",
       telemetry: "cloud-telemetry-sink",
     });
+    // The names the canvas UI has always offered still reach a sink
+    // (cloud-factory-cf-w45).
+    expect(sinksFor(["github-issue"]).map((sink) => sink.name)).toEqual(["github-issue-comment-sink"]);
+    expect(sinksFor(["beads"]).map((sink) => sink.name)).toEqual(["beads-task-sink"]);
     expect(sinksFor(["beads-task"]).map((sink) => sink.name)).toEqual(["beads-task-sink"]);
     expect(sinksFor(["telemetry"]).map((sink) => sink.name)).toEqual(["cloud-telemetry-sink"]);
     expect(sinksFor(["github-issue-create"]).map((sink) => sink.name)).toEqual(["github-issue-create-sink"]);
@@ -264,5 +268,33 @@ describe("telemetry sink", () => {
     // and the run still succeeds — nothing is dropped silently.
     expect(((await configured.json()) as { failed: number }).failed).toBe(0);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("provider rejections fail the action (cloud-factory-cf-2f5)", () => {
+  it("fails when the provider answers 500", async () => {
+    await provision("github", "issue.create");
+    const documentId = await storeDocument(layout("github-issue-create"));
+    deliverySeq += 1;
+    await enqueue(`reject-${deliverySeq}`);
+    // The broker passed a real upstream response through, and the provider said no.
+    const calls = stubUpstream(500);
+
+    const report = await run(documentId);
+    expect(calls.calls).toHaveLength(1);
+    expect(report.failed).toBe(1);
+    expect(report.agents[0]?.error ?? "").toContain("issue.create answered 500");
+  });
+
+  it("fails a beads task the same way", async () => {
+    await provision("beads", "task.create");
+    const documentId = await storeDocument(layout("beads-task"));
+    deliverySeq += 1;
+    await enqueue(`reject-beads-${deliverySeq}`);
+    stubUpstream(503);
+
+    const report = await run(documentId);
+    expect(report.failed).toBe(1);
+    expect(report.agents[0]?.error ?? "").toContain("beads task.create answered 503");
   });
 });

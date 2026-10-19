@@ -6,6 +6,7 @@
  * structured log for telemetry. A layout may name only these types; anything else
  * is refused rather than silently mapped onto a different provider.
  */
+import type { CredentialCapabilityRequest } from "@factory-cloud/sdk";
 import {
   BeadsTaskSink,
   CloudTelemetrySink,
@@ -13,6 +14,9 @@ import {
   type ActionSink,
   type AgentContext,
 } from "@factory-cloud/sdk";
+
+/** The SDK request shape plus the status flag this worker's broker understands. */
+type CredentialRequest = CredentialCapabilityRequest & { readonly includeStatus?: boolean };
 
 export interface SinkDeps {
   /** Where telemetry is exported; absent means the structured log. */
@@ -25,6 +29,11 @@ export interface SinkDeps {
 export const SINK_TYPES: Record<string, string> = {
   "github-pr-review": "github-pr-review-sink",
   "github-issue-comment": "github-issue-comment-sink",
+  // The names the canvas UI has always offered. A stored document that says
+  // `github-issue` or `beads` must reach a sink, not fail as unknown
+  // (cloud-factory-cf-w45).
+  "github-issue": "github-issue-comment-sink",
+  beads: "beads-task-sink",
   "github-issue-create": "github-issue-create-sink",
   "beads-task": "beads-task-sink",
   telemetry: "cloud-telemetry-sink",
@@ -40,17 +49,35 @@ export const SINK_ACTIONS: Record<string, string> = {
   "cloud-telemetry-sink": "telemetry:log",
 };
 
+/**
+ * What the broker returns when a sink asks for the upstream status. A rejected
+ * call has to fail the action rather than look like a success
+ * (cloud-factory-cf-2f5).
+ */
+interface SignedResult {
+  status: number;
+  body: unknown;
+}
+
+function assertUpstreamAccepted(result: SignedResult, what: string): { status: number } {
+  if (typeof result?.status !== "number" || result.status >= 400) {
+    throw new Error(`${what} answered ${result?.status ?? "no status"}`);
+  }
+  return { status: result.status };
+}
+
 /** Issue creation goes through the broker's `issue.create` action. */
 export function issueCreateSink(): ActionSink {
   return new GitHubIssueSink({
     name: "github-issue-create-sink",
     executor: async (payload, ctx) => {
-      const result = await ctx.credentials.executeSignedRequest<{ status?: number }>({
+      const result = await ctx.credentials.executeSignedRequest<SignedResult>({
         service: "github",
         action: "issue.create",
         params: { title: payload.title, body: payload.body },
-      });
-      return { status: result?.status ?? 200 };
+        includeStatus: true,
+      } as CredentialRequest);
+      return assertUpstreamAccepted(result, "issue.create");
     },
   });
 }
@@ -64,9 +91,10 @@ export function beadsTaskSink(): ActionSink {
   return new BeadsTaskSink({
     executor: async (payload, actionType, ctx) => {
       const isUpdate = actionType.includes("update");
-      const result = await ctx.credentials.executeSignedRequest<{ status?: number }>({
+      const result = await ctx.credentials.executeSignedRequest<SignedResult>({
         service: "beads",
         action: isUpdate ? "task.update" : "task.create",
+        includeStatus: true,
         params: isUpdate
           ? { taskId: payload.taskId ?? payload.id, title: payload.title, description: payload.description }
           : {
@@ -75,8 +103,8 @@ export function beadsTaskSink(): ActionSink {
               ...(payload.priority === undefined ? {} : { priority: payload.priority }),
               ...(payload.assignee === undefined ? {} : { assignee: payload.assignee }),
             },
-      });
-      return { status: result?.status ?? 200 };
+      } as CredentialRequest);
+      return assertUpstreamAccepted(result, isUpdate ? "beads task.update" : "beads task.create");
     },
   });
 }
@@ -137,17 +165,19 @@ function prReviewSink(): ActionSink {
         return failure("github-pr-review-sink", action.id, action.type, "invalid review payload", start);
       }
       try {
-        const result = await ctx.credentials.executeSignedRequest<{ status?: number }>({
+        const result = await ctx.credentials.executeSignedRequest<SignedResult>({
           service: "github",
           action: "pr.review",
           params: { number: payload.prNumber, event: payload.event ?? "COMMENT", body: payload.body },
-        });
+          includeStatus: true,
+        } as CredentialRequest);
+        const accepted = assertUpstreamAccepted(result, "pr.review");
         return {
           sinkName: "github-pr-review-sink",
           actionId: action.id,
           actionType: action.type,
           success: true,
-          result: { status: result?.status ?? 200 },
+          result: accepted,
           durationMs: Date.now() - start,
         };
       } catch (error) {
@@ -169,17 +199,19 @@ function issueCommentSink(): ActionSink {
         return failure("github-issue-comment-sink", action.id, action.type, "invalid comment payload", start);
       }
       try {
-        const result = await ctx.credentials.executeSignedRequest<{ status?: number }>({
+        const result = await ctx.credentials.executeSignedRequest<SignedResult>({
           service: "github",
           action: "issue.comment",
           params: { number: payload.issueNumber, body: payload.body },
-        });
+          includeStatus: true,
+        } as CredentialRequest);
+        const accepted = assertUpstreamAccepted(result, "issue.comment");
         return {
           sinkName: "github-issue-comment-sink",
           actionId: action.id,
           actionType: action.type,
           success: true,
-          result: { status: result?.status ?? 200 },
+          result: accepted,
           durationMs: Date.now() - start,
         };
       } catch (error) {

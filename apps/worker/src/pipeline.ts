@@ -33,6 +33,20 @@ export const DEFAULT_RUN_BATCH = 10;
 export const DEFAULT_RUN_VISIBILITY_MS = 60_000;
 const CAPABILITY_SAFETY_MARGIN_SECONDS = 30;
 
+/**
+ * A capability request plus the one thing a sink may need beyond it: the upstream
+ * status, so it can tell an accepted provider call from a rejected one.
+ */
+type CapabilityRequest = CredentialCapabilityRequest & { readonly includeStatus?: boolean };
+
+function parseJsonOrString(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
 export interface ClaimedEvent {
   deliveryId: string;
   provider: string;
@@ -128,7 +142,7 @@ export class BrokerCredentialBroker implements CredentialBroker {
     return payload.permitted === true;
   }
 
-  async executeSignedRequest<T = unknown>(request: CredentialCapabilityRequest): Promise<T> {
+  async executeSignedRequest<T = unknown>(request: CapabilityRequest): Promise<T> {
     const capability = await this.capabilityFor(request.service, request.action);
     const response = await this.broker.fetch("https://credential-broker.internal/proxy", {
       method: "POST",
@@ -146,6 +160,15 @@ export class BrokerCredentialBroker implements CredentialBroker {
     };
     if (!response.ok || payload.ok !== true) {
       throw new Error(payload.error ?? `broker refused ${request.service}:${request.action}`);
+    }
+    // A sink that has to tell "the provider accepted this" from "the provider
+    // rejected it" asks for the status; without it a 500 upstream looks like a
+    // success (cloud-factory-cf-2f5).
+    if (request.includeStatus === true) {
+      return {
+        status: payload.status ?? 0,
+        body: typeof payload.body === "string" ? parseJsonOrString(payload.body) : payload.body,
+      } as T;
     }
     // The broker returns the upstream body as a string (already scrubbed of the
     // credential); parse it when it is JSON so sinks get a real object.
