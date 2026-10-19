@@ -53,16 +53,51 @@ export interface AgentRunSummary {
   error?: string;
 }
 
+/**
+ * How one event settles after fan-out (cloud-factory-cf-lbi).
+ *
+ * A failed agent is retried, but an agent whose side effects happened and whose
+ * ledger write was lost must never run again — so if any outcome carries a
+ * `deliveryError`, the event is acknowledged and the gap is reported instead of
+ * failing it and repeating that agent's provider call.
+*/
+export function chooseSettlement(outcomes: readonly RunOutcome[]): {
+  outcome: RunOutcome;
+  retry: boolean;
+  ledgerErrors: string[];
+} {
+  const ledgerErrors = outcomes
+    .map((outcome) => outcome.deliveryError)
+    .filter((error): error is string => error !== undefined);
+  const synthetic: RunOutcome = {
+    deliveryId: outcomes[0]?.deliveryId ?? "",
+    status: "skipped",
+    settled: true,
+    prompt: "",
+    actionTypes: [],
+    durationMs: 0,
+  };
+  const outcome = outcomes[0] ?? synthetic;
+  if (ledgerErrors.length > 0) {
+    const delivered = outcomes.find((entry) => entry.status !== "failed") ?? outcome;
+    return { outcome: delivered, retry: false, ledgerErrors };
+  }
+  const failure = outcomes.find((entry) => entry.status === "failed");
+  return { outcome: failure ?? outcome, retry: failure !== undefined, ledgerErrors };
+}
+
 export interface CanvasRunReport {
   documentId: string;
   name: string;
   agents: AgentRunSummary[];
   /** Agent executions (an event wired to two agents counts twice). */
   ran: number;
-  /** Events claimed and settled in this run. */
+/** Events claimed and settled in this run. */
   events: number;
   /** Agent executions skipped because that (event, agent) pair had already delivered. */
   deduped: number;
+  /** Delivery-ledger write failures: the side effect happened but is not recorded. */
+  ledgerErrors: string[];
   failed: number;
 }
 
@@ -175,6 +210,7 @@ export async function runCanvasDocument(
     ran: 0,
     events: 0,
     deduped: 0,
+    ledgerErrors: [],
     failed: 0,
   };
 
@@ -225,14 +261,12 @@ export async function runCanvasDocument(
     }
 
     // Settlement follows the event, not the agent: ack only when every agent
-    // succeeded. A partial failure retries the whole event, so the agents that
-    // did succeed run again — sinks are not idempotent yet.
-    const failure = outcomes.find((outcome) => outcome.status === "failed");
-    const settlement = await settleEvent(
-      deps,
-      event,
-      failure ?? outcomes[0] ?? { deliveryId: event.deliveryId, status: "skipped", settled: true, prompt: "", actionTypes: [], durationMs: 0 },
-    );
+    // succeeded, unless a ledger write was lost — then an ack is the only way to
+    // avoid repeating a delivered agent, and the gap is reported
+    // (cloud-factory-cf-lbi).
+    const chosen = chooseSettlement(outcomes);
+    report.ledgerErrors.push(...chosen.ledgerErrors);
+    const settlement = await settleEvent(deps, event, chosen.outcome);
     if (!settlement.ok) {
       for (const outcome of outcomes) {
         outcome.settled = false;

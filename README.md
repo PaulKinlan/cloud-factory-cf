@@ -101,7 +101,12 @@ If the ledger cannot record a run after the side effects happened (a rejected or
 unreachable write), the run is retried three times; if it still fails the outcome
 carries `deliveryError` and the event is acknowledged anyway. That choice is
 deliberate: retrying would post the review twice, so the gap is reported instead
-of hidden.
+of hidden (`ledgerErrors` in the run report).
+
+In a fan-out that cuts both ways: if one agent delivered but its ledger write was
+lost, the event is acknowledged even when another agent failed — retrying would
+repeat the delivered agent — and the report names both the failed agent and the
+ledger gap.
 
 Today's deterministic runtime can deliver `github-pr-review` and
 `github-issue-comment`; a sink type it does not know is ignored rather than

@@ -1,6 +1,6 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { planAgents, sourceMatches, uniqueClaims } from "../src/canvas-runs";
+import { chooseSettlement, planAgents, sourceMatches, uniqueClaims } from "../src/canvas-runs";
 import { sinksFor } from "../src/pipeline";
 import { signBody, TEST_SECRET } from "./support/webhook";
 
@@ -666,4 +666,42 @@ describe("one ledger for every runner (cloud-factory-cf-7wj, cloud-factory-cf-lb
     expect(stats.counts["pending"]).toBe(1);
   });
 
+});
+
+describe("fan-out settlement when a ledger write is lost (cloud-factory-cf-lbi)", () => {
+  const outcome = (overrides: Partial<{ status: "succeeded" | "failed" | "skipped"; deliveryError: string }>) => ({
+    deliveryId: "d-1",
+    status: "succeeded" as const,
+    settled: true,
+    prompt: "",
+    actionTypes: [] as string[],
+    durationMs: 0,
+    ...overrides,
+  });
+
+  it("retries the event when an agent simply failed", () => {
+    const chosen = chooseSettlement([outcome({}), outcome({ status: "failed" })]);
+    expect(chosen.retry).toBe(true);
+    expect(chosen.outcome.status).toBe("failed");
+    expect(chosen.ledgerErrors).toEqual([]);
+  });
+
+  it("acknowledges instead of retrying when a delivered agent's ledger write was lost", () => {
+    // The reviewer delivered but its completion was rejected; the docs agent
+    // failed. Retrying would post the review a second time, so the event is
+    // acknowledged and the gap reported.
+    const chosen = chooseSettlement([
+      outcome({ deliveryError: "delivery ledger rejected the completion (503)" }),
+      outcome({ status: "failed" }),
+    ]);
+    expect(chosen.retry).toBe(false);
+    expect(chosen.outcome.status).toBe("succeeded");
+    expect(chosen.ledgerErrors).toEqual(["delivery ledger rejected the completion (503)"]);
+  });
+
+  it("acknowledges when every agent delivered", () => {
+    const chosen = chooseSettlement([outcome({}), outcome({})]);
+    expect(chosen.retry).toBe(false);
+    expect(chosen.outcome.status).toBe("succeeded");
+  });
 });
