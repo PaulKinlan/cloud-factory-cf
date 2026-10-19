@@ -700,4 +700,34 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(installJson.ok).toBe(false);
     expect(installJson.error).toContain("GitHub App installation endpoint requires an App JWT; personal access tokens (ghp_) are not accepted by GitHub");
   });
+
+  it("flow=install: rejects 401 on /installation/repositories with installation access token error (cloud-factory-cf-c8qj)", async () => {
+    const installId = 777;
+
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes(`/app/installations/${installId}`)) {
+          return new Response(JSON.stringify({ id: installId, account: { login: "testorg", type: "Organization" } }), { status: 200 });
+        }
+        if (url.includes("/installation/repositories")) {
+          return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const installRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?installation_id=${installId}&setup_action=install&return_to=/`,
+      { method: "GET", redirect: "manual" },
+    );
+
+    expect(installRes.status).toBe(502);
+    const installJson = (await installRes.json()) as any;
+    expect(installJson.ok).toBe(false);
+    expect(installJson.error).toBe(
+      "GitHub installation repositories endpoint requires an installation access token; personal access tokens (ghp_) are not accepted by GitHub",
+    );
+  });
 });
