@@ -198,9 +198,8 @@ export async function handleGithubCallback(
   }
 
   // OAuth code exchange requires strict CSRF verification via state parameter + signed cookie.
-  // When code is present, or when a state cookie is attached, enforce state verification.
-  const cookieVal = getCookie(request.headers, "cf_oauth_state");
-  if (code || cookieVal) {
+  // When code is present, enforce state verification before exchanging code for tokens.
+  if (code) {
     if (!state) {
       return Response.json(
         { ok: false, error: "Missing required OAuth state parameter" },
@@ -208,6 +207,7 @@ export async function handleGithubCallback(
       );
     }
 
+    const cookieVal = getCookie(request.headers, "cf_oauth_state");
     if (!cookieVal) {
       return Response.json(
         { ok: false, error: "Missing OAuth state cookie" },

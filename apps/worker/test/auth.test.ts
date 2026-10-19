@@ -320,5 +320,41 @@ describe("GitHub OAuth & App Install Flow", () => {
     const loc2 = installWithoutState.headers.get("location")!;
     expect(loc2).toContain("connected=1");
     expect(loc2).toContain("installation_id=inst_789");
+
+    // 3. Direct install callback with leftover cf_oauth_state cookie and state=owner/repo (cloud-factory-cf-0jg)
+    const loginRes = await SELF.fetch("https://example.com/auth/github/login?client_id=gh_test_client_id", {
+      method: "GET",
+      redirect: "manual",
+    });
+    const leftoverCookie = loginRes.headers.get("set-cookie")!.split(";")[0]!;
+
+    const installWithLeftoverCookie = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=inst_789&setup_action=install&state=acme%2Fwidget",
+      {
+        method: "GET",
+        headers: { cookie: leftoverCookie },
+        redirect: "manual",
+      },
+    );
+    expect(installWithLeftoverCookie.status).toBe(302);
+    const loc3 = installWithLeftoverCookie.headers.get("location")!;
+    expect(loc3).toContain("connected=1");
+    expect(loc3).toContain("installation_id=inst_789");
+    expect(installWithLeftoverCookie.headers.get("set-cookie")).toContain("cf_oauth_state=;");
+
+    // 4. Direct install callback with leftover cookie and no state param (cloud-factory-cf-0jg)
+    const installWithLeftoverNoState = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=inst_789&setup_action=install",
+      {
+        method: "GET",
+        headers: { cookie: leftoverCookie },
+        redirect: "manual",
+      },
+    );
+    expect(installWithLeftoverNoState.status).toBe(302);
+    const loc4 = installWithLeftoverNoState.headers.get("location")!;
+    expect(loc4).toContain("connected=1");
+    expect(loc4).toContain("installation_id=inst_789");
+    expect(installWithLeftoverNoState.headers.get("set-cookie")).toContain("cf_oauth_state=;");
   });
 });
