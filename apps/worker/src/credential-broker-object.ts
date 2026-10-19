@@ -27,6 +27,27 @@ import { sameSecret } from "./secrets";
 
 export const DEFAULT_CLIENT = "unknown";
 
+/** Sliding window for the per-agent quota; also the `Retry-After` horizon. */
+export const QUOTA_WINDOW_MS = 60_000;
+
+/** Calls per (agent, service, action) per window when BROKER_QUOTA_PER_MINUTE is unset. */
+export const DEFAULT_QUOTA_PER_MINUTE = 60;
+
+/**
+ * Parses `BROKER_QUOTA_PER_MINUTE`. Only a plain non-negative integer is
+ * honoured, and only an explicit `"0"` disables the throttle: an empty,
+ * whitespace, negative, fractional or non-numeric value falls back to the safe
+ * default rather than silently disabling the limit.
+ */
+export function parseQuotaLimit(raw: unknown): number {
+  if (typeof raw !== "string") return DEFAULT_QUOTA_PER_MINUTE;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return DEFAULT_QUOTA_PER_MINUTE;
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) return DEFAULT_QUOTA_PER_MINUTE;
+  return parsed;
+}
+
 export class CredentialBroker extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -53,6 +74,9 @@ export class CredentialBroker extends DurableObject<Env> {
       const service = url.searchParams.get("service") ?? "";
       const action = url.searchParams.get("action") ?? "";
       return Response.json({ ok: true, service, action, permitted: hasPermission(service, action) });
+    }
+    if (url.pathname === "/provisioning") {
+      return this.provisioning(request, url);
     }
     if (request.method === "POST" && url.pathname === "/proxy") {
       return this.proxy(request);
@@ -90,6 +114,31 @@ export class CredentialBroker extends DurableObject<Env> {
     `);
     this.sql.exec(`
       CREATE INDEX IF NOT EXISTS credential_audit_at_idx ON credential_audit (at);
+    `);
+    // One row per proxied call inside the window. Rows are pruned on every
+    // check, so the table is bounded by the quota itself.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS credential_quota (
+        at_ms INTEGER NOT NULL,
+        agent TEXT NOT NULL,
+        service TEXT NOT NULL,
+        action TEXT NOT NULL
+      );
+    `);
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS credential_quota_key_idx
+        ON credential_quota (agent, service, action, at_ms);
+    `);
+    // Agents the control plane has allowed to receive capabilities. `action` may
+    // be "*" to allow every action the policy table permits for that service.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS agent_provisioning (
+        agent TEXT NOT NULL,
+        service TEXT NOT NULL,
+        action TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (agent, service, action)
+      );
     `);
   }
 
@@ -132,6 +181,19 @@ export class CredentialBroker extends DurableObject<Env> {
     if (!hasPermission(service, action)) {
       await this.record({ agent, service, action, outcome: "denied", detail: "action not permitted" });
       return Response.json({ ok: false, error: "action not permitted" }, { status: 403 });
+    }
+    if (this.requiresProvisioning && !this.isProvisioned(agent, service, action)) {
+      await this.record({
+        agent,
+        service,
+        action,
+        outcome: "denied",
+        detail: "agent is not provisioned for this action",
+      });
+      return Response.json(
+        { ok: false, error: "agent is not provisioned for this action" },
+        { status: 403 },
+      );
     }
 
     const ttlSeconds =
@@ -200,6 +262,30 @@ export class CredentialBroker extends DurableObject<Env> {
       return Response.json({ ok: false, error: "action not permitted" }, { status: 403 });
     }
 
+    const quota = this.consumeQuota(claims.sub, service, action);
+    if (!quota.allowed) {
+      const auditId = await this.record({
+        agent: claims.sub,
+        jti: claims.jti,
+        service,
+        action,
+        outcome: "quota_exceeded",
+        status: 429,
+        detail: `more than ${this.quotaLimit} calls in ${QUOTA_WINDOW_MS / 1000}s`,
+      });
+      return Response.json(
+        {
+          ok: false,
+          error: "quota exceeded",
+          retryAfter: quota.retryAfter,
+          limit: this.quotaLimit,
+          windowSeconds: QUOTA_WINDOW_MS / 1000,
+          auditId,
+        },
+        { status: 429, headers: { "retry-after": String(quota.retryAfter) } },
+      );
+    }
+
     const params =
       typeof body.params === "object" && body.params !== null
         ? (body.params as Record<string, unknown>)
@@ -253,6 +339,176 @@ export class CredentialBroker extends DurableObject<Env> {
       auditId,
       // Deliberately no upstream headers: they can carry cookies or auth echoes.
     }, { status: 200 });
+  }
+
+  // -------------------------------------------------------- provisioning
+
+  /** Provisioning is enforced unless `BROKER_REQUIRE_PROVISIONING` is "0"/"false". */
+  private get requiresProvisioning(): boolean {
+    const raw = this.env.BROKER_REQUIRE_PROVISIONING;
+    if (typeof raw !== "string") return true;
+    const normalised = raw.trim().toLowerCase();
+    return normalised !== "0" && normalised !== "false" && normalised !== "no";
+  }
+
+  /** Exact (agent, service, action) row, or an `action = "*"` row for the service. */
+  private isProvisioned(agent: string, service: string, action: string): boolean {
+    const row = this.sql
+      .exec<{ present: number }>(
+        `SELECT 1 AS present FROM agent_provisioning
+         WHERE agent = ? AND service = ? AND (action = ? OR action = '*') LIMIT 1`,
+        agent,
+        service,
+        action,
+      )
+      .toArray();
+    return row.length > 0;
+  }
+
+  /**
+   * Control-plane surface for provisioning records. Agents cannot provision
+   * themselves: every method requires the same key that mints capabilities.
+   */
+  private async provisioning(request: Request, url: URL): Promise<Response> {
+    const provisioningKey = this.env.BROKER_CONTROL_KEY;
+    if (!provisioningKey) {
+      return Response.json({ ok: false, error: "broker control key not configured" }, { status: 503 });
+    }
+    const authorised = await sameSecret(provisioningKey, request.headers.get("x-factory-control-key"));
+    if (!authorised) {
+      await this.record({
+        agent: DEFAULT_CLIENT,
+        service: "-",
+        action: "-",
+        outcome: "denied",
+        detail: "bad control key on provisioning",
+      });
+      return Response.json({ ok: false, error: "not authorised to provision agents" }, { status: 401 });
+    }
+
+    if (request.method === "GET") {
+      const rows = this.sql
+        .exec<{ agent: string; service: string; action: string; created_at: string }>(
+          `SELECT agent, service, action, created_at FROM agent_provisioning ORDER BY agent, service, action`,
+        )
+        .toArray();
+      return Response.json({
+        ok: true,
+        repository: this.repository,
+        enforced: this.requiresProvisioning,
+        count: rows.length,
+        entries: rows.map((row) => ({
+          agent: row.agent,
+          service: row.service,
+          action: row.action,
+          createdAt: row.created_at,
+        })),
+      });
+    }
+
+    const body =
+      request.method === "POST" || request.method === "DELETE"
+        ? ((await readJson(request)) as { agent?: unknown; service?: unknown; action?: unknown })
+        : {};
+    const agent = typeof body.agent === "string" ? body.agent.trim() : "";
+    const service = typeof body.service === "string" ? body.service.trim() : "";
+    const action = typeof body.action === "string" ? body.action.trim() : "";
+    if (!agent || !service || !action) {
+      return Response.json(
+        { ok: false, error: "agent, service and action are required ('*' allows every action)" },
+        { status: 400 },
+      );
+    }
+
+    if (request.method === "POST") {
+      if (!hasPermission(service, action) && action !== "*") {
+        return Response.json({ ok: false, error: "action not permitted by policy" }, { status: 403 });
+      }
+      this.sql.exec(
+        `INSERT OR IGNORE INTO agent_provisioning (agent, service, action, created_at) VALUES (?, ?, ?, ?)`,
+        agent,
+        service,
+        action,
+        new Date().toISOString(),
+      );
+      await this.record({ agent, service, action, outcome: "provisioned", detail: null });
+      return Response.json({ ok: true, agent, service, action, repository: this.repository });
+    }
+
+    if (request.method === "DELETE") {
+      const before = this.sql
+        .exec<{ count: number }>(
+          `SELECT COUNT(*) AS count FROM agent_provisioning WHERE agent = ? AND service = ? AND action = ?`,
+          agent,
+          service,
+          action,
+        )
+        .one();
+      this.sql.exec(
+        `DELETE FROM agent_provisioning WHERE agent = ? AND service = ? AND action = ?`,
+        agent,
+        service,
+        action,
+      );
+      if (before.count === 0) {
+        return Response.json({ ok: false, error: "no such provisioning record" }, { status: 404 });
+      }
+      await this.record({ agent, service, action, outcome: "deprovisioned", detail: null });
+      return Response.json({ ok: true, agent, service, action, revoked: before.count });
+    }
+
+    return new Response("method not allowed", { status: 405 });
+  }
+
+  // --------------------------------------------------------------- quota
+
+  /** `BROKER_QUOTA_PER_MINUTE`; only an explicit "0" disables the quota. */
+  private get quotaLimit(): number {
+    return parseQuotaLimit(this.env.BROKER_QUOTA_PER_MINUTE);
+  }
+
+  /**
+   * Sliding-window quota per (agent, service, action), counted after the
+   * capability and policy checks so a denied request never spends a slot, and
+   * before the upstream call so a replayed capability cannot flood a provider.
+   * Every allowed call spends a slot, including ones whose upstream call fails.
+   */
+  private consumeQuota(
+    agent: string,
+    service: string,
+    action: string,
+  ): { allowed: boolean; retryAfter: number } {
+    const limit = this.quotaLimit;
+    if (limit === 0) return { allowed: true, retryAfter: 0 };
+
+    const now = Date.now();
+    const windowStart = now - QUOTA_WINDOW_MS;
+    this.sql.exec(`DELETE FROM credential_quota WHERE at_ms <= ?`, windowStart);
+
+    const row = this.sql
+      .exec<{ count: number; oldest: number | null }>(
+        `SELECT COUNT(*) AS count, MIN(at_ms) AS oldest
+         FROM credential_quota WHERE agent = ? AND service = ? AND action = ?`,
+        agent,
+        service,
+        action,
+      )
+      .one();
+
+    if (row.count >= limit) {
+      const oldest = row.oldest ?? now;
+      const retryAfter = Math.max(1, Math.ceil((oldest + QUOTA_WINDOW_MS - now) / 1000));
+      return { allowed: false, retryAfter };
+    }
+
+    this.sql.exec(
+      `INSERT INTO credential_quota (at_ms, agent, service, action) VALUES (?, ?, ?, ?)`,
+      now,
+      agent,
+      service,
+      action,
+    );
+    return { allowed: true, retryAfter: 0 };
   }
 
   // --------------------------------------------------------------- audit

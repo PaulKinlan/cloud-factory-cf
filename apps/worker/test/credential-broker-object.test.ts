@@ -31,10 +31,19 @@ async function brokerFetch(
   });
 }
 
+/** Capability issuance needs a provisioning record, so tests provision first. */
+async function provision(
+  repository: string,
+  body: { agent: string; service: string; action: string },
+): Promise<Response> {
+  return brokerFetch(repository, "provisioning", { body, controlKey: CONTROL_KEY });
+}
+
 async function issue(
   repository: string,
   body: { agent: string; service: string; action: string; ttlSeconds?: number },
 ): Promise<IssuedCapability> {
+  await provision(repository, { agent: body.agent, service: body.service, action: body.action });
   const response = await brokerFetch(repository, "capabilities", { body, controlKey: CONTROL_KEY });
   return (await response.json()) as IssuedCapability;
 }

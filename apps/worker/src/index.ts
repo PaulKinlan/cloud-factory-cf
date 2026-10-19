@@ -13,7 +13,7 @@ export { RepoCoordinator } from "./repo-coordinator";
 const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
 const CANVAS_PATH = /^\/canvas\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/documents(?:\/(?<id>[^/]+))?$/;
 const BROKER_PATH =
-  /^\/broker\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>capabilities|permissions|proxy|audit)$/;
+  /^\/broker\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>capabilities|permissions|provisioning|proxy|audit)$/;
 const STUDIO_PATH =
   /^\/studio\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>author|simulate|agents)(?:\/(?<agentName>[^/]+))?$/;
 
@@ -156,10 +156,13 @@ async function routeBroker(
   operation: string,
   search: string,
 ): Promise<Response> {
-  if (operation !== "permissions" && operation !== "audit" && request.method !== "POST") {
-    return new Response("method not allowed", { status: 405 });
-  }
-  if ((operation === "permissions" || operation === "audit") && request.method !== "GET") {
+  if (operation === "permissions" || operation === "audit") {
+    if (request.method !== "GET") return new Response("method not allowed", { status: 405 });
+  } else if (operation === "provisioning") {
+    if (!["GET", "POST", "DELETE"].includes(request.method)) {
+      return new Response("method not allowed", { status: 405 });
+    }
+  } else if (request.method !== "POST") {
     return new Response("method not allowed", { status: 405 });
   }
 
@@ -169,7 +172,7 @@ async function routeBroker(
     {
       method: request.method,
       headers: brokerHeaders(request.headers),
-      body: request.method === "POST" ? await request.text() : undefined,
+      body: request.method === "POST" || request.method === "DELETE" ? await request.text() : undefined,
     },
   );
   return stub.fetch(forwarded);
