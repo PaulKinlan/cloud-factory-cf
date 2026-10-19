@@ -214,6 +214,30 @@ describe("DO event audit log API", () => {
     expect(body.stats["pending"]).toBe(1);
   });
 
+  it("retrieves an event whose delivery ID is stats (cloud-factory-cf-sood)", async () => {
+    const repository = "audit/deliv-named-stats";
+    const req = await githubRequest("stats", repository);
+    const queued = await SELF.fetch(req);
+    expect(queued.status).toBe(202);
+
+    // Detail route /audit/events/:owner/:repo/stats returns the event detail view
+    const detailRes = await callAudit(`/audit/events/${repository}/stats`, authHeaders);
+    expect(detailRes.status).toBe(200);
+    const detailBody = (await detailRes.json()) as any;
+    expect(detailBody.ok).toBe(true);
+    expect(detailBody.event).toBeDefined();
+    expect(detailBody.event.deliveryId).toBe("stats");
+    expect(detailBody.deliveries).toBeDefined();
+
+    // Query param /audit/events/:owner/:repo?deliveryId=stats also returns the event list with the event
+    const listRes = await callAudit(`/audit/events/${repository}?deliveryId=stats`, authHeaders);
+    expect(listRes.status).toBe(200);
+    const listBody = (await listRes.json()) as any;
+    expect(listBody.ok).toBe(true);
+    expect(listBody.count).toBe(1);
+    expect(listBody.events[0].deliveryId).toBe("stats");
+  });
+
   it("lists canvas run audits via /audit/runs", async () => {
     const repository = "audit/runs-test";
     const stub = coordinator(repository);
