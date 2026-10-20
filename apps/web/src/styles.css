@@ -499,18 +499,45 @@ textarea.field__control {
   gap: 8px;
 }
 
+/* Narrow screens: the canvas keeps the whole workspace and the side panels
+   become bottom sheets over it. Stacked panels used to shrink the canvas to
+   zero height once both were open, and the last panel was clipped by the
+   app shell's `overflow: hidden` (cloud-factory-cf-9jb). One sheet at a time:
+   opening Observability covers the inspector, and closing it brings the
+   inspector back, because a phone cannot show the canvas and two full panels. */
 @media (max-width: 900px) {
   .workspace {
     flex-direction: column;
   }
 
-  .inspector,
-  .observability-panel {
-    width: auto;
+  .viewport {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  /* Specificity beats the base panel rules defined below (fixed 320/380px). */
+  .workspace > :is(.inspector, .observability-panel) {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 2;
+    width: 100%;
     flex: 0 0 auto;
-    max-height: 42vh;
+    /* Never taller than the workspace it is anchored to (a short landscape
+       phone has less room than 62vh, and the sheet must not cover the toolbar),
+       and always leave a usable strip of canvas above it. */
+    max-height: min(62vh, calc(100% - 96px));
     border-left: none;
     border-top: 1px solid var(--line);
+    border-radius: var(--radius) var(--radius) 0 0;
+    box-shadow: 0 -14px 40px rgb(0 0 0 / 45%);
+  }
+
+  /* Both sheets cannot share the bottom edge, so Observability wins while it
+     is open; its close button restores the inspector. */
+  .workspace:has(> #observability-panel:not([hidden])) > .inspector {
+    display: none;
   }
 }
 
