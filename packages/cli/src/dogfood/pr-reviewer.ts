@@ -298,22 +298,47 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
 
       // Live GitHub API request
       const apiUrl = `${apiBase}/repos/${owner}/${repoName}/pulls/${payload.prNumber}/reviews`;
-      io.stdout(`[dogfood review] Submitting review to GitHub API: ${apiUrl}...`);
-      const res = await customFetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/vnd.github+json',
-          'Content-Type': 'application/json',
-          'User-Agent': 'FactoryCloud-Dogfood-Reviewer',
-          'X-GitHub-Api-Version': '2022-11-28',
-        },
-        body: JSON.stringify({
-          body: payload.body,
-          event: payload.event,
-          commit_id: payload.commitSha ?? commitSha,
-        }),
-      });
+
+      // GitHub refuses an APPROVE review submitted by the Actions token — "GitHub Actions
+      // is not permitted to approve pull requests" (422) — so on a runner an approval is
+      // posted as a COMMENT review with the verdict in the body. Without this every clean
+      // pull request ends up with no review at all (cloud-factory-cf-n2h0).
+      const postReview = (event: string) => {
+        io.stdout(`[dogfood review] Submitting review (${event}) to GitHub API: ${apiUrl}...`);
+        return customFetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+            'User-Agent': 'FactoryCloud-Dogfood-Reviewer',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+          body: JSON.stringify({
+            body: payload.body,
+            event,
+            commit_id: payload.commitSha ?? commitSha,
+          }),
+        });
+      };
+
+      const actionsToken = Boolean(process.env['GITHUB_ACTIONS']);
+      const submitAs = payload.event === 'APPROVE' && actionsToken ? 'COMMENT' : payload.event;
+      if (submitAs !== payload.event) {
+        io.stdout(
+          `[dogfood review] Posting the approval as a ${submitAs} review: GitHub does not let Actions approve pull requests.`,
+        );
+      }
+
+      let res = await postReview(submitAs);
+
+      // Defensive: a provider that still refuses the requested event gets one retry as a
+      // plain comment, because a verdict that reaches nobody is worse than a comment.
+      if (res.status === 422 && submitAs !== 'COMMENT') {
+        const refused = await res.clone().text().catch(() => '');
+        io.stdout(`[dogfood review] Review event ${submitAs} was refused (422: ${refused.slice(0, 120)}); retrying as COMMENT.`);
+        res = await postReview('COMMENT');
+      }
 
       submissionStatus = res.status;
       if (!res.ok) {

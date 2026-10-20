@@ -45,6 +45,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # packages/cli's exec_command sandbox needs bubblewrap, which the runner image does
+      # not ship: without it `npm run ci` fails on local-tools.test.ts before any review
+      # runs, so every pull request carried a red gate (cloud-factory-cf-n2h0).
+      - name: Install bubblewrap (CLI sandbox)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
