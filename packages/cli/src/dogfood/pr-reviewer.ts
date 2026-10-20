@@ -96,6 +96,14 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
     process.env['GITHUB_REPOSITORY']?.split('/')[1] ??
     'cloud-factory-cf';
 
+  // A review is posted only when something actually names the repository: --repo, the
+  // event payload, or the Actions environment. The `local/local-repo` fallbacks above
+  // are for offline runs, and a live post aimed at them is a guaranteed 404 that the
+  // step summary then reports as a review (cloud-factory-cf-n2h0).
+  const repoIsNamed = Boolean(
+    options.repo || repoParts || process.env['GITHUB_REPOSITORY'],
+  );
+
   const prTitle = (typeof pullRequest['title'] === 'string' ? pullRequest['title'] : 'Pull Request');
   const prAuthor = (typeof (pullRequest['user'] as any)?.['login'] === 'string' ? (pullRequest['user'] as any)['login'] : 'contributor');
   const baseRef = (typeof (pullRequest['base'] as any)?.['ref'] === 'string' ? (pullRequest['base'] as any)['ref'] : 'main');
@@ -275,9 +283,17 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
     name: 'dogfood-github-pr-review-sink',
     executor: async (payload: GitHubPRReviewPayload) => {
       if (isDryRun) {
-        io.stdout(`[dogfood review] (dry-run) Review prepared for PR #${payload.prNumber} (${payload.event}):`);
+        io.stdout(`[dogfood review] (dry-run) Review prepared for PR #${payload.prNumber} in ${owner}/${repoName} (${payload.event}):`);
         io.stdout(payload.body);
         return { dryRun: true, status: 200, prNumber: payload.prNumber };
+      }
+
+      if (!repoIsNamed) {
+        // Never post to a repository nobody named: that is the silent-404 path.
+        io.stderr(
+          '[dogfood review] No repository in the event payload or environment; nothing was posted. Pass --repo <owner>/<name>.',
+        );
+        return { posted: false, status: 0, error: 'no repository to post to' };
       }
 
       // Live GitHub API request

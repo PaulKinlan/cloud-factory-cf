@@ -9,9 +9,14 @@ export async function handleReviewCommand(
 
   try {
     io.stdout(`[factory-cloud review] Starting PR review analysis in ${cwd}...`);
+    // Only an explicit --repo may pin the review target. The CLI's local/local-repo
+    // default exists for offline use, and passing it here is how a real pull request
+    // came to be reviewed against a repository that does not exist
+    // (cloud-factory-cf-n2h0): the event paints the target otherwise.
+    const explicitRepo = parsed.repo ? { owner, name } : undefined;
     const result = await runPrReview({
       cwd,
-      repo: owner && name ? { owner, name } : undefined,
+      repo: explicitRepo,
       prNumber: parsed.prNumber,
       commitSha: parsed.commitSha,
       eventFile: parsed.eventFile,

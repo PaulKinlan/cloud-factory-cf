@@ -539,6 +539,9 @@ test('runPrReview: degrades to step summary with notice without network calls (f
 
   const result = await runPrReview({
     cwd: tmpDir,
+    // Name the repository: a live post is refused outright when nothing names one
+    // (cloud-factory-cf-n2h0), and this test is about the read-only-token degradation.
+    repo: { owner: 'acme', name: 'widgets' },
     githubToken: 'ghp_readonly_fork_token',
     fetchFn: mockFetch,
     dryRun: false,
@@ -586,6 +589,107 @@ test('runCli: review command runs and succeeds with 0 exit code', async () => {
 
   assert.equal(exitCode, 0);
   assert.ok(logs.some((l) => l.includes('[factory-cloud review] Verdict:')));
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
+test('runPrReview: posts to the repository named by the event instead of the local default (cloud-factory-cf-n2h0)', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-event-repo-'));
+  await fs.writeFile(path.join(tmpDir, 'README.md'), '# hi\n', 'utf8');
+
+  const urls: string[] = [];
+  const mockFetch: typeof fetch = async (input) => {
+    urls.push(String(input));
+    return new Response(JSON.stringify({ id: 4242 }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  const result = await runPrReview({
+    cwd: tmpDir,
+    // No repo option: this is the Actions shape (--event, no --repo).
+    eventPayload: {
+      number: 42,
+      pull_request: {
+        number: 42,
+        title: 'docs: describe the loop',
+        user: { login: 'writer' },
+        head: { ref: 'fleet/docs', sha: 'a'.repeat(40) },
+        base: { ref: 'main' },
+      },
+      repository: { full_name: 'PaulKinlan/cloud-factory-cf' },
+    },
+    githubToken: 'ghp_actions_token',
+    fetchFn: mockFetch,
+    io: { stdout: () => {}, stderr: () => {} },
+  });
+
+  assert.deepEqual(result.repo, { owner: 'PaulKinlan', name: 'cloud-factory-cf' });
+  assert.equal(result.prNumber, 42);
+  assert.equal(result.posted, true);
+  assert.deepEqual(urls, [
+    'https://api.github.com/repos/PaulKinlan/cloud-factory-cf/pulls/42/reviews',
+  ]);
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
+test('runPrReview: refuses to post when nothing names a repository, and says why (cloud-factory-cf-n2h0)', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-no-repo-'));
+  await fs.writeFile(path.join(tmpDir, 'README.md'), '# hi\n', 'utf8');
+
+  let called = 0;
+  const mockFetch: typeof fetch = async () => {
+    called += 1;
+    return new Response('{}', { status: 200 });
+  };
+
+  const logs: string[] = [];
+  const savedEnv = process.env['GITHUB_REPOSITORY'];
+  delete process.env['GITHUB_REPOSITORY'];
+  try {
+    const result = await runPrReview({
+      cwd: tmpDir,
+      githubToken: 'ghp_actions_token',
+      fetchFn: mockFetch,
+      io: { stdout: (m) => logs.push(m), stderr: (m) => logs.push(m) },
+    });
+
+    assert.equal(called, 0, 'no request may be sent to a repository nobody named');
+    assert.equal(result.posted, false);
+    assert.ok(logs.some((l) => l.includes('No repository in the event payload or environment')));
+  } finally {
+    if (savedEnv === undefined) delete process.env['GITHUB_REPOSITORY'];
+    else process.env['GITHUB_REPOSITORY'] = savedEnv;
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('runCli: review takes the target from the event, not the local/local-repo default (cloud-factory-cf-n2h0)', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-event-repo-'));
+  const eventFilePath = path.join(tmpDir, 'event.json');
+  await fs.writeFile(
+    eventFilePath,
+    JSON.stringify({
+      number: 9,
+      pull_request: { number: 9, title: 'docs: x', user: { login: 'writer' } },
+      repository: { full_name: 'PaulKinlan/cloud-factory-cf' },
+    }),
+    'utf8',
+  );
+
+  const logs: string[] = [];
+  const exitCode = await runCli(
+    ['review', '--cwd', tmpDir, '--event', eventFilePath, '--dry-run'],
+    { stdout: (m) => logs.push(m), stderr: (m) => logs.push(m) },
+  );
+
+  assert.equal(exitCode, 0);
+  const prepared = logs.find((l) => l.includes('(dry-run) Review prepared'));
+  assert.ok(prepared, 'the dry run should say where the review was prepared for');
+  assert.ok(prepared!.includes('PaulKinlan/cloud-factory-cf'), `expected the event's repository, got: ${prepared}`);
+  assert.ok(!prepared!.includes('local/local-repo'), 'the CLI must not fall back to the offline default');
 
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
