@@ -121,8 +121,9 @@ done <<< "$ws_table"
 
 # Files that are source but have no suite yet. They are named loudly rather than
 # silently passing, and the bead tracks adding a test (cloud-factory-cf-5e8, cloud-factory-cf-d8s).
-# The canvas UI entry point is exercised in the browser, not in node.
-DECLARED_UNVERIFIED="apps/web/src/main.ts"
+# The canvas UI entry point and its stylesheet are exercised in the browser (headless
+# Chrome over CDP, e.g. the 390x844 layout pass for cloud-factory-cf-9jb), not in node.
+DECLARED_UNVERIFIED="apps/web/src/main.ts apps/web/src/styles.css"
 is_declared() { case " $DECLARED_UNVERIFIED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 declare -A SRC_BY_WS=()

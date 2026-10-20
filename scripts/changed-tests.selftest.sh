@@ -60,6 +60,8 @@ SH
       printf 'export const entry = 1;\n' > "$ws/src/main.ts"
       printf 'import { a } from "../src/m";\nimport { test } from "vitest";\ntest("x", () => { void a; });\n' > "$ws/test/a.test.ts"
     done
+    # a stylesheet is source with no node suite of its own (cloud-factory-cf-9jb)
+    printf 'body { margin: 0; }\n' > apps/web/src/styles.css
     # the smoke set names these two worker files explicitly
     for f in worker assets; do
       printf 'export {};\n' > "apps/worker/test/$f.test.ts"
@@ -211,6 +213,13 @@ reset_tree
 printf '\n// touch\n' >> "$FIX/apps/web/src/main.ts"
 run_gate
 check "declared-unverified source runs the whole suite" 'test "$RC" -eq 0 && out_has "declared-unverified source" && out_has "FAKE vitest run in web"'
+reset_tree
+
+# 7b. A stylesheet is source with no node suite at all: declared unverified, so the
+#     workspace suite runs for evidence rather than a false red (cloud-factory-cf-9jb).
+printf '\n/* touch */\n' >> "$FIX/apps/web/src/styles.css"
+run_gate
+check "declared-unverified stylesheet runs the workspace suite" 'test "$RC" -eq 0 && out_has "declared-unverified source" && out_has "FAKE vitest run in web"'
 reset_tree
 
 # 8. Nothing source/test changed: the smoke set runs, never an empty green.
