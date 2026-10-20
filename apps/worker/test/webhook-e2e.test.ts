@@ -207,6 +207,33 @@ async function expectSettled(
   expect(distinct.size).toBe(processed);
 }
 
+/** The one review/posted comment, asserted to exist (keeps indexed access typed). */
+function singleReview(calls: Call[]): Call {
+  const posted = reviews(calls);
+  expect(posted).toHaveLength(1);
+  return posted[0] as Call;
+}
+
+function singleComment(calls: Call[]): Call {
+  const posted = comments(calls);
+  expect(posted).toHaveLength(1);
+  return posted[0] as Call;
+}
+
+/**
+ * Whether ANY coordinator instance has an alarm armed for this repository. A
+ * "nothing was queued" case has to look under both addressing keys: asserting only
+ * the legacy instance would let a regression that armed the prefixed one pass
+ * (cloud-factory-cf-29ue).
+ */
+async function anyArmed(repository: string): Promise<number | null> {
+  for (const key of coordinatorKeys(repository)) {
+    const armed = await armedAt(stubForKey(key));
+    if (armed !== null) return armed;
+  }
+  return null;
+}
+
 function reviews(calls: Call[]): Call[] {
   return calls.filter((call) => call.method === "POST" && /\/reviews$/.test(call.url));
 }
@@ -259,10 +286,10 @@ describe("synthetic GitHub deliveries, end to end", () => {
 
     const diff = calls.find((call) => call.method === "GET" && call.url.endsWith("/pulls/42"));
     expect(diff?.accept).toBe("application/vnd.github.v3.diff");
-    expect(reviews(calls)).toHaveLength(1);
-    expect(reviews(calls)[0].url).toContain(`/repos/${repository}/pulls/42/reviews`);
-    expect(reviews(calls)[0].body).toMatchObject({ event: "COMMENT" });
-    expect(String((reviews(calls)[0].body as Record<string, unknown>)["body"])).toContain("Cloud Factory PR Review");
+    const review = singleReview(calls);
+    expect(review.url).toContain(`/repos/${repository}/pulls/42/reviews`);
+    expect(review.body).toMatchObject({ event: "COMMENT" });
+    expect(String((review.body as Record<string, unknown>)["body"])).toContain("Cloud Factory PR Review");
 
     await expectSettled(repository, queue, 1);
     expect(await armedAt(queue)).toBeNull();
@@ -362,9 +389,9 @@ describe("synthetic GitHub deliveries, end to end", () => {
     const queue = await queueFor(repository, "e2e-issue-1");
 
     expect(report).toMatchObject({ claimed: 1, succeeded: 1, failed: 0 });
-    expect(comments(calls)).toHaveLength(1);
-    expect(comments(calls)[0].url).toContain(`/repos/${repository}/issues/9/comments`);
-    expect(String((comments(calls)[0].body as Record<string, unknown>)["body"])).toContain("#9");
+    const comment = singleComment(calls);
+    expect(comment.url).toContain(`/repos/${repository}/issues/9/comments`);
+    expect(String((comment.body as Record<string, unknown>)["body"])).toContain("#9");
     await expectSettled(repository, queue, 1);
   });
 
@@ -390,7 +417,7 @@ describe("synthetic GitHub deliveries, end to end", () => {
     await expect(response.json()).resolves.toMatchObject({ ok: true, ping: true });
 
     expect(await anyQueued(repository)).toHaveLength(0);
-    expect(await armedAt(stubForKey(repository))).toBeNull();
+    expect(await anyArmed(repository)).toBeNull();
 
     const connect = await SELF.fetch(`https://example.com/trace/${repository}/connect`, {
       headers: { "x-factory-control-key": CONTROL_KEY },
@@ -415,6 +442,6 @@ describe("synthetic GitHub deliveries, end to end", () => {
 
     expect(await anyQueued(repository)).toHaveLength(0);
     await expectSettled(repository, stubForKey(repository), 0);
-    expect(await armedAt(stubForKey(repository))).toBeNull();
+    expect(await anyArmed(repository)).toBeNull();
   });
 });
