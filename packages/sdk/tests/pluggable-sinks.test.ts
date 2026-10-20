@@ -268,6 +268,15 @@ test('CloudTelemetrySink: validates metrics and logs, buffers and exports', asyn
   assert.match(zeroCapRes.error!, /buffer capacity is 0/);
   assert.equal(zeroCapSink.getBufferedEntries().length, 0);
 
+  // Verify maxBufferSize: 0 fails closed for telemetry:metric too (cloud-factory-cf-8me9)
+  const zeroCapMetricRes = await zeroCapSink.handle(
+    { id: 'z2', type: 'telemetry:metric', payload: { metric: 'cpu', value: 99 }, timestamp: 2 },
+    ctx,
+  );
+  assert.equal(zeroCapMetricRes.success, false);
+  assert.match(zeroCapMetricRes.error!, /buffer capacity is 0/);
+  assert.equal(zeroCapSink.getBufferedEntries().length, 0);
+
   // Verify non-finite maxBufferSize (NaN) normalises to default 1000 and caps at 1000 (cloud-factory-cf-iay4)
   const nanCapSink = new CloudTelemetrySink({ maxBufferSize: NaN });
   for (let i = 0; i < 1005; i++) {
