@@ -14,6 +14,7 @@ import {
   pillLabel,
   pollIntervalMs,
   webhookUrl,
+  mountConnectGate,
   type ConnectEvidence,
 } from "../src/onboarding";
 
@@ -147,6 +148,9 @@ describe("markup contract", () => {
     expect(indexHtml).toContain('id="connect-check"');
     expect(indexHtml).toContain('id="connect-status"');
     expect(indexHtml).toContain('aria-live="polite"');
+    expect(indexHtml).toContain('id="connect-oauth"');
+    expect(indexHtml).toContain('href="/auth/github/login"');
+    expect(indexHtml).toContain('id="connect-repo-select"');
   });
 });
 
@@ -387,5 +391,207 @@ describe("live indicator poller", () => {
     resolve!(connectResponse(evidence({ lastPingAt: iso(0) })));
     await first;
     expect(busy.state.evidence?.repository).toBe("acme/widget");
+  });
+});
+
+describe("mountConnectGate and repo selector population (cloud-factory-cf-7gm)", () => {
+  function createMockElement(tag = "div") {
+    const listeners: Record<string, ((e?: any) => void)[]> = {};
+    const children: any[] = [];
+    const attrs: Record<string, string> = {};
+    return {
+      tag,
+      value: "",
+      textContent: "",
+      className: "",
+      hidden: true,
+      innerHTML: "",
+      href: "",
+      dataset: {} as Record<string, string>,
+      options: children,
+      children,
+      open: false,
+      focus: vi.fn(),
+      select: vi.fn(),
+      setAttribute: (k: string, v: string) => {
+        attrs[k] = v;
+      },
+      getAttribute: (k: string) => attrs[k] ?? null,
+      showModal: function () {
+        this.open = true;
+      },
+      close: function () {
+        this.open = false;
+      },
+      appendChild: function (child: any) {
+        children.push(child);
+      },
+      addEventListener: function (event: string, fn: (e?: any) => void) {
+        listeners[event] = listeners[event] || [];
+        listeners[event]!.push(fn);
+      },
+      dispatchEvent: function (event: string, data?: any) {
+        if (listeners[event]) {
+          for (const fn of listeners[event]!) {
+            fn(data);
+          }
+        }
+      },
+    };
+  }
+
+  function createMockDom() {
+    const pill = createMockElement("button");
+    const pillLabel = createMockElement("span");
+    const dialog = createMockElement("dialog");
+    const ownerInput = createMockElement("input");
+    const repoInput = createMockElement("input");
+    const keyInput = createMockElement("input");
+    const urlInput = createMockElement("input");
+    const copyButton = createMockElement("button");
+    const installLink = createMockElement("a");
+    const checkButton = createMockElement("button");
+    const statusNode = createMockElement("p");
+    const announcer = createMockElement("span");
+    const repoSelect = createMockElement("select");
+
+    const elements: Record<string, any> = {
+      "#repo-pill": pill,
+      ".repo-pill__label": pillLabel,
+      "#connect-dialog": dialog,
+      "#connect-owner": ownerInput,
+      "#connect-repo": repoInput,
+      "#connect-key": keyInput,
+      "#connect-url": urlInput,
+      "#connect-copy": copyButton,
+      "#connect-install": installLink,
+      "#connect-check": checkButton,
+      "#connect-status": statusNode,
+      "#connect-announcer": announcer,
+      "#connect-repo-select": repoSelect,
+    };
+
+    const doc = {
+      createElement: (tag: string) => createMockElement(tag),
+      querySelector: (selector: string) => elements[selector] ?? null,
+    };
+
+    return { doc, elements };
+  }
+
+  it("populates repo select dropdown from /api/repos and updates inputs on selection", async () => {
+    const { doc, elements } = createMockDom();
+    const testRepos = [
+      { fullName: "octodev/widget-service", owner: "octodev", name: "widget-service" },
+      { fullName: "octodev/secret-project", owner: "octodev", name: "secret-project" },
+    ];
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/repos")) {
+        return new Response(JSON.stringify({ ok: true, count: 2, repositories: testRepos }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    let selectedScope: { owner: string; repo: string } | null = null;
+    const gate = mountConnectGate(doc as any, {
+      base: "https://factory.example",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      onScope: (s) => {
+        selectedScope = s;
+      },
+    });
+
+    expect(gate).toBeDefined();
+
+    // 1. Enter key and owner: triggers loadAuthorizedRepos
+    elements["#connect-key"].value = "test-control-key";
+    elements["#connect-owner"].value = "octodev";
+    elements["#connect-key"].dispatchEvent("input");
+
+    // Allow fetch promise in loadAuthorizedRepos to resolve and unhide select
+    await vi.waitFor(() => {
+      expect(elements["#connect-repo-select"].hidden).toBe(false);
+    });
+
+    // Verify /api/repos was called with x-factory-control-key
+    const apiCall = fetchImpl.mock.calls.find((call) => String(call[0]).includes("/api/repos"));
+    expect(apiCall).toBeDefined();
+    expect(String(apiCall![0])).toBe("https://factory.example/api/repos?owner=octodev");
+    expect((apiCall![1] as any)?.headers?.["x-factory-control-key"]).toBe("test-control-key");
+
+    // 2. Verify repo select is unhidden and populated with options
+    expect(elements["#connect-repo-select"].hidden).toBe(false);
+    expect(elements["#connect-repo-select"].children.length).toBe(2);
+    expect(elements["#connect-repo-select"].children[0].value).toBe("octodev/widget-service");
+    expect(elements["#connect-repo-select"].children[1].value).toBe("octodev/secret-project");
+
+    // 3. User chooses 'octodev/secret-project' from the dropdown
+    elements["#connect-repo-select"].value = "octodev/secret-project";
+    elements["#connect-repo-select"].dispatchEvent("change");
+
+    // 4. Assert inputs and scope are updated
+    expect(elements["#connect-owner"].value).toBe("octodev");
+    expect(elements["#connect-repo"].value).toBe("secret-project");
+    expect(selectedScope).toEqual({ owner: "octodev", repo: "secret-project" });
+    expect(gate?.scope()).toEqual({ owner: "octodev", repo: "secret-project" });
+  });
+
+  it("handles connected=1 post-OAuth bootstrap to open dialog and populate dropdown", async () => {
+    const { doc, elements } = createMockDom();
+    const testRepos = [
+      { fullName: "octodev/widget-service", owner: "octodev", name: "widget-service" },
+    ];
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/repos")) {
+        return new Response(JSON.stringify({ ok: true, count: 1, repositories: testRepos }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    // Mock window.location with connected=1
+    const originalLocation = globalThis.window?.location;
+    const mockHref = "https://factory.example/?connected=1&owner=octodev&installation_id=inst_456";
+    const mockWindow = {
+      location: new URL(mockHref),
+      history: {
+        replaceState: vi.fn(),
+      },
+    };
+    vi.stubGlobal("window", mockWindow);
+
+    try {
+      elements["#connect-key"].value = "test-control-key";
+      const gate = mountConnectGate(doc as any, {
+        base: "https://factory.example",
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+
+      expect(gate).toBeDefined();
+      expect(elements["#connect-owner"].value).toBe("octodev");
+      expect(elements["#connect-dialog"].open).toBe(true);
+
+      await vi.waitFor(() => {
+        expect(elements["#connect-repo-select"].hidden).toBe(false);
+      });
+
+      expect(elements["#connect-repo-select"].hidden).toBe(false);
+      expect(elements["#connect-repo-select"].children.length).toBe(1);
+      expect(elements["#connect-repo-select"].children[0].value).toBe("octodev/widget-service");
+
+      // Verify URL clean-up occurred
+      expect(mockWindow.history.replaceState).toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

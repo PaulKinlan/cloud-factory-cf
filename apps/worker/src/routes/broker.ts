@@ -1,7 +1,7 @@
 import type { Env } from "../env";
 
 export const BROKER_PATH =
-  /^\/broker\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>capabilities|permissions|provisioning|overrides|proxy|audit)$/;
+  /^\/broker\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>capabilities|permissions|provisioning|overrides|proxy|audit|settings)$/;
 
 export function brokerHeaders(headers: Headers): Headers {
   const forwarded = new Headers({ "content-type": "application/json" });
@@ -20,7 +20,7 @@ export async function routeBroker(
 ): Promise<Response> {
   if (operation === "permissions" || operation === "audit") {
     if (request.method !== "GET") return new Response("method not allowed", { status: 405 });
-  } else if (operation === "provisioning" || operation === "overrides") {
+  } else if (operation === "provisioning" || operation === "overrides" || operation === "settings") {
     if (!["GET", "POST", "DELETE"].includes(request.method)) {
       return new Response("method not allowed", { status: 405 });
     }

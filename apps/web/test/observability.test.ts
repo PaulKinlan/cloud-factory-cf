@@ -628,10 +628,14 @@ describe("heartbeat", () => {
     });
     await session.connect();
     sockets[0]?.emit("open");
-    await sleep(120);
-    expect(created).toBeGreaterThanOrEqual(2);
-    expect(session.state.reconnectAttempts).toBe(0);
-    expect(session.state.status).toBe("live");
+    await vi.waitFor(
+      () => {
+        expect(created).toBeGreaterThanOrEqual(2);
+        expect(session.state.reconnectAttempts).toBe(0);
+        expect(session.state.status).toBe("live");
+      },
+      { timeout: 1000, interval: 20 },
+    );
     session.disconnect();
   });
 

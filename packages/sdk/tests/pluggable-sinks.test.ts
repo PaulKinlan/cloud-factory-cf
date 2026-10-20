@@ -230,7 +230,64 @@ test('CloudTelemetrySink: validates metrics and logs, buffers and exports', asyn
   assert.equal(logRes.success, true);
 
   assert.equal(telemetryEntries.length, 2);
-  assert.equal(sink.getBufferedEntries().length, 2);
+  // Exported entries are not retained in buffer (cloud-factory-cf-r628)
+  assert.equal(sink.getBufferedEntries().length, 0);
+
+  // Fallback to in-memory buffer when no exporter or broker permission
+  const fallbackSink = new CloudTelemetrySink({ maxBufferSize: 2 });
+  const bufferedMetric = await fallbackSink.handle(
+    { id: 'm1', type: 'telemetry:metric', payload: { metric: 'runs', value: 1 }, timestamp: 1 },
+    ctx,
+  );
+  assert.equal(bufferedMetric.success, true);
+  assert.deepEqual(bufferedMetric.result, { buffered: true });
+
+  const bufferedLog = await fallbackSink.handle(
+    { id: 'l1', type: 'telemetry:log', payload: { message: 'first' }, timestamp: 2 },
+    ctx,
+  );
+  assert.equal(bufferedLog.success, true);
+  assert.equal(fallbackSink.getBufferedEntries().length, 2);
+
+  // Verify maxBufferSize cap drops oldest
+  await fallbackSink.handle(
+    { id: 'l2', type: 'telemetry:log', payload: { message: 'second' }, timestamp: 3 },
+    ctx,
+  );
+  assert.equal(fallbackSink.getBufferedEntries().length, 2);
+  assert.equal(fallbackSink.getBufferedEntries()[0]!.payload.message, 'first');
+  assert.equal(fallbackSink.getBufferedEntries()[1]!.payload.message, 'second');
+
+  // Verify maxBufferSize: 0 fails closed rather than acknowledging dropped events as buffered (cloud-factory-cf-xrab)
+  const zeroCapSink = new CloudTelemetrySink({ maxBufferSize: 0 });
+  const zeroCapRes = await zeroCapSink.handle(
+    { id: 'z1', type: 'telemetry:log', payload: { message: 'discard' }, timestamp: 1 },
+    ctx,
+  );
+  assert.equal(zeroCapRes.success, false);
+  assert.match(zeroCapRes.error!, /buffer capacity is 0/);
+  assert.equal(zeroCapSink.getBufferedEntries().length, 0);
+
+  // Verify maxBufferSize: 0 fails closed for telemetry:metric too (cloud-factory-cf-8me9)
+  const zeroCapMetricRes = await zeroCapSink.handle(
+    { id: 'z2', type: 'telemetry:metric', payload: { metric: 'cpu', value: 99 }, timestamp: 2 },
+    ctx,
+  );
+  assert.equal(zeroCapMetricRes.success, false);
+  assert.match(zeroCapMetricRes.error!, /buffer capacity is 0/);
+  assert.equal(zeroCapSink.getBufferedEntries().length, 0);
+
+  // Verify non-finite maxBufferSize (NaN) normalises to default 1000 and caps at 1000 (cloud-factory-cf-iay4)
+  const nanCapSink = new CloudTelemetrySink({ maxBufferSize: NaN });
+  for (let i = 0; i < 1005; i++) {
+    await nanCapSink.handle(
+      { id: String(i), type: 'telemetry:log', payload: { message: `msg-${i}` }, timestamp: i },
+      ctx,
+    );
+  }
+  assert.equal(nanCapSink.getBufferedEntries().length, 1000);
+  assert.equal(nanCapSink.getBufferedEntries()[0]!.payload.message, 'msg-5');
+  assert.equal(nanCapSink.getBufferedEntries()[999]!.payload.message, 'msg-1004');
 
   // Test buffer disabled fails closed when no exporter or broker permission (fixes cloud-factory-cf-lj1)
   const unbufferedSink = new CloudTelemetrySink({ bufferInMemory: false });

@@ -1,0 +1,897 @@
+import { env, SELF } from "cloudflare:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+function setupDefaultFetch() {
+  vi.stubGlobal(
+    "fetch",
+    (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://github.com/login/oauth/access_token") {
+        return new Response(JSON.stringify({ access_token: "gho_test_user_token_123" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url === "https://api.github.com/user") {
+        return new Response(JSON.stringify({ login: "octodev", type: "User" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.includes("/api.github.com/user/repos")) {
+        return new Response(
+          JSON.stringify([
+            { id: 1, full_name: "octodev/widget-service", name: "widget-service", private: false, default_branch: "main", owner: { login: "octodev" } },
+            { id: 2, full_name: "octodev/secret-project", name: "secret-project", private: true, default_branch: "trunk", owner: { login: "octodev" } },
+          ]),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+      if (url.includes("/api.github.com/app/installations/")) {
+        return new Response(JSON.stringify({ id: 789, account: { login: "acme", type: "Organization" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.includes("/api.github.com/installation/repositories")) {
+        return new Response(
+          JSON.stringify({
+            total_count: 1,
+            repositories: [
+              { id: 10, full_name: "acme/widget", name: "widget", private: false, default_branch: "main", owner: { login: "acme" } },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+      return new Response("Not found", { status: 404 });
+    }) as unknown as typeof fetch,
+  );
+}
+
+beforeEach(() => {
+  setupDefaultFetch();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("GitHub OAuth & App Install Flow", () => {
+  it("/auth/github/login: redirects to GitHub OAuth authorize endpoint", async () => {
+    const res = await SELF.fetch("https://example.com/auth/github/login?client_id=gh_test_client_id&redirect_uri=https://example.com/onboard", {
+      method: "GET",
+      redirect: "manual",
+    });
+
+    expect(res.status).toBe(302);
+    const location = res.headers.get("location");
+    expect(location).toBeDefined();
+    expect(location).toContain("https://github.com/login/oauth/authorize");
+    expect(location).toContain("client_id=gh_test_client_id");
+    expect(location).toContain("scope=repo%2Cread%3Aorg");
+    const setCookie = res.headers.get("set-cookie");
+    expect(setCookie).toBeDefined();
+    expect(setCookie).toContain("cf_oauth_state=");
+  });
+
+  it("/auth/github/login?flow=install: redirects to GitHub App installation", async () => {
+    const res = await SELF.fetch("https://example.com/auth/github/login?flow=install&app_slug=cloud-factory-dev", {
+      method: "GET",
+      redirect: "manual",
+    });
+
+    expect(res.status).toBe(302);
+    const location = res.headers.get("location");
+    expect(location).toBeDefined();
+    expect(location).toContain("https://github.com/apps/cloud-factory-dev/installations/new");
+    const setCookie = res.headers.get("set-cookie");
+    expect(setCookie).toBeDefined();
+    expect(setCookie).toContain("cf_oauth_state=");
+  });
+
+  it("/auth/github/callback: exchanges code, queries GitHub, persists repos in OrgCoordinator, and redirects", async () => {
+    const testUser = "octodev";
+    const testRepos = [
+      { id: 1, full_name: "octodev/widget-service", name: "widget-service", private: false, default_branch: "main" },
+      { id: 2, full_name: "octodev/secret-project", name: "secret-project", private: true, default_branch: "trunk" },
+    ];
+
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://github.com/login/oauth/access_token") {
+          return new Response(JSON.stringify({ access_token: "gho_test_user_token_123" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url === "https://api.github.com/user") {
+          return new Response(JSON.stringify({ login: testUser, type: "User" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.includes("/user/repos")) {
+          return new Response(JSON.stringify(testRepos), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    // 1. Initiate login to obtain CSRF state and signed cookie
+    const loginRes = await SELF.fetch(
+      "https://example.com/auth/github/login?client_id=gh_test_client_id&redirect_uri=/",
+      {
+        method: "GET",
+        redirect: "manual",
+      },
+    );
+    expect(loginRes.status).toBe(302);
+    const loginLocation = loginRes.headers.get("location")!;
+    const state = new URL(loginLocation).searchParams.get("state")!;
+    expect(state).toBeDefined();
+    const setCookie = loginRes.headers.get("set-cookie")!;
+    expect(setCookie).toBeDefined();
+    const cookieHeader = setCookie.split(";")[0]!;
+
+    // 2. Reject callback without state parameter (missing state)
+    const missingStateRes = await SELF.fetch(
+      "https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/",
+      {
+        method: "GET",
+        headers: { cookie: cookieHeader },
+      },
+    );
+    expect(missingStateRes.status).toBe(400);
+
+    // 3. Reject callback without state cookie (missing cookie)
+    const missingCookieRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/&state=${state}`,
+      {
+        method: "GET",
+      },
+    );
+    expect(missingCookieRes.status).toBe(400);
+
+    // 4. Reject callback with mismatched state (CSRF attack)
+    const mismatchRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/&state=attacker_state_123`,
+      {
+        method: "GET",
+        headers: { cookie: cookieHeader },
+      },
+    );
+    expect(mismatchRes.status).toBe(400);
+
+    // 4b. Reject callback with malformed or tampered state cookie
+    const malformedRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/&state=${state}`,
+      {
+        method: "GET",
+        headers: { cookie: "cf_oauth_state=not-a-valid-token" },
+      },
+    );
+    expect(malformedRes.status).toBe(400);
+
+    const tamperedRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/&state=${state}`,
+      {
+        method: "GET",
+        headers: { cookie: `cf_oauth_state=${state}.1700000000.badf00d` },
+      },
+    );
+    expect(tamperedRes.status).toBe(400);
+
+    // 4c. Reject callback with invalid URI-encoded cookie without throwing 500
+    const uriErrorCookieRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/&state=${state}`,
+      {
+        method: "GET",
+        headers: { cookie: "cf_oauth_state=%zz" },
+      },
+    );
+    expect(uriErrorCookieRes.status).toBe(400);
+    const uriErrorJson = (await uriErrorCookieRes.json()) as any;
+    expect(uriErrorJson.error).toContain("Malformed OAuth state cookie");
+
+    // 5. Successful callback with matching state and valid signed cookie
+    const callbackRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&installation_id=inst_456&return_to=/&state=${state}`,
+      {
+        method: "GET",
+        headers: { cookie: cookieHeader },
+        redirect: "manual",
+      },
+    );
+
+    expect(callbackRes.status).toBe(302);
+    const location = callbackRes.headers.get("location");
+    expect(location).toBeDefined();
+    expect(location).toContain("connected=1");
+    expect(location).toContain(`owner=${testUser}`);
+    expect(location).toContain("installation_id=inst_456");
+    const clearCookie = callbackRes.headers.get("set-cookie");
+    expect(clearCookie).toContain("cf_oauth_state=;");
+
+    // 6. Verify /api/repos requires control-key authentication
+    const unauthRes = await SELF.fetch(`https://example.com/api/repos?owner=${testUser}`);
+    expect(unauthRes.status).toBe(401);
+    const unauthData = (await unauthRes.json()) as any;
+    expect(unauthData.ok).toBe(false);
+    expect(unauthData.error).toContain("not authorised");
+
+    const wrongKeyRes = await SELF.fetch(`https://example.com/api/repos?owner=${testUser}`, {
+      headers: { "x-factory-control-key": "invalid-secret" },
+    });
+    expect(wrongKeyRes.status).toBe(401);
+
+    // 5. Query /api/repos with valid control key to verify repos are persisted in OrgCoordinator
+    const reposRes = await SELF.fetch(`https://example.com/api/repos?owner=${testUser}`, {
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(reposRes.status).toBe(200);
+    const reposData = (await reposRes.json()) as any;
+    expect(reposData.ok).toBe(true);
+    expect(reposData.count).toBe(2);
+    expect(reposData.repositories).toHaveLength(2);
+    expect(reposData.repositories[0].fullName).toBe("octodev/widget-service");
+    expect(reposData.repositories[1].isPrivate).toBe(true);
+  });
+
+  it("/api/repos: rejects unauthenticated requests, bad methods, and missing parameters", async () => {
+    // 1. Unauthenticated request without control key is rejected with 401
+    const noAuth = await SELF.fetch("https://example.com/api/repos?owner=octodev");
+    expect(noAuth.status).toBe(401);
+    const noAuthJson = (await noAuth.json()) as any;
+    expect(noAuthJson.ok).toBe(false);
+    expect(noAuthJson.error).toContain("not authorised");
+
+    // 2. Request with invalid control key is rejected with 401
+    const badKey = await SELF.fetch("https://example.com/api/repos?owner=octodev", {
+      headers: { "x-factory-control-key": "bad-key-guess" },
+    });
+    expect(badKey.status).toBe(401);
+
+    // 3. Disallowed HTTP methods return 405
+    const postReq = await SELF.fetch("https://example.com/api/repos?owner=octodev", {
+      method: "POST",
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(postReq.status).toBe(405);
+
+    // 4. Missing ?owner returns 400
+    const missingOwner = await SELF.fetch("https://example.com/api/repos", {
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(missingOwner.status).toBe(400);
+    const missingOwnerJson = (await missingOwner.json()) as any;
+    expect(missingOwnerJson.ok).toBe(false);
+    expect(missingOwnerJson.error).toContain("Missing required query parameter ?owner");
+  });
+
+  it("/auth/github/login & callback: sanitizes redirect_uri and return_to to prevent open redirects", async () => {
+    // 1. Off-origin redirect_uri in login is neutralized to return_to=/
+    const evilLogin = await SELF.fetch(
+      "https://example.com/auth/github/login?client_id=gh_test_client_id&redirect_uri=https://evil.example/steal",
+      { method: "GET", redirect: "manual" },
+    );
+    expect(evilLogin.status).toBe(302);
+    const evilLocation = evilLogin.headers.get("location")!;
+    expect(evilLocation).toContain("redirect_uri=");
+    const parsedRedirectUri = new URL(new URL(evilLocation).searchParams.get("redirect_uri")!);
+    expect(parsedRedirectUri.searchParams.get("return_to")).toBe("/");
+
+    // 2. Protocol-relative URL is neutralized
+    const protoLogin = await SELF.fetch(
+      "https://example.com/auth/github/login?client_id=gh_test_client_id&redirect_uri=//evil.example/steal",
+      { method: "GET", redirect: "manual" },
+    );
+    expect(protoLogin.status).toBe(302);
+    const protoLocation = protoLogin.headers.get("location")!;
+    const parsedProtoUri = new URL(new URL(protoLocation).searchParams.get("redirect_uri")!);
+    expect(parsedProtoUri.searchParams.get("return_to")).toBe("/");
+
+    // 2b. Same-origin URL with protocol-relative double-slash path is neutralized (cloud-factory-cf-zmm)
+    const doubleSlashLogin = await SELF.fetch(
+      "https://example.com/auth/github/login?client_id=gh_test_client_id&redirect_uri=https://example.com//evil.example/steal",
+      { method: "GET", redirect: "manual" },
+    );
+    expect(doubleSlashLogin.status).toBe(302);
+    const doubleSlashLocation = doubleSlashLogin.headers.get("location")!;
+    const parsedDoubleSlash = new URL(new URL(doubleSlashLocation).searchParams.get("redirect_uri")!);
+    expect(parsedDoubleSlash.searchParams.get("return_to")).toBe("/");
+
+    // 3. Off-origin return_to in callback is neutralized and never redirects off-site
+    const validLogin = await SELF.fetch(
+      "https://example.com/auth/github/login?client_id=gh_test_client_id",
+      { method: "GET", redirect: "manual" },
+    );
+    const validLocation = validLogin.headers.get("location")!;
+    const validState = new URL(validLocation).searchParams.get("state")!;
+    const cookieHeader = validLogin.headers.get("set-cookie")!.split(";")[0]!;
+
+    const evilCallback = await SELF.fetch(
+      `https://example.com/auth/github/callback?installation_id=inst_456&setup_action=install&state=${validState}&return_to=https://evil.example/steal`,
+      { method: "GET", headers: { cookie: cookieHeader }, redirect: "manual" },
+    );
+    expect(evilCallback.status).toBe(302);
+    const callbackTarget = evilCallback.headers.get("location")!;
+    const parsedTarget = new URL(callbackTarget);
+    expect(parsedTarget.origin).toBe("https://example.com");
+    expect(parsedTarget.pathname).toBe("/");
+    expect(parsedTarget.searchParams.get("connected")).toBe("1");
+
+    // 4. Protocol-relative and backslash direct injection in callback
+    const protoCallback = await SELF.fetch(
+      `https://example.com/auth/github/callback?installation_id=inst_456&setup_action=install&state=${validState}&return_to=//evil.example/steal`,
+      { method: "GET", headers: { cookie: cookieHeader }, redirect: "manual" },
+    );
+    expect(protoCallback.status).toBe(302);
+    const protoTarget = new URL(protoCallback.headers.get("location")!);
+    expect(protoTarget.origin).toBe("https://example.com");
+    expect(protoTarget.pathname).toBe("/");
+
+    const backslashCallback = await SELF.fetch(
+      `https://example.com/auth/github/callback?installation_id=inst_456&setup_action=install&state=${validState}&return_to=/\\\\evil.example/steal`,
+      { method: "GET", headers: { cookie: cookieHeader }, redirect: "manual" },
+    );
+    expect(backslashCallback.status).toBe(302);
+    const backslashTarget = new URL(backslashCallback.headers.get("location")!);
+    expect(backslashTarget.origin).toBe("https://example.com");
+    expect(backslashTarget.pathname).toBe("/");
+  });
+
+  it("/auth/github/callback: accepts external App install callbacks without code exchange", async () => {
+    // 1. Direct install setup URL with state=owner/repo (from onboarding installUrl)
+    const installWithState = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=inst_789&setup_action=install&state=acme%2Fwidget",
+      {
+        method: "GET",
+        redirect: "manual",
+      },
+    );
+    expect(installWithState.status).toBe(302);
+    const loc1 = installWithState.headers.get("location")!;
+    expect(loc1).toContain("connected=1");
+    expect(loc1).toContain("installation_id=inst_789");
+
+    // 2. Direct install setup URL from GitHub App page (no state param, no cookie)
+    const installWithoutState = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=inst_789&setup_action=install",
+      {
+        method: "GET",
+        redirect: "manual",
+      },
+    );
+    expect(installWithoutState.status).toBe(302);
+    const loc2 = installWithoutState.headers.get("location")!;
+    expect(loc2).toContain("connected=1");
+    expect(loc2).toContain("installation_id=inst_789");
+
+    // 3. Direct install callback with leftover cf_oauth_state cookie and state=owner/repo (cloud-factory-cf-0jg)
+    const loginRes = await SELF.fetch("https://example.com/auth/github/login?client_id=gh_test_client_id", {
+      method: "GET",
+      redirect: "manual",
+    });
+    const leftoverCookie = loginRes.headers.get("set-cookie")!.split(";")[0]!;
+
+    const installWithLeftoverCookie = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=inst_789&setup_action=install&state=acme%2Fwidget",
+      {
+        method: "GET",
+        headers: { cookie: leftoverCookie },
+        redirect: "manual",
+      },
+    );
+    expect(installWithLeftoverCookie.status).toBe(302);
+    const loc3 = installWithLeftoverCookie.headers.get("location")!;
+    expect(loc3).toContain("connected=1");
+    expect(loc3).toContain("installation_id=inst_789");
+    expect(installWithLeftoverCookie.headers.get("set-cookie")).toContain("cf_oauth_state=;");
+
+    // 4. Direct install callback with leftover cookie and no state param (cloud-factory-cf-0jg)
+    const installWithLeftoverNoState = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=inst_789&setup_action=install",
+      {
+        method: "GET",
+        headers: { cookie: leftoverCookie },
+        redirect: "manual",
+      },
+    );
+    expect(installWithLeftoverNoState.status).toBe(302);
+    const loc4 = installWithLeftoverNoState.headers.get("location")!;
+    expect(loc4).toContain("connected=1");
+    expect(loc4).toContain("installation_id=inst_789");
+    expect(installWithLeftoverNoState.headers.get("set-cookie")).toContain("cf_oauth_state=;");
+  });
+
+  it("/auth/github/callback: surfaces distinct errors when token exchange or upstream APIs fail (cloud-factory-cf-b1a)", async () => {
+    // Obtain valid state and cookie
+    const loginRes = await SELF.fetch("https://example.com/auth/github/login?client_id=gh_test_client_id", {
+      method: "GET",
+      redirect: "manual",
+    });
+    const state = new URL(loginRes.headers.get("location")!).searchParams.get("state")!;
+    const cookieHeader = loginRes.headers.get("set-cookie")!.split(";")[0]!;
+
+    // 1. GitHub returns OAuth error (e.g. bad_verification_code) -> 400
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://github.com/login/oauth/access_token") {
+          return new Response(JSON.stringify({ error: "bad_verification_code", error_description: "The code passed is incorrect or has expired." }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const badCodeRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=expired_code&state=${state}`,
+      { method: "GET", headers: { cookie: cookieHeader } },
+    );
+    expect(badCodeRes.status).toBe(400);
+    const badCodeJson = (await badCodeRes.json()) as any;
+    expect(badCodeJson.ok).toBe(false);
+    expect(badCodeJson.error).toContain("GitHub OAuth error");
+
+    // 2. GitHub token endpoint returns 500 -> 502
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://github.com/login/oauth/access_token") {
+          return new Response("Internal Server Error", { status: 500 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const serverErrRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=bad_code&state=${state}`,
+      { method: "GET", headers: { cookie: cookieHeader } },
+    );
+    expect(serverErrRes.status).toBe(502);
+
+    // 3. GitHub /user fails with 500 -> 502
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://github.com/login/oauth/access_token") {
+          return new Response(JSON.stringify({ access_token: "gho_valid_token" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url === "https://api.github.com/user") {
+          return new Response("Service Unavailable", { status: 503 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const userErrRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=valid_code&state=${state}`,
+      { method: "GET", headers: { cookie: cookieHeader } },
+    );
+    expect(userErrRes.status).toBe(502);
+    const userErrJson = (await userErrRes.json()) as any;
+    expect(userErrJson.ok).toBe(false);
+    expect(userErrJson.error).toContain("GitHub /user failed");
+  });
+
+  it("flow=install: App install callback queries GitHub App installation/repos and persists to OrgCoordinator (cloud-factory-cf-tvg)", async () => {
+    const installOwner = "orgdev";
+    const installRepos = [
+      { id: 101, full_name: "orgdev/service-a", name: "service-a", private: true, default_branch: "main", owner: { login: installOwner } },
+      { id: 102, full_name: "orgdev/service-b", name: "service-b", private: false, default_branch: "main", owner: { login: installOwner } },
+    ];
+
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/app/installations/inst_app_888")) {
+          return new Response(JSON.stringify({ id: 888, account: { login: installOwner, type: "Organization" } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.includes("/installation/repositories")) {
+          return new Response(JSON.stringify({ total_count: 2, repositories: installRepos }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const installCallbackRes = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=inst_app_888&setup_action=install&return_to=/",
+      {
+        method: "GET",
+        redirect: "manual",
+      },
+    );
+
+    expect(installCallbackRes.status).toBe(302);
+    const loc = installCallbackRes.headers.get("location")!;
+    expect(loc).toContain("connected=1");
+    expect(loc).toContain(`owner=${installOwner}`);
+    expect(loc).toContain("installation_id=inst_app_888");
+    expect(loc).toContain("count=2");
+
+    // Verify repositories are stored in OrgCoordinator
+    const orgReposRes = await SELF.fetch(`https://example.com/api/repos?owner=${installOwner}`, {
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(orgReposRes.status).toBe(200);
+    const orgReposData = (await orgReposRes.json()) as any;
+    expect(orgReposData.ok).toBe(true);
+    expect(orgReposData.count).toBe(2);
+    expect(orgReposData.repositories[0].fullName).toBe("orgdev/service-a");
+    expect(orgReposData.repositories[0].isPrivate).toBe(true);
+  });
+
+  it("install callback: rejects unauthenticated state injection and fails visibly on API failure (cloud-factory-cf-lpmz, cloud-factory-cf-jmlv)", async () => {
+    // 1. Unauthenticated request with state=victimorg/evil-repo where GitHub API 401s
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/installations") || url.includes("/installation/repositories")) {
+          return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const evilInstallRes = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=inst_attacker&setup_action=install&state=victimorg/evil-repo",
+      { method: "GET", redirect: "manual" },
+    );
+    // Must return 502 and NOT redirect with connected=1
+    expect(evilInstallRes.status).toBe(502);
+    const evilJson = (await evilInstallRes.json()) as any;
+    expect(evilJson.ok).toBe(false);
+    expect(evilJson.error).toContain("GitHub App installation endpoint requires an App JWT");
+
+    // Ensure victimorg's authorized_repos remained empty / untouched
+    const victimReposRes = await SELF.fetch("https://example.com/api/repos?owner=victimorg", {
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(victimReposRes.status).toBe(200);
+    const victimReposData = (await victimReposRes.json()) as any;
+    expect(victimReposData.count).toBe(0);
+    expect(victimReposData.repositories).toEqual([]);
+
+    // 2. Install-only callback when installation repositories API 500s -> returns 502
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/installations/")) {
+          if (url.includes("/repositories")) {
+            return new Response("Internal Server Error", { status: 500 });
+          }
+          return new Response(JSON.stringify({ id: 999, account: { login: "legitorg", type: "Organization" } }), { status: 200 });
+        }
+        if (url.includes("/installation/repositories")) {
+          return new Response("Internal Server Error", { status: 500 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const failReposRes = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=inst_999&setup_action=install",
+      { method: "GET", redirect: "manual" },
+    );
+    expect(failReposRes.status).toBe(502);
+    const failJson = (await failReposRes.json()) as any;
+    expect(failJson.ok).toBe(false);
+    expect(failJson.error).toContain("GitHub /installation/repositories failed with HTTP 500");
+  });
+
+  it("OAuth failure branches: covers /user/repos failure, persistence failure, and query credential override rejection (cloud-factory-cf-yp07)", async () => {
+    const loginRes = await SELF.fetch("https://example.com/auth/github/login?client_id=gh_test_client_id", {
+      method: "GET",
+      redirect: "manual",
+    });
+    const state = new URL(loginRes.headers.get("location")!).searchParams.get("state")!;
+    const cookieHeader = loginRes.headers.get("set-cookie")!.split(";")[0]!;
+
+    // 1. /user/repos fails with 500 -> returns 502
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://github.com/login/oauth/access_token") {
+          return new Response(JSON.stringify({ access_token: "gho_valid_token" }), { status: 200 });
+        }
+        if (url === "https://api.github.com/user") {
+          return new Response(JSON.stringify({ login: "octodev", type: "User" }), { status: 200 });
+        }
+        if (url.includes("/api.github.com/user/repos")) {
+          return new Response("Service Unavailable", { status: 503 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const reposFailRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=valid_code&state=${state}`,
+      { method: "GET", headers: { cookie: cookieHeader } },
+    );
+    expect(reposFailRes.status).toBe(502);
+    const reposFailJson = (await reposFailRes.json()) as any;
+    expect(reposFailJson.ok).toBe(false);
+    expect(reposFailJson.error).toContain("GitHub /user/repos failed with HTTP 503");
+
+    // 2. Query string client_secret override is ignored: post body to GitHub uses env secrets
+    let capturedBody: any = null;
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "https://github.com/login/oauth/access_token") {
+          capturedBody = JSON.parse(String(init?.body));
+          return new Response(JSON.stringify({ access_token: "gho_valid_token" }), { status: 200 });
+        }
+        if (url === "https://api.github.com/user") {
+          return new Response(JSON.stringify({ login: "octodev", type: "User" }), { status: 200 });
+        }
+        if (url.includes("/api.github.com/user/repos")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const overrideAttemptRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=valid_code&state=${state}&client_secret=attacker_controlled_secret&client_id=attacker_id`,
+      { method: "GET", headers: { cookie: cookieHeader }, redirect: "manual" },
+    );
+    expect(overrideAttemptRes.status).toBe(302);
+    expect(capturedBody).toBeDefined();
+    // Must use env credentials, NOT query params
+    expect(capturedBody.client_id).toBe("gh_test_client_id");
+    expect(capturedBody.client_secret).toBe("gh_test_client_secret");
+
+    // 3. OrgCoordinator persistence returns 500 -> 502 (cloud-factory-cf-yp07)
+    const getSpy = vi.spyOn(env.ORG_COORDINATOR, "get").mockReturnValue({
+      fetch: vi.fn().mockResolvedValue(new Response("Internal Error", { status: 500 })),
+    } as any);
+
+    const persistFailRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=valid_code&state=${state}`,
+      { method: "GET", headers: { cookie: cookieHeader } },
+    );
+    expect(persistFailRes.status).toBe(502);
+    const persistFailJson = (await persistFailRes.json()) as any;
+    expect(persistFailJson.ok).toBe(false);
+    expect(persistFailJson.error).toContain("OrgCoordinator persistence failed with HTTP 500");
+
+    // OrgCoordinator fetch rejection -> 502
+    getSpy.mockReturnValue({
+      fetch: vi.fn().mockRejectedValue(new Error("DO connection lost")),
+    } as any);
+
+    const netFailRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=valid_code&state=${state}`,
+      { method: "GET", headers: { cookie: cookieHeader } },
+    );
+    expect(netFailRes.status).toBe(502);
+    const netFailJson = (await netFailRes.json()) as any;
+    expect(netFailJson.ok).toBe(false);
+    expect(netFailJson.error).toContain("Failed to reach OrgCoordinator: Error: DO connection lost");
+
+    getSpy.mockRestore();
+
+    // 4. Unset credentials returns 503 (cloud-factory-cf-yp07)
+    const origId = env.GITHUB_CLIENT_ID;
+    const origSecret = env.GITHUB_CLIENT_SECRET;
+    try {
+      (env as any).GITHUB_CLIENT_ID = "";
+      const noIdLoginRes = await SELF.fetch("https://example.com/auth/github/login");
+      expect(noIdLoginRes.status).toBe(503);
+      const noIdLoginJson = (await noIdLoginRes.json()) as any;
+      expect(noIdLoginJson.error).toContain("GitHub Client ID is not configured (set GITHUB_CLIENT_ID)");
+
+      const noIdCallbackRes = await SELF.fetch(
+        `https://example.com/auth/github/callback?code=valid_code&state=${state}`,
+        { method: "GET", headers: { cookie: cookieHeader } },
+      );
+      expect(noIdCallbackRes.status).toBe(503);
+      const noIdCallbackJson = (await noIdCallbackRes.json()) as any;
+      expect(noIdCallbackJson.error).toContain("GitHub OAuth credentials are not configured in environment");
+
+      // Blank GITHUB_CLIENT_SECRET alone with GITHUB_CLIENT_ID restored (cloud-factory-cf-mesa)
+      (env as any).GITHUB_CLIENT_ID = origId;
+      (env as any).GITHUB_CLIENT_SECRET = "";
+
+      const noSecretCallbackRes = await SELF.fetch(
+        `https://example.com/auth/github/callback?code=valid_code&state=${state}`,
+        { method: "GET", headers: { cookie: cookieHeader } },
+      );
+      expect(noSecretCallbackRes.status).toBe(503);
+      const noSecretCallbackJson = (await noSecretCallbackRes.json()) as any;
+      expect(noSecretCallbackJson.error).toContain("GitHub OAuth credentials are not configured in environment");
+    } finally {
+      (env as any).GITHUB_CLIENT_ID = origId;
+      (env as any).GITHUB_CLIENT_SECRET = origSecret;
+    }
+  });
+
+  it("flow=install: rejects PAT with explicit error on App installation endpoints (cloud-factory-cf-egp6, cloud-factory-cf-kgr3)", async () => {
+    const installId = 555;
+
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        // GitHub rejects PAT tokens with 401 on /app/installations/
+        if (url.includes("/app/installations/")) {
+          return new Response(JSON.stringify({ message: "A regular PAT cannot access /app/installations" }), { status: 401 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const installRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?installation_id=${installId}&setup_action=install&return_to=/`,
+      { method: "GET", redirect: "manual" },
+    );
+
+    expect(installRes.status).toBe(502);
+    const installJson = (await installRes.json()) as any;
+    expect(installJson.ok).toBe(false);
+    expect(installJson.error).toContain("GitHub App installation endpoint requires an App JWT; personal access tokens (ghp_) are not accepted by GitHub");
+  });
+
+  it("flow=install: rejects 401 on /installation/repositories with installation access token error (cloud-factory-cf-c8qj)", async () => {
+    const installId = 777;
+
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes(`/app/installations/${installId}`)) {
+          return new Response(JSON.stringify({ id: installId, account: { login: "testorg", type: "Organization" } }), { status: 200 });
+        }
+        if (url.includes("/installation/repositories")) {
+          return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const installRes = await SELF.fetch(
+      `https://example.com/auth/github/callback?installation_id=${installId}&setup_action=install&return_to=/`,
+      { method: "GET", redirect: "manual" },
+    );
+
+    expect(installRes.status).toBe(502);
+    const installJson = (await installRes.json()) as any;
+    expect(installJson.ok).toBe(false);
+    expect(installJson.error).toBe(
+      "GitHub installation repositories endpoint requires an installation access token; personal access tokens (ghp_) are not accepted by GitHub",
+    );
+  });
+
+  it("flow=install: mints RS256 App JWT, exchanges for installation access token, and queries repos (cloud-factory-cf-uqnu)", async () => {
+    const keyPair = await crypto.subtle.generateKey(
+      { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+      true,
+      ["sign", "verify"],
+    );
+    const pkcs8Der = await crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(pkcs8Der)));
+    const pem = `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----`;
+
+    const installId = 987;
+    const appId = "app_12345";
+    let capturedJwt: string | null = null;
+    let capturedInstToken: string | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const auth = (init?.headers as any)?.authorization ?? "";
+        if (url.includes(`/app/installations/${installId}/access_tokens`)) {
+          if (!auth.startsWith("Bearer ") || auth.includes("ghp_") || auth.split(".").length !== 3) {
+            return new Response(JSON.stringify({ message: "A valid JWT is required" }), { status: 401 });
+          }
+          capturedJwt = auth.replace("Bearer ", "");
+          return new Response(JSON.stringify({ token: "ghs_installation_access_token_xyz" }), { status: 200 });
+        }
+        if (url.includes(`/app/installations/${installId}`)) {
+          if (!auth.startsWith("Bearer ") || auth.includes("ghp_") || auth.split(".").length !== 3) {
+            return new Response(JSON.stringify({ message: "A valid JWT is required" }), { status: 401 });
+          }
+          capturedJwt = auth.replace("Bearer ", "");
+          return new Response(JSON.stringify({ id: installId, account: { login: "apporg", type: "Organization" } }), { status: 200 });
+        }
+        if (url.includes("/installation/repositories")) {
+          capturedInstToken = auth.replace("Bearer ", "");
+          return new Response(
+            JSON.stringify({
+              total_count: 1,
+              repositories: [
+                { id: 202, full_name: "apporg/agent-shelf", name: "agent-shelf", private: false, default_branch: "main", owner: { login: "apporg" } },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const origAppId = env.GITHUB_APP_ID;
+    const origAppKey = env.GITHUB_APP_PRIVATE_KEY;
+    try {
+      (env as any).GITHUB_APP_ID = appId;
+      (env as any).GITHUB_APP_PRIVATE_KEY = pem;
+
+      const installRes = await SELF.fetch(
+        `https://example.com/auth/github/callback?installation_id=${installId}&setup_action=install&return_to=/`,
+        { method: "GET", redirect: "manual" },
+      );
+
+      expect(installRes.status).toBe(302);
+      expect(capturedJwt).toBeDefined();
+      expect(capturedInstToken).toBe("ghs_installation_access_token_xyz");
+
+      // Verify JWT payload
+      const [, payloadB64] = capturedJwt!.split(".");
+      const payload = JSON.parse(atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/")));
+      expect(payload.iss).toBe(appId);
+
+      // Verify JWT signature against keyPair.publicKey (cloud-factory-cf-5vat)
+      const jwtParts = capturedJwt!.split(".");
+      expect(jwtParts.length).toBe(3);
+      const b64UrlToBytes = (s: string) => {
+        const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + "==".slice((2 - (s.length & 3)) & 3);
+        const bin = atob(b64);
+        const arr = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        return arr;
+      };
+      const signedMessage = new TextEncoder().encode(`${jwtParts[0]}.${jwtParts[1]}`);
+      const signatureBytes = b64UrlToBytes(jwtParts[2]);
+      const isVerified = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", keyPair.publicKey, signatureBytes, signedMessage);
+      expect(isVerified).toBe(true);
+
+      // Verify repos persisted in OrgCoordinator
+      const orgReposRes = await SELF.fetch("https://example.com/api/repos?owner=apporg", {
+        headers: { "x-factory-control-key": "test-control-key" },
+      });
+      expect(orgReposRes.status).toBe(200);
+      const orgReposData = (await orgReposRes.json()) as any;
+      expect(orgReposData.ok).toBe(true);
+      expect(orgReposData.count).toBe(1);
+      expect(orgReposData.repositories[0].fullName).toBe("apporg/agent-shelf");
+    } finally {
+      (env as any).GITHUB_APP_ID = origAppId;
+      (env as any).GITHUB_APP_PRIVATE_KEY = origAppKey;
+    }
+  });
+});

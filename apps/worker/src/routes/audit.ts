@@ -9,7 +9,7 @@ export const AUDIT_PATH =
  * historical run audit records (cloud-factory-cf-2ng.3).
  *
  *   GET /audit/events/:owner/:repo               historical event list (with stats)
- *   GET /audit/events/:owner/:repo/stats         status breakdown counts
+ *   GET /audit/events/:owner/:repo/stats         status breakdown counts (pass ?counts=1 to force counts if delivery ID 'stats' exists)
  *   GET /audit/events/:owner/:repo/:deliveryId   detailed single-event audit with payload & deliveries
  *   GET /audit/runs/:owner/:repo                 canvas runs audit records
  *
@@ -67,6 +67,15 @@ export async function handleAudit(
 
   // domain === "events"
   if (id === "stats") {
+    // If not explicitly requesting counts via ?counts=1, check if an event with deliveryId "stats" exists:
+    if (url.searchParams.get("counts") !== "1") {
+      const detailRes = await coordinator.fetch("https://repo-coordinator.internal/events/stats?detail=1");
+      if (detailRes.ok) {
+        const body = (await detailRes.json()) as Record<string, unknown>;
+        return Response.json(body, { status: 200 });
+      }
+    }
+
     const res = await coordinator.fetch("https://repo-coordinator.internal/events/stats");
     const body = (await res.json()) as { ok?: boolean; counts?: Record<string, number> };
     return Response.json(
@@ -80,7 +89,13 @@ export async function handleAudit(
   }
 
   if (id !== undefined && id.length > 0) {
-    const target = `https://repo-coordinator.internal/events/${encodeURIComponent(id)}`;
+    let deliveryId: string;
+    try {
+      deliveryId = decodeURIComponent(id);
+    } catch {
+      deliveryId = id;
+    }
+    const target = `https://repo-coordinator.internal/events/${encodeURIComponent(deliveryId)}`;
     const res = await coordinator.fetch(target);
     const body = (await res.json()) as Record<string, unknown>;
     return Response.json(body, { status: res.status });

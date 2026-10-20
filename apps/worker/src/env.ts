@@ -47,6 +47,11 @@ export interface FactoryEnv {
   BROKER_QUOTA_PER_MINUTE?: string;
   /** Upstream credentials the broker may attach - one binding per service. */
   GITHUB_TOKEN?: string;
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
+  GITHUB_APP_SLUG?: string;
+  GITHUB_APP_ID?: string;
+  GITHUB_APP_PRIVATE_KEY?: string;
   GITLAB_TOKEN?: string;
   /** Beads API host and token: unset means the beads sink reports the service as unconfigured. */
   BEADS_API_HOST?: string;

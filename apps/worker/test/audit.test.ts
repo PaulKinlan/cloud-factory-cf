@@ -214,6 +214,92 @@ describe("DO event audit log API", () => {
     expect(body.stats["pending"]).toBe(1);
   });
 
+  it("retrieves an event whose delivery ID is stats (cloud-factory-cf-sood)", async () => {
+    const repository = "audit/deliv-named-stats";
+    const req = await githubRequest("stats", repository);
+    const queued = await SELF.fetch(req);
+    expect(queued.status).toBe(202);
+
+    // Detail route /audit/events/:owner/:repo/stats returns the event detail view
+    const detailRes = await callAudit(`/audit/events/${repository}/stats`, authHeaders);
+    expect(detailRes.status).toBe(200);
+    const detailBody = (await detailRes.json()) as any;
+    expect(detailBody.ok).toBe(true);
+    expect(detailBody.event).toBeDefined();
+    expect(detailBody.event.deliveryId).toBe("stats");
+    expect(detailBody.deliveries).toBeDefined();
+
+    // Query param /audit/events/:owner/:repo?deliveryId=stats also returns the event list with the event and preserved stats breakdown
+    const listRes = await callAudit(`/audit/events/${repository}?deliveryId=stats`, authHeaders);
+    expect(listRes.status).toBe(200);
+    const listBody = (await listRes.json()) as any;
+    expect(listBody.ok).toBe(true);
+    expect(listBody.count).toBe(1);
+    expect(listBody.events[0].deliveryId).toBe("stats");
+    expect(listBody.stats["pending"]).toBe(1);
+
+    // Event list all events maintains stats breakdown counts (cloud-factory-cf-xib7)
+    const listAllRes = await callAudit(`/audit/events/${repository}`, authHeaders);
+    expect(listAllRes.status).toBe(200);
+    const listAllBody = (await listAllRes.json()) as any;
+    expect(listAllBody.stats["pending"]).toBe(1);
+
+    // Public /stats?counts=1 route returns status breakdown counts even for repos holding 'stats' delivery
+    const countsRes = await callAudit(`/audit/events/${repository}/stats?counts=1`, authHeaders);
+    expect(countsRes.status).toBe(200);
+    const countsBody = (await countsRes.json()) as any;
+    expect(countsBody.ok).toBe(true);
+    expect(countsBody.stats["pending"]).toBe(1);
+
+    // ?counts=0 and bare ?counts return event detail view (with event and deliveries, and no stats key) (cloud-factory-cf-czha)
+    const counts0Res = await callAudit(`/audit/events/${repository}/stats?counts=0`, authHeaders);
+    expect(counts0Res.status).toBe(200);
+    const counts0Body = (await counts0Res.json()) as any;
+    expect(counts0Body.event?.deliveryId).toBe("stats");
+    expect(counts0Body.deliveries).toBeDefined();
+    expect(counts0Body.stats).toBeUndefined();
+
+    const bareCountsRes = await callAudit(`/audit/events/${repository}/stats?counts`, authHeaders);
+    expect(bareCountsRes.status).toBe(200);
+    const bareCountsBody = (await bareCountsRes.json()) as any;
+    expect(bareCountsBody.event?.deliveryId).toBe("stats");
+    expect(bareCountsBody.deliveries).toBeDefined();
+    expect(bareCountsBody.stats).toBeUndefined();
+  });
+
+  it("retrieves an event whose delivery ID is payload (cloud-factory-cf-obnz)", async () => {
+    const repository = "audit/deliv-named-payload";
+    const req = await githubRequest("payload", repository);
+    const queued = await SELF.fetch(req);
+    expect(queued.status).toBe(202);
+
+    // Detail route /audit/events/:owner/:repo/payload returns the event detail view
+    const detailRes = await callAudit(`/audit/events/${repository}/payload`, authHeaders);
+    expect(detailRes.status).toBe(200);
+    const detailBody = (await detailRes.json()) as any;
+    expect(detailBody.ok).toBe(true);
+    expect(detailBody.event).toBeDefined();
+    expect(detailBody.event.deliveryId).toBe("payload");
+    expect(detailBody.deliveries).toBeDefined();
+  });
+
+  it("retrieves an event whose delivery ID contains percent encoding (cloud-factory-cf-pd03)", async () => {
+    const repository = "audit/deliv-pct-encoded";
+    const id = "a%2Fb";
+    const req = await githubRequest(id, repository);
+    const queued = await SELF.fetch(req);
+    expect(queued.status).toBe(202);
+
+    // Detail route /audit/events/:owner/:repo/:encodedId returns the event detail view
+    const detailRes = await callAudit(`/audit/events/${repository}/${encodeURIComponent(id)}`, authHeaders);
+    expect(detailRes.status).toBe(200);
+    const detailBody = (await detailRes.json()) as any;
+    expect(detailBody.ok).toBe(true);
+    expect(detailBody.event).toBeDefined();
+    expect(detailBody.event.deliveryId).toBe(id);
+    expect(detailBody.deliveries).toBeDefined();
+  });
+
   it("lists canvas run audits via /audit/runs", async () => {
     const repository = "audit/runs-test";
     const stub = coordinator(repository);

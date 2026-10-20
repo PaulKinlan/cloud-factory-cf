@@ -24,6 +24,7 @@
         <button type="button" id="export" class="button button--ghost">Export config</button>
         <button type="button" id="share" class="button button--ghost">Share…</button>
         <button type="button" id="observability-toggle" class="button button--ghost" aria-expanded="false" aria-controls="observability-panel">Observability</button>
+        <a href="/admin" class="button button--ghost" style="text-decoration:none;">Admin</a>
         <button type="button" id="clear" class="button button--danger">Clear</button>
       </div>
 
@@ -189,6 +190,12 @@
         repository's webhook at the URL below — GitHub sends a ping the moment the hook is created.
       </p>
       <div class="share-form">
+        <div style="grid-column: 1 / -1; display: flex; gap: 10px; align-items: center; margin-bottom: 6px;">
+          <a id="connect-oauth" class="button button--agent" href="/auth/github/login" style="text-decoration:none;">Connect with GitHub (1-Click)</a>
+          <select id="connect-repo-select" class="field__control" style="flex:1;" hidden>
+            <option value="">-- Choose an authorized repository --</option>
+          </select>
+        </div>
         <label class="field">
           <span>Owner</span>
           <input id="connect-owner" type="text" placeholder="owner or organisation" autocomplete="off" />
