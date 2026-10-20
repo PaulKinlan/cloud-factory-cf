@@ -125,7 +125,7 @@ export class CloudTelemetrySink implements ActionSink {
             action: 'emit',
             params: { type: 'metric', ...payload },
           });
-        } else if (this.bufferInMemory) {
+        } else if (this.bufferInMemory && this.maxBufferSize > 0) {
           this.pushBuffer({ type: 'metric', payload, timestamp: action.timestamp });
           result = { buffered: true };
         } else {
@@ -134,7 +134,10 @@ export class CloudTelemetrySink implements ActionSink {
             actionId: action.id,
             actionType: action.type,
             success: false,
-            error: 'Telemetry dispatch failed: in-memory buffer is disabled and no telemetry exporter or broker permission is available',
+            error:
+              this.maxBufferSize === 0
+                ? 'Telemetry dispatch failed: in-memory buffer capacity is 0 and no telemetry exporter or broker permission is available'
+                : 'Telemetry dispatch failed: in-memory buffer is disabled and no telemetry exporter or broker permission is available',
             durationMs: Date.now() - start,
           };
         }
@@ -196,7 +199,7 @@ export class CloudTelemetrySink implements ActionSink {
             action: 'emit',
             params: { type: 'log', ...payload },
           });
-        } else if (this.bufferInMemory) {
+        } else if (this.bufferInMemory && this.maxBufferSize > 0) {
           this.pushBuffer({ type: 'log', payload, timestamp: action.timestamp });
           result = { buffered: true };
         } else {
@@ -205,7 +208,10 @@ export class CloudTelemetrySink implements ActionSink {
             actionId: action.id,
             actionType: action.type,
             success: false,
-            error: 'Telemetry dispatch failed: in-memory buffer is disabled and no telemetry exporter or broker permission is available',
+            error:
+              this.maxBufferSize === 0
+                ? 'Telemetry dispatch failed: in-memory buffer capacity is 0 and no telemetry exporter or broker permission is available'
+                : 'Telemetry dispatch failed: in-memory buffer is disabled and no telemetry exporter or broker permission is available',
             durationMs: Date.now() - start,
           };
         }

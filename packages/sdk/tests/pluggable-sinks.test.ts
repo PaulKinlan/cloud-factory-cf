@@ -258,23 +258,27 @@ test('CloudTelemetrySink: validates metrics and logs, buffers and exports', asyn
   assert.equal(fallbackSink.getBufferedEntries()[0]!.payload.message, 'first');
   assert.equal(fallbackSink.getBufferedEntries()[1]!.payload.message, 'second');
 
-  // Verify maxBufferSize: 0 retains 0 entries (cloud-factory-cf-v84t)
+  // Verify maxBufferSize: 0 fails closed rather than acknowledging dropped events as buffered (cloud-factory-cf-xrab)
   const zeroCapSink = new CloudTelemetrySink({ maxBufferSize: 0 });
-  await zeroCapSink.handle(
+  const zeroCapRes = await zeroCapSink.handle(
     { id: 'z1', type: 'telemetry:log', payload: { message: 'discard' }, timestamp: 1 },
     ctx,
   );
+  assert.equal(zeroCapRes.success, false);
+  assert.match(zeroCapRes.error!, /buffer capacity is 0/);
   assert.equal(zeroCapSink.getBufferedEntries().length, 0);
 
-  // Verify non-finite maxBufferSize (NaN) normalises to default 1000 rather than disabling cap (cloud-factory-cf-v84t)
+  // Verify non-finite maxBufferSize (NaN) normalises to default 1000 and caps at 1000 (cloud-factory-cf-iay4)
   const nanCapSink = new CloudTelemetrySink({ maxBufferSize: NaN });
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 1005; i++) {
     await nanCapSink.handle(
       { id: String(i), type: 'telemetry:log', payload: { message: `msg-${i}` }, timestamp: i },
       ctx,
     );
   }
-  assert.equal(nanCapSink.getBufferedEntries().length, 5);
+  assert.equal(nanCapSink.getBufferedEntries().length, 1000);
+  assert.equal(nanCapSink.getBufferedEntries()[0]!.payload.message, 'msg-5');
+  assert.equal(nanCapSink.getBufferedEntries()[999]!.payload.message, 'msg-1004');
 
   // Test buffer disabled fails closed when no exporter or broker permission (fixes cloud-factory-cf-lj1)
   const unbufferedSink = new CloudTelemetrySink({ bufferInMemory: false });
