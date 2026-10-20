@@ -145,21 +145,6 @@ function armedAt(stub: ReturnType<typeof stubForKey>): Promise<number | null> {
   return runInDurableObject(stub, (_instance, state) => state.storage.getAlarm());
 }
 
-/**
- * Drain the queue through the control route, the way an operator or CI would. Used by
- * the two cases whose shape the alarm path does not route yet (cloud-factory-cf-jtg9:
- * closed/merged pull requests and issue events).
- */
-async function runRepository(repository: string): Promise<Record<string, number>> {
-  const response = await SELF.fetch(`https://example.com/runs/${repository}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-factory-control-key": CONTROL_KEY },
-    body: JSON.stringify({}),
-  });
-  expect(response.status).toBe(200);
-  return (await response.json()) as Record<string, number>;
-}
-
 /** Fire the alarm the delivery armed, exactly as the platform would. */
 async function drain(stub: ReturnType<typeof stubForKey>): Promise<void> {
   await runInDurableObject(stub, (instance) =>
@@ -277,7 +262,7 @@ describe("synthetic GitHub deliveries, end to end", () => {
       status: "pending",
     });
 
-    // The delivery itself armed the alarm: no POST /runs anywhere in this test.
+    // The delivery itself armed the alarm: nothing here calls POST /runs.
     const armed = await armedAt(queue);
     expect(armed).not.toBeNull();
     expect(armed as number).toBeLessThanOrEqual(Date.now() + 5_000);
@@ -350,13 +335,9 @@ describe("synthetic GitHub deliveries, end to end", () => {
   });
 
   it("acknowledges a closed pull request without calling the provider", async () => {
-    // The rule-based runner is the ADR 003 decision path: decideAction() deliberately
-    // does not review a merged/closed request, and the event is acknowledged rather
-    // than retried. It is driven here through POST /runs because the alarm path
-    // currently runs the SDK review engine instead, which reviews every
-    // pull_request regardless of action — a divergence tracked in
-    // cloud-factory-cf-jtg9 (the same divergence is why an opened issue reaches no
-    // sink on the alarm path).
+    // decideAction() deliberately does not review a closed/merged request. Since
+    // cloud-factory-cf-jtg9 the alarm path routes that same decision, so the delivery
+    // is acknowledged and settled here without any provider call.
     const repository = "acme/e2e-closed";
     const { calls } = stubGitHub();
     await provision(repository, "pr.diff");
@@ -366,10 +347,9 @@ describe("synthetic GitHub deliveries, end to end", () => {
       (await deliver(repository, "e2e-closed-1", "pull_request", githubPullRequestPayload({ repository, action: "closed", merged: true }))).status,
     ).toBe(202);
 
-    const report = await runRepository(repository);
     const queue = await queueFor(repository, "e2e-closed-1");
+    await drain(queue);
 
-    expect(report).toMatchObject({ claimed: 1, skipped: 1, failed: 0 });
     expect(calls).toHaveLength(0);
     await expectSettled(repository, queue, 1);
     const [event] = await queueOf(queue);
@@ -377,18 +357,17 @@ describe("synthetic GitHub deliveries, end to end", () => {
   });
 
   it("comments on an opened issue through the broker", async () => {
-    // Same note as the closed-request case: the decision lives in the rule-based
-    // runner (POST /runs), which is the path the ADR 003 rules are written for.
+    // The alarm path routes an opened issue through the ADR 003 rules to the
+    // rule-based runner, which emits the issue comment sink (cloud-factory-cf-jtg9).
     const repository = "acme/e2e-issue";
     const { calls } = stubGitHub();
     await provision(repository, "issue.comment");
 
     expect((await deliver(repository, "e2e-issue-1", "issues", githubIssuesPayload({ repository, number: 9 }))).status).toBe(202);
 
-    const report = await runRepository(repository);
     const queue = await queueFor(repository, "e2e-issue-1");
+    await drain(queue);
 
-    expect(report).toMatchObject({ claimed: 1, succeeded: 1, failed: 0 });
     const comment = singleComment(calls);
     expect(comment.url).toContain(`/repos/${repository}/issues/9/comments`);
     expect(String((comment.body as Record<string, unknown>)["body"])).toContain("#9");
