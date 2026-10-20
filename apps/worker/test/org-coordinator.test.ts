@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { OrgCoordinator } from "../src/org-coordinator";
 
 function orgCoordinator(org: string) {
-  return env.ORG_COORDINATOR.get(env.ORG_COORDINATOR.idFromName(org));
+  return env.ORG_COORDINATOR!.get(env.ORG_COORDINATOR!.idFromName(org));
 }
 
 describe("OrgCoordinator Durable Object", () => {

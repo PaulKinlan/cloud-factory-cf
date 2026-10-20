@@ -60,9 +60,13 @@ export function pemToPkcs8Der(pem: string): Uint8Array {
 
 export async function importAppPrivateKey(pem: string): Promise<CryptoKey> {
   const der = pemToPkcs8Der(pem);
+  // Copy into a plain Uint8Array<ArrayBuffer>: `der.buffer` is ArrayBufferLike, and
+  // the `pkcs8` overload of importKey wants a BufferSource (not a SharedArrayBuffer).
+  const keyData = new Uint8Array(der.length);
+  keyData.set(der);
   return await crypto.subtle.importKey(
     "pkcs8",
-    der.buffer,
+    keyData,
     { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
     false,
     ["sign"],
