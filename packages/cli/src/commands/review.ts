@@ -13,7 +13,7 @@ export async function handleReviewCommand(
     // default exists for offline use, and passing it here is how a real pull request
     // came to be reviewed against a repository that does not exist
     // (cloud-factory-cf-n2h0): the event paints the target otherwise.
-    const explicitRepo = parsed.repo ? { owner, name } : undefined;
+    const explicitRepo = parsed.repo && owner && name ? { owner, name } : undefined;
     const result = await runPrReview({
       cwd,
       repo: explicitRepo,
