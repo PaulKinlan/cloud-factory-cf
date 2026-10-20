@@ -6,6 +6,18 @@ export const AUTH_LOGIN_PATH = "/auth/github/login";
 export const AUTH_CALLBACK_PATH = "/auth/github/callback";
 export const API_REPOS_PATH = "/api/repos";
 
+/**
+ * The browser's credential after a successful connect (cloud-factory-cf-d33).
+ *
+ * `/api/repos` used to be readable only with `x-factory-control-key`, which is a
+ * server secret: the canvas cannot hold it, so the 1-click flow landed on an empty
+ * repository list unless an operator pasted the key into the dialog. The callback now
+ * mints a signed, HttpOnly session for the connected login and `/api/repos` accepts
+ * either that session (for its own login only) or the control key (machine callers).
+ */
+export const SESSION_COOKIE = "cf_session";
+export const SESSION_TTL_SECONDS = 8 * 3600;
+
 async function signHmacSha256(secret: string, data: string): Promise<string> {
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey(
@@ -31,6 +43,45 @@ function getCookie(headers: Headers, name: string): string | null {
   } catch {
     return match[1];
   }
+}
+
+function cookieAttrs(url: URL, path: string): string {
+  const secure = url.protocol === "https:" ? "Secure; " : "";
+  return `HttpOnly; ${secure}SameSite=Lax; Path=${path}`;
+}
+
+/** `<login>.<exp>.<hmac>`, signed over the login and its expiry. */
+async function mintSessionToken(
+  signingKey: string,
+  login: string,
+  nowMs: number = Date.now(),
+): Promise<string> {
+  const exp = Math.floor(nowMs / 1000) + SESSION_TTL_SECONDS;
+  const data = `${login}.${exp}`;
+  return `${data}.${await signHmacSha256(signingKey, data)}`;
+}
+
+function sessionCookie(token: string, url: URL): string {
+  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; ${cookieAttrs(url, "/")}; Max-Age=${SESSION_TTL_SECONDS}`;
+}
+
+/** Reads and verifies the session cookie; a failure reason is never surfaced to the caller. */
+async function readSession(
+  headers: Headers,
+  signingKey: string,
+  nowMs: number = Date.now(),
+): Promise<{ ok: true; login: string } | { ok: false }> {
+  const raw = getCookie(headers, SESSION_COOKIE);
+  if (!raw) return { ok: false };
+  const parts = raw.split(".");
+  if (parts.length !== 3) return { ok: false };
+  const [login, expStr, sig] = parts as [string, string, string];
+  if (!login || !expStr || !sig) return { ok: false };
+  const expected = await signHmacSha256(signingKey, `${login}.${expStr}`);
+  if (!(await sameSecret(expected, sig))) return { ok: false };
+  const exp = Number.parseInt(expStr, 10);
+  if (Number.isNaN(exp) || Math.floor(nowMs / 1000) > exp) return { ok: false };
+  return { ok: true, login };
 }
 
 /**
@@ -606,11 +657,27 @@ export async function handleGithubCallback(
 
   return new Response(null, {
     status: 302,
-    headers: {
-      location: redirectUrl.toString(),
-      "set-cookie": clearCookie,
-    },
+    headers: await successHeaders(redirectUrl, url, signingKey, accountLogin),
   });
+}
+
+/**
+ * Success is a redirect plus the cookies the browser needs afterwards: the state cookie
+ * goes away, and — when the account is known — a session for it is minted so the canvas
+ * can load its own repositories (see SESSION_COOKIE).
+ */
+async function successHeaders(
+  redirectUrl: URL,
+  url: URL,
+  signingKey: string,
+  accountLogin: string,
+): Promise<Headers> {
+  const headers = new Headers({ location: redirectUrl.toString() });
+  headers.append("set-cookie", `cf_oauth_state=; ${cookieAttrs(url, "/auth/github")}; Max-Age=0`);
+  if (accountLogin !== "unknown") {
+    headers.append("set-cookie", sessionCookie(await mintSessionToken(signingKey, accountLogin), url));
+  }
+  return headers;
 }
 
 export async function handleApiRepos(
@@ -622,9 +689,33 @@ export async function handleApiRepos(
   if (!controlKey) {
     return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
   }
+  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY ?? env.WEBHOOK_SECRET;
 
+  let owner = url.searchParams.get("owner");
+  let authorised = false;
+
+  // Machine callers present the control key (unchanged contract).
   const presented = request.headers.get("x-factory-control-key");
-  if (!(await sameSecret(controlKey, presented))) {
+  if (presented && (await sameSecret(controlKey, presented))) authorised = true;
+
+  if (!authorised && signingKey) {
+    const session = await readSession(request.headers, signingKey);
+    if (session.ok) {
+      // A browser session speaks for its own login and nobody else's: asking for another
+      // account's list is refused rather than silently answered, and an omitted owner
+      // means "my repositories" — which is the 1-click path after an OAuth return.
+      if (owner && owner !== session.login) {
+        return Response.json(
+          { ok: false, error: "not authorised to read another account's repositories" },
+          { status: 403 },
+        );
+      }
+      owner = session.login;
+      authorised = true;
+    }
+  }
+
+  if (!authorised) {
     return Response.json({ ok: false, error: "not authorised to access repository metadata" }, { status: 401 });
   }
 
@@ -632,7 +723,6 @@ export async function handleApiRepos(
     return new Response("method not allowed", { status: 405 });
   }
 
-  const owner = url.searchParams.get("owner");
   if (!owner) {
     return Response.json(
       { ok: false, error: "Missing required query parameter ?owner=<login>" },
