@@ -75,23 +75,26 @@ In Worker route handlers (`webhooks.ts`, `canvas.ts`, `runs.ts`, `trace.ts`, `au
    The coordinator triggers `migrateFromLegacy(legacyRepoName)`.
 
 3. **Export from Legacy DO**:
-   - The prefixed DO fetches `https://repo-coordinator.internal/legacy/export` from `env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(legacyRepoName))`.
-   - The legacy DO queries its tables:
-     - `memory`
-     - `canvas_documents`
-     - `webhook_connect`
-     - `events`
-     - `event_deliveries`
-     - `run_audit`
-     - `run_trace`
-   - The legacy DO returns the exported records as JSON and cancels any active alarms to prevent duplicate queue processing.
+   - The prefixed DO fetches `https://repo-coordinator.internal/legacy/export` from `env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(legacyRepoName))` passing `x-factory-control-key`.
+   - The legacy DO validates `x-factory-control-key` against `env.BROKER_CONTROL_KEY`.
+   - If the legacy DO has 0 rows across its tables (e.g. brand new repo), it returns `{ ok: true, empty: true }` without mutating state.
+   - Otherwise, it queries its tables (`memory`, `canvas_documents`, `webhook_connect`, `events`, `event_deliveries`, `run_audit`, `run_trace`) and returns the exported records as JSON. Alarms remain active until import confirmation.
 
 4. **Import into Prefixed DO**:
-   - The prefixed DO executes an atomic transaction inserting all exported rows (`INSERT OR IGNORE`).
-   - Inserts `('legacy_read_through', Date.now())` into `_schema_migrations`.
+   - The prefixed DO executes an atomic SQLite transaction (`BEGIN TRANSACTION` ... `COMMIT`, with `ROLLBACK` on error):
+     - Inserts all exported rows (`INSERT OR IGNORE`).
+     - Inserts `('legacy_read_through', Date.now())` into `_schema_migrations`.
+   - If the transaction throws or export fails, `_schema_migrations` is NOT written, allowing subsequent requests to retry.
+   - Upon successful commit:
+     - The prefixed DO calls `https://repo-coordinator.internal/legacy/ack-migrated` with `x-factory-control-key`.
+     - The legacy DO marks itself as `migrated_to_prefixed` in `_schema_migrations` and cancels its alarm (`deleteAlarm()`).
+     - If the newly imported queue has due events, `armAlarm()` is scheduled on the prefixed DO.
 
 5. **Legacy DO Proxying**:
-   - If a request hits an un-prefixed DO (where `parseRepositoryKey(this.ctx.id.name)` is `null`), the legacy DO proxies the request to `github:${this.ctx.id.name}` via internal fetch, ensuring zero stranded requests.
+   - If an un-prefixed DO (`parseRepositoryKey(this.ctx.id.name)` is `null`) receives a non-legacy request, it proxies the request to `github:${this.ctx.id.name}` via internal fetch, ensuring zero stranded requests.
+
+6. **CredentialBroker Scope Note**:
+   - `CredentialBroker` DOs are addressed by repository name (`owner/repo`), as credential storage and capability quota are per repository across services. `RepoCoordinator` is platform-prefixed (`github:org/repo`, `gitlab:group/project`, `gitea:org/repo`) for event queue, trace, and memory isolation.
 
 ---
 

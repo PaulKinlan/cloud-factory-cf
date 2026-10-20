@@ -6,7 +6,6 @@ import {
 } from "@factory-cloud/sdk";
 import type { Env } from "./env";
 import type { RepoCoordinator } from "./repo-coordinator";
-import type { CredentialBroker } from "./credential-broker-object";
 
 /**
  * Resolves a canonical platform-prefixed repository key for addressing RepoCoordinator
@@ -37,16 +36,4 @@ export function getRepoCoordinator(
 ): DurableObjectStub<RepoCoordinator> {
   const key = resolveRepositoryKey(repository, platformHint);
   return env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(key));
-}
-
-/**
- * Returns a DurableObjectStub to the platform-prefixed CredentialBroker instance.
- */
-export function getCredentialBroker(
-  env: Env,
-  repository: string,
-  platformHint?: string | null,
-): DurableObjectStub<CredentialBroker> {
-  const key = resolveRepositoryKey(repository, platformHint);
-  return env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(key));
 }

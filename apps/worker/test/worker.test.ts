@@ -105,4 +105,22 @@ describe("worker entry point", () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ error: "repository mismatch" });
   });
+
+  it("refuses a payload that names a different platform than the endpoint (cloud-factory-cf-29nb)", async () => {
+    const stub = getRepoCoordinator(env, "acme/widgets", "github");
+    const body = pushPayload("mismatch-platform-1", "gitlab:acme/widgets");
+    const response = await stub.fetch("https://repo-coordinator.internal/events?provider=github", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "mismatch-platform-1",
+        "x-github-event": "pull_request",
+        "x-factory-repository": "github:acme/widgets",
+        "x-hub-signature-256": await signBody(TEST_SECRET, body),
+      },
+      body,
+    });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "repository mismatch" });
+  });
 });

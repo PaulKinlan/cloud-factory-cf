@@ -2,14 +2,43 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 describe("RepoCoordinator legacy read-through migration (Slice 3)", () => {
+  const CONTROL_KEY = "test-control-key";
+
+  it("requires control key authentication for /legacy/export and /legacy/ack-migrated", async () => {
+    const legacyStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("auth-org/auth-repo"));
+
+    const unauthExport = await legacyStub.fetch("https://repo-coordinator.internal/legacy/export");
+    expect(unauthExport.status).toBe(401);
+
+    const badAuthExport = await legacyStub.fetch("https://repo-coordinator.internal/legacy/export", {
+      headers: { "x-factory-control-key": "wrong-key" },
+    });
+    expect(badAuthExport.status).toBe(401);
+
+    const unauthAck = await legacyStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
+      method: "POST",
+    });
+    expect(unauthAck.status).toBe(401);
+
+    const goodAuthExport = await legacyStub.fetch("https://repo-coordinator.internal/legacy/export", {
+      headers: { "x-factory-control-key": CONTROL_KEY },
+    });
+    expect(goodAuthExport.status).toBe(200);
+    const body = (await goodAuthExport.json()) as { ok: boolean; empty: boolean };
+    expect(body.ok).toBe(true);
+    expect(body.empty).toBe(true);
+  });
+
   it("migrates existing rows from unprefixed DO to github: prefixed DO on first access", async () => {
     const legacyRepo = "legacy-org/legacy-repo";
     const prefixedRepo = `github:${legacyRepo}`;
 
     const legacyStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(legacyRepo));
 
-    // Populate legacy DO with test data across all tables
-    await runInDurableObject(legacyStub, (_instance, state) => {
+    // Populate legacy DO with test data across all tables and set an alarm
+    await runInDurableObject(legacyStub, async (_instance, state) => {
+      await state.storage.setAlarm(Date.now() + 60_000);
+
       // 1. memory
       state.storage.sql.exec(
         "INSERT INTO memory (key, value, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -134,10 +163,49 @@ describe("RepoCoordinator legacy read-through migration (Slice 3)", () => {
       expect(migrationRecord).toHaveLength(1);
     });
 
+    // Verify that the legacy DO's alarm was cancelled and it was marked as migrated
+    await runInDurableObject(legacyStub, async (_instance, state) => {
+      const alarm = await state.storage.getAlarm();
+      expect(alarm).toBeNull();
+      const legacyMigration = state.storage.sql.exec<{ name: string }>(
+        "SELECT name FROM _schema_migrations WHERE name = 'migrated_to_prefixed'",
+      ).toArray();
+      expect(legacyMigration).toHaveLength(1);
+    });
+
     // Second access is idempotent and doesn't re-run or duplicate
     const secondRes = await prefixedStub.fetch("https://repo-coordinator.internal/stats");
     expect(secondRes.status).toBe(200);
     const body = (await secondRes.json()) as { counts: Record<string, number> };
     expect(body.counts["pending"]).toBe(1);
+
+    // Legacy un-prefixed DO now proxies non-export requests to the prefixed DO
+    const proxiedRes = await legacyStub.fetch("https://repo-coordinator.internal/stats");
+    expect(proxiedRes.status).toBe(200);
+    const proxiedBody = (await proxiedRes.json()) as { repository: string; counts: Record<string, number> };
+    expect(proxiedBody.repository).toBe(legacyRepo);
+    expect(proxiedBody.counts["pending"]).toBe(1);
+  });
+
+  it("fails closed without writing migration marker if export throws", async () => {
+    const faultRepo = "fault-org/fault-repo";
+    const prefixedRepo = `github:${faultRepo}`;
+
+    const legacyStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(faultRepo));
+    await runInDurableObject(legacyStub, (_instance, state) => {
+      // Cause an error by dropping a required table before export runs
+      state.storage.sql.exec("DROP TABLE run_trace");
+    });
+
+    const prefixedStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(prefixedRepo));
+    await prefixedStub.fetch("https://repo-coordinator.internal/stats");
+
+    // The migration marker must NOT have been written
+    await runInDurableObject(prefixedStub, (_instance, state) => {
+      const migrationRecord = state.storage.sql.exec<{ name: string }>(
+        "SELECT name FROM _schema_migrations WHERE name = 'legacy_read_through'",
+      ).toArray();
+      expect(migrationRecord).toHaveLength(0);
+    });
   });
 });
