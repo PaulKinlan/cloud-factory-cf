@@ -7,7 +7,7 @@ describe("GitHub App JWT & PEM helpers", () => {
     const keyPair = await crypto.subtle.generateKey(
       { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
       true,
-      ["sign"],
+      ["sign", "verify"],
     );
     const pkcs8Der = await crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
     const b64 = btoa(String.fromCharCode(...new Uint8Array(pkcs8Der)));
@@ -28,6 +28,20 @@ describe("GitHub App JWT & PEM helpers", () => {
     expect(payload.iss).toBe("123456");
     expect(payload.exp).toBeGreaterThan(payload.iat);
 
+    function base64UrlToBytes(str: string): Uint8Array {
+      const b64 = str.replace(/-/g, "+").replace(/_/g, "/") + "==".slice((2 - (str.length & 3)) & 3);
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    }
+
+    // Cryptographically verify signature against public key (cloud-factory-cf-5vat)
+    const message = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
+    const sigBytes = base64UrlToBytes(parts[2]);
+    const isValid = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", keyPair.publicKey, sigBytes, message);
+    expect(isValid).toBe(true);
+
     // Also test PKCS#1 wrapping
     const octetIndex = new Uint8Array(pkcs8Der).findIndex((b, i) => b === 0x04 && new Uint8Array(pkcs8Der)[i + 1] === 0x82);
     if (octetIndex !== -1) {
@@ -42,6 +56,11 @@ describe("GitHub App JWT & PEM helpers", () => {
       expect(pkcs1Parts.length).toBe(3);
       const pkcs1Payload = JSON.parse(atob(pkcs1Parts[1].replace(/-/g, "+").replace(/_/g, "/")));
       expect(pkcs1Payload.iss).toBe("654321");
+
+      const pkcs1Message = new TextEncoder().encode(`${pkcs1Parts[0]}.${pkcs1Parts[1]}`);
+      const pkcs1SigBytes = base64UrlToBytes(pkcs1Parts[2]);
+      const isPkcs1Valid = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", keyPair.publicKey, pkcs1SigBytes, pkcs1Message);
+      expect(isPkcs1Valid).toBe(true);
     }
   });
 });

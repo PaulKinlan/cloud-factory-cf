@@ -799,7 +799,7 @@ describe("GitHub OAuth & App Install Flow", () => {
     const keyPair = await crypto.subtle.generateKey(
       { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
       true,
-      ["sign"],
+      ["sign", "verify"],
     );
     const pkcs8Der = await crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
     const b64 = btoa(String.fromCharCode(...new Uint8Array(pkcs8Der)));
@@ -816,10 +816,16 @@ describe("GitHub OAuth & App Install Flow", () => {
         const url = String(input);
         const auth = (init?.headers as any)?.authorization ?? "";
         if (url.includes(`/app/installations/${installId}/access_tokens`)) {
+          if (!auth.startsWith("Bearer ") || auth.includes("ghp_") || auth.split(".").length !== 3) {
+            return new Response(JSON.stringify({ message: "A valid JWT is required" }), { status: 401 });
+          }
           capturedJwt = auth.replace("Bearer ", "");
           return new Response(JSON.stringify({ token: "ghs_installation_access_token_xyz" }), { status: 200 });
         }
         if (url.includes(`/app/installations/${installId}`)) {
+          if (!auth.startsWith("Bearer ") || auth.includes("ghp_") || auth.split(".").length !== 3) {
+            return new Response(JSON.stringify({ message: "A valid JWT is required" }), { status: 401 });
+          }
           capturedJwt = auth.replace("Bearer ", "");
           return new Response(JSON.stringify({ id: installId, account: { login: "apporg", type: "Organization" } }), { status: 200 });
         }
@@ -858,6 +864,21 @@ describe("GitHub OAuth & App Install Flow", () => {
       const [, payloadB64] = capturedJwt!.split(".");
       const payload = JSON.parse(atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/")));
       expect(payload.iss).toBe(appId);
+
+      // Verify JWT signature against keyPair.publicKey (cloud-factory-cf-5vat)
+      const jwtParts = capturedJwt!.split(".");
+      expect(jwtParts.length).toBe(3);
+      const b64UrlToBytes = (s: string) => {
+        const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + "==".slice((2 - (s.length & 3)) & 3);
+        const bin = atob(b64);
+        const arr = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        return arr;
+      };
+      const signedMessage = new TextEncoder().encode(`${jwtParts[0]}.${jwtParts[1]}`);
+      const signatureBytes = b64UrlToBytes(jwtParts[2]);
+      const isVerified = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", keyPair.publicKey, signatureBytes, signedMessage);
+      expect(isVerified).toBe(true);
 
       // Verify repos persisted in OrgCoordinator
       const orgReposRes = await SELF.fetch("https://example.com/api/repos?owner=apporg", {
