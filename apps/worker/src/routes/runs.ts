@@ -1,5 +1,6 @@
 import type { Env } from "../env";
 import { createDefaultExecutionFn, drainRepository } from "../pipeline";
+import { reviewRuntime } from "../review/model";
 import { traceSink } from "../events";
 import { sameSecret } from "../secrets";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
