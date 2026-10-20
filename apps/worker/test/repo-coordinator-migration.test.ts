@@ -208,4 +208,72 @@ describe("RepoCoordinator legacy read-through migration (Slice 3)", () => {
       expect(migrationRecord).toHaveLength(0);
     });
   });
+
+  it("cancels legacy DO alarm and marks migrated even on empty export path (cloud-factory-cf-4l5k)", async () => {
+    const emptyRepo = "empty-org/empty-repo";
+    const prefixedRepo = `github:${emptyRepo}`;
+
+    const legacyStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(emptyRepo));
+    await runInDurableObject(legacyStub, async (_instance, state) => {
+      await state.storage.setAlarm(Date.now() + 60_000);
+    });
+
+    const prefixedStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(prefixedRepo));
+    const res = await prefixedStub.fetch("https://repo-coordinator.internal/stats");
+    expect(res.status).toBe(200);
+
+    await runInDurableObject(legacyStub, async (_instance, state) => {
+      const alarm = await state.storage.getAlarm();
+      expect(alarm).toBeNull();
+      const legacyMigration = state.storage.sql.exec<{ name: string }>(
+        "SELECT name FROM _schema_migrations WHERE name = 'migrated_to_prefixed'",
+      ).toArray();
+      expect(legacyMigration).toHaveLength(1);
+    });
+  });
+
+  it("migrates rows when legacy DO only has event_deliveries (cloud-factory-cf-yubh)", async () => {
+    const delivRepo = "deliv-org/deliv-repo";
+    const prefixedRepo = `github:${delivRepo}`;
+
+    const legacyStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(delivRepo));
+    await runInDurableObject(legacyStub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO event_deliveries (delivery_id, agent_id, status, attempts, updated_at) VALUES (?, ?, ?, ?, ?)",
+        "sole-deliv-1",
+        "agent-sole",
+        "delivered",
+        1,
+        "2026-01-01T00:00:00Z",
+      );
+    });
+
+    const prefixedStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(prefixedRepo));
+    const res = await prefixedStub.fetch("https://repo-coordinator.internal/stats");
+    expect(res.status).toBe(200);
+
+    await runInDurableObject(prefixedStub, (_instance, state) => {
+      const rows = state.storage.sql.exec<{ delivery_id: string }>(
+        "SELECT delivery_id FROM event_deliveries",
+      ).toArray();
+      expect(rows).toEqual([{ delivery_id: "sole-deliv-1" }]);
+    });
+  });
+
+  it("fails closed with 503 when BROKER_CONTROL_KEY is unconfigured (cloud-factory-cf-1xs3)", async () => {
+    const unconfRepo = "unconf-org/unconf-repo";
+    const prefixedRepo = `github:${unconfRepo}`;
+
+    const prefixedStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(prefixedRepo));
+    // Clear BROKER_CONTROL_KEY inside the DO instance
+    await runInDurableObject(prefixedStub, (instance) => {
+      (instance as unknown as { env: { BROKER_CONTROL_KEY?: string } }).env.BROKER_CONTROL_KEY = undefined;
+    });
+
+    const res = await prefixedStub.fetch("https://repo-coordinator.internal/stats");
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("BROKER_CONTROL_KEY is unconfigured");
+  });
 });

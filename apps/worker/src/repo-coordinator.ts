@@ -110,7 +110,14 @@ export class RepoCoordinator extends DurableObject<Env> {
       return targetStub.fetch(request);
     }
 
-    await this.ensureMigrated();
+    try {
+      await this.ensureMigrated();
+    } catch (err) {
+      return Response.json(
+        { ok: false, error: err instanceof Error ? err.message : String(err) },
+        { status: 503 },
+      );
+    }
     return this.route(request);
   }
 
@@ -118,18 +125,6 @@ export class RepoCoordinator extends DurableObject<Env> {
     const controlKey = this.env.BROKER_CONTROL_KEY;
     if (!controlKey || !(await sameSecret(controlKey, request.headers.get("x-factory-control-key")))) {
       return Response.json({ ok: false, error: "unauthorised" }, { status: 401 });
-    }
-
-    const hasRows =
-      (this.sql.exec<{ c: number }>("SELECT COUNT(*) as c FROM memory").toArray()[0]?.c ?? 0) > 0 ||
-      (this.sql.exec<{ c: number }>("SELECT COUNT(*) as c FROM canvas_documents").toArray()[0]?.c ?? 0) > 0 ||
-      (this.sql.exec<{ c: number }>("SELECT COUNT(*) as c FROM webhook_connect").toArray()[0]?.c ?? 0) > 0 ||
-      (this.sql.exec<{ c: number }>("SELECT COUNT(*) as c FROM events").toArray()[0]?.c ?? 0) > 0 ||
-      (this.sql.exec<{ c: number }>("SELECT COUNT(*) as c FROM run_audit").toArray()[0]?.c ?? 0) > 0 ||
-      (this.sql.exec<{ c: number }>("SELECT COUNT(*) as c FROM run_trace").toArray()[0]?.c ?? 0) > 0;
-
-    if (!hasRows) {
-      return Response.json({ ok: true, empty: true, state: null });
     }
 
     const memory = this.sql.exec("SELECT key, value, metadata, created_at, updated_at FROM memory").toArray();
@@ -140,18 +135,29 @@ export class RepoCoordinator extends DurableObject<Env> {
     const run_audit = this.sql.exec("SELECT id, document_id, name, agents, detail, created_at FROM run_audit").toArray();
     const run_trace = this.sql.exec("SELECT id, delivery_id, sequence, step, status, detail, artifact, created_at, ms FROM run_trace").toArray();
 
+    const empty =
+      memory.length === 0 &&
+      canvas_documents.length === 0 &&
+      webhook_connect.length === 0 &&
+      events.length === 0 &&
+      event_deliveries.length === 0 &&
+      run_audit.length === 0 &&
+      run_trace.length === 0;
+
     return Response.json({
       ok: true,
-      empty: false,
-      state: {
-        memory,
-        canvas_documents,
-        webhook_connect,
-        events,
-        event_deliveries,
-        run_audit,
-        run_trace,
-      },
+      empty,
+      state: empty
+        ? null
+        : {
+            memory,
+            canvas_documents,
+            webhook_connect,
+            events,
+            event_deliveries,
+            run_audit,
+            run_trace,
+          },
     });
   }
 
@@ -179,9 +185,12 @@ export class RepoCoordinator extends DurableObject<Env> {
     if (migrationRow.length > 0) return;
 
     const controlKey = this.env.BROKER_CONTROL_KEY;
-    if (!controlKey) return;
-
     const legacyName = parsed.repository;
+    if (!controlKey) {
+      console.error(`Migration blocked for ${legacyName}: BROKER_CONTROL_KEY is unconfigured`);
+      throw new Error(`BROKER_CONTROL_KEY is unconfigured: migration for ${legacyName} cannot proceed`);
+    }
+
     try {
       const legacyStub = this.env.REPO_COORDINATOR.get(this.env.REPO_COORDINATOR.idFromName(legacyName));
       const res = await legacyStub.fetch("https://repo-coordinator.internal/legacy/export", {
@@ -206,6 +215,17 @@ export class RepoCoordinator extends DurableObject<Env> {
           "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
           Date.now(),
         );
+        try {
+          const ackRes = await legacyStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
+            method: "POST",
+            headers: { "x-factory-control-key": controlKey },
+          });
+          if (!ackRes.ok) {
+            console.error(`Legacy ack-migrated failed on empty path for ${legacyName} with status ${ackRes.status}`);
+          }
+        } catch (ackErr) {
+          console.error(`Legacy ack-migrated network error on empty path for ${legacyName}:`, ackErr);
+        }
         return;
       }
 
@@ -263,12 +283,15 @@ export class RepoCoordinator extends DurableObject<Env> {
 
       // Tell legacy DO to cancel its alarm and mark itself migrated
       try {
-        await legacyStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
+        const ackRes = await legacyStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
           method: "POST",
           headers: { "x-factory-control-key": controlKey },
         });
-      } catch {
-        // Best effort
+        if (!ackRes.ok) {
+          console.error(`Legacy ack-migrated failed for ${legacyName} with status ${ackRes.status}`);
+        }
+      } catch (ackErr) {
+        console.error(`Legacy ack-migrated network error for ${legacyName}:`, ackErr);
       }
 
       if (this.eventQueue.hasDue()) {
@@ -569,7 +592,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
 
     const normalised: NormalisedEvent = normaliseEvent(provider, payload, request.headers);
-    const routedRepository = request.headers.get("x-factory-repository");
+    const routedRepository = request.headers.get("x-factory-repository") ?? this.ctx.id.name ?? null;
     const repository = normalised.repository !== "unknown"
       ? normalised.repository
       : (routedRepository ?? "unknown");

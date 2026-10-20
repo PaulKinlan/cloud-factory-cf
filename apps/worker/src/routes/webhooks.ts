@@ -65,7 +65,7 @@ export async function routeWebhooks(
     `https://repo-coordinator.internal/events?provider=${encodeURIComponent(provider)}`,
     {
       method: "POST",
-      headers: forwardableHeaders(request.headers, `${owner}/${repo}`),
+      headers: forwardableHeaders(request.headers, repoKey),
       body: await request.text(),
     },
   );
