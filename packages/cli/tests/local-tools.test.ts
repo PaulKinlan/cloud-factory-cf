@@ -12,12 +12,10 @@ test('createLocalTools: provides file operations and blocks path traversal', asy
     const writeTool = tools.find((t) => t.name === 'write_file')!;
     const readTool = tools.find((t) => t.name === 'read_file')!;
     const listTool = tools.find((t) => t.name === 'list_files')!;
-    const execTool = tools.find((t) => t.name === 'exec_command')!;
 
     assert.ok(writeTool);
     assert.ok(readTool);
     assert.ok(listTool);
-    assert.ok(execTool);
 
     // Write file
     const writeRes = (await writeTool.handler({ path: 'sub/test.txt', content: 'hello world' })) as any;
@@ -64,10 +62,6 @@ test('createLocalTools: provides file operations and blocks path traversal', asy
       /Path traversal denied/,
     );
     await fs.rm(outsideDir, { recursive: true, force: true });
-
-    // Exec command
-    const execRes = (await execTool.handler({ command: 'node -e "console.log(12345)"' })) as any;
-    assert.match(execRes.stdout, /12345/);
 
     // Test explicit unsandboxed mode (sandbox: 'none') still enforces basic text containment checks
     const unsandboxedTools = createLocalTools({ cwd: tmpDir, sandbox: 'none' });
@@ -139,6 +133,10 @@ test('createLocalTools: exec_command isolation under bubblewrap', async (t) => {
     const tools = createLocalTools({ cwd: tmpDir });
     const execTool = tools.find((t2) => t2.name === 'exec_command')!;
     assert.ok(execTool);
+
+    // The sandboxed command runs for real through bwrap.
+    const execRes = (await execTool.handler({ command: 'node -e "console.log(12345)"' })) as any;
+    assert.match(execRes.stdout, /12345/);
 
     // Test bwrap sandbox blocks host filesystem mutations from dynamic code (fixes cloud-factory-cf-a9h)
     const hostEscapePath = path.join(os.tmpdir(), 'cf-escape-test-host');
