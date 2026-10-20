@@ -129,6 +129,16 @@ vite build instead of three. A consequence worth knowing: `npm test` on its own 
 longer builds the canvas bundle, so **`npm run ci` (or `fleet-check`) is the entry
 point from a clean tree**; that was already the rule for `packages/sdk/dist`.
 
+The fast gate is an entry point too (`cloud-factory-cf-i9mx`). `scripts/changed-tests.sh`
+builds the `dist` its suite imports, and only what is missing: `canvas-model` for
+`apps/web`; `canvas-model`, `sdk` and the `apps/web` bundle for `apps/worker`, whose
+vitest config binds `ASSETS` to it. A warm worktree pays one `[ -d ]`; a fresh one pays
+**3.6s** once (measured 2026-10-20: three `-w` builds from no `dist`). A build failure
+is a gate FAILURE carrying its log, because a suite run against a missing artifact says
+nothing about the delta — a fresh implementer worktree went red on
+`test/assets.test.ts` (404 from the asset layer) for exactly that reason, and the same
+tree went green once `apps/web/dist` existed.
+
 ## Budgets
 
 - Fast tier target: **≤ 60s**. Escalate before it crosses that on an ordinary

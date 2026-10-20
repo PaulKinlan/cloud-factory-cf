@@ -183,6 +183,53 @@ has_test_files() { # <workspace> — is there anything for its runner to pick up
   [ -n "$(find "$1" -type f \( -name '*.test.*' -o -name '*.spec.*' \) -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ]
 }
 
+# ---------------------------------------------------------------------------
+# Build preconditions (cloud-factory-cf-i9mx)
+#
+# dist/ is gitignored, but a workspace's suite imports its dependencies through their
+# dist entry points (`@factory-cloud/sdk`, `@factory-cloud/canvas-model`) and the
+# worker's vitest config binds ASSETS to `apps/web/dist`. A worktree that has never
+# been built therefore fails for a MISSING ARTIFACT, not for a defect in the change:
+# a fresh implementer worktree got a red from `test/assets.test.ts` and could not even
+# resolve `@factory-cloud/sdk`, and the same tree went green once it was built.
+#
+# So build exactly the dist a workspace needs, and only when it is missing: warm
+# worktrees pay one `[ -d ]`, a fresh one pays the tsc/vite build once (~3s). A build
+# failure is a gate FAILURE with its log — the suites below would prove nothing.
+# ---------------------------------------------------------------------------
+BUILD_LOG="${TMPDIR:-/tmp}/changed-tests-build.$$.log"
+trap 'rm -f "$BUILD_LOG"' EXIT
+ensure_dist() { # <dir> <npm workspace name>
+  local dir=$1 name=$2
+  [ -d "$dir/dist" ] && return 0
+  # The gate self-test drives fake runners: no build config, nothing to build.
+  [ -f "$dir/tsconfig.build.json" ] || [ -f "$dir/vite.config.ts" ] || return 0
+  echo "changed-tests: building ${name} — ${dir}/dist is missing (a fresh worktree has no build artifacts)"
+  if ! npm run build -w "$name" >>"$BUILD_LOG" 2>&1; then
+    echo "changed-tests: FAIL ${dir} did not build, so its suite cannot say anything about this delta. Log: $BUILD_LOG" >&2
+    tail -20 "$BUILD_LOG" >&2
+    return 1
+  fi
+}
+
+ensure_workspace_deps() { # <workspace> — the dist its own suite needs
+  case "$1" in
+    apps/web) ensure_dist packages/canvas-model @factory-cloud/canvas-model ;;
+    apps/worker)
+      ensure_dist packages/canvas-model @factory-cloud/canvas-model || return 1
+      ensure_dist packages/sdk @factory-cloud/sdk || return 1
+      ensure_dist apps/web @factory-cloud/web ;;
+    packages/cli) ensure_dist packages/sdk @factory-cloud/sdk ;;
+  esac
+}
+
+run_ws_tests() { # <workspace> <command...> — build what it needs, then run it there
+  local ws=$1
+  shift
+  ensure_workspace_deps "$ws" || return 1
+  ( cd "$ws" && "$@" )
+}
+
 run_smoke() { # <reason>
   echo "changed-tests: $1 — running the smoke set"
   if [ "$LIST" -eq 1 ]; then
@@ -193,12 +240,12 @@ run_smoke() { # <reason>
   # A workspace whose tests were just deleted has nothing for vitest to find, and
   # vitest exits 1 on that: name it as a no-op instead of a false red.
   if has_test_files apps/web; then
-    (cd apps/web && npx vitest run) || smoke_status=1
+    run_ws_tests apps/web npx vitest run || smoke_status=1
   else
     echo "changed-tests: apps/web: no test files remain — skipped in the smoke set"
   fi
   if [ -f apps/worker/test/worker.test.ts ] || [ -f apps/worker/test/assets.test.ts ]; then
-    (cd apps/worker && npx vitest run test/worker.test.ts test/assets.test.ts) || smoke_status=1
+    run_ws_tests apps/worker npx vitest run test/worker.test.ts test/assets.test.ts || smoke_status=1
   else
     echo "changed-tests: apps/worker: smoke tests removed — skipped in the smoke set"
   fi
@@ -313,8 +360,8 @@ for ws in "${WS_ORDER[@]}"; do
     fi
     echo "changed-tests: ${ws}: whole suite (test-file delta: $(echo "$ws_tests" | tr '\n' ' '))"
     ran=$((ran + 1))
-    if [ "$kind" = "vitest" ]; then (cd "$ws" && npx vitest run) || status=1
-    else (cd "$ws" && npm test --silent) || status=1; fi
+    if [ "$kind" = "vitest" ]; then run_ws_tests "$ws" npx vitest run || status=1
+    else run_ws_tests "$ws" npm test --silent || status=1; fi
     continue
   fi
 
@@ -342,7 +389,7 @@ for ws in "${WS_ORDER[@]}"; do
       continue
     fi
     ran=$((ran + 1))
-    (cd "$ws" && npx vitest run) || status=1
+    run_ws_tests "$ws" npx vitest run || status=1
     continue
   fi
 
@@ -353,7 +400,7 @@ for ws in "${WS_ORDER[@]}"; do
       continue
     fi
     ran=$((ran + 1))
-    (cd "$ws" && npx vitest run --changed "$BASE") || status=1
+    run_ws_tests "$ws" npx vitest run --changed "$BASE" || status=1
     continue
   fi
 
@@ -361,7 +408,7 @@ for ws in "${WS_ORDER[@]}"; do
   if [ "$LIST" -eq 1 ]; then echo "changed-tests: ${ws}: whole suite (${kind})"; continue; fi
   echo "changed-tests: ${ws}: whole suite (${kind})"
   ran=$((ran + 1))
-  (cd "$ws" && npm test --silent) || status=1
+  run_ws_tests "$ws" npm test --silent || status=1
 done
 
 if [ "$selftest_wanted" -eq 1 ]; then
