@@ -547,7 +547,7 @@ describe("mountConnectGate and repo selector population (cloud-factory-cf-7gm)",
       { fullName: "octodev/widget-service", owner: "octodev", name: "widget-service" },
     ];
 
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/repos")) {
         return new Response(JSON.stringify({ ok: true, count: 1, repositories: testRepos }), {
@@ -590,6 +590,84 @@ describe("mountConnectGate and repo selector population (cloud-factory-cf-7gm)",
 
       // Verify URL clean-up occurred
       expect(mockWindow.history.replaceState).toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("populates the repo select from the session cookie after a 1-click connect, with no control key typed (cloud-factory-cf-d33)", async () => {
+    const { doc, elements } = createMockDom();
+    const testRepos = [{ fullName: "octodev/widget-service", owner: "octodev", name: "widget-service" }];
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/repos")) {
+        return new Response(JSON.stringify({ ok: true, count: 1, repositories: testRepos }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    const mockWindow = {
+      location: new URL("https://factory.example/?connected=1&owner=octodev"),
+      history: { replaceState: vi.fn() },
+    };
+    vi.stubGlobal("window", mockWindow);
+
+    try {
+      // The browser holds a session cookie for this account; it never holds the key.
+      expect(elements["#connect-key"].value).toBe("");
+      const gate = mountConnectGate(doc as any, {
+        base: "https://factory.example",
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      expect(gate).toBeDefined();
+
+      await vi.waitFor(() => {
+        expect(elements["#connect-repo-select"].hidden).toBe(false);
+      });
+
+      expect(elements["#connect-repo-select"].children[0].value).toBe("octodev/widget-service");
+
+      const apiCall = fetchImpl.mock.calls.find((call) => String(call[0]).includes("/api/repos"));
+      expect(apiCall).toBeDefined();
+      expect((apiCall![1] as any)?.headers?.["x-factory-control-key"]).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("says why the repository list is empty when /api/repos refuses the browser (cloud-factory-cf-d33)", async () => {
+    const { doc, elements } = createMockDom();
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/repos")) {
+        return new Response(JSON.stringify({ ok: false, error: "not authorised to access repository metadata" }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    const mockWindow = {
+      location: new URL("https://factory.example/?connected=1&owner=octodev"),
+      history: { replaceState: vi.fn() },
+    };
+    vi.stubGlobal("window", mockWindow);
+
+    try {
+      mountConnectGate(doc as any, {
+        base: "https://factory.example",
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+
+      await vi.waitFor(() => {
+        expect(elements["#connect-status"].textContent).toContain("Reconnect with GitHub");
+      });
+      expect(elements["#connect-status"].className).toContain("connect-status--warn");
     } finally {
       vi.unstubAllGlobals();
     }

@@ -897,3 +897,96 @@ describe("GitHub OAuth & App Install Flow", () => {
     }
   });
 });
+
+describe("/api/repos: the browser session minted by the connect callback (cloud-factory-cf-d33)", () => {
+  const SESSION_SIGNING_KEY = "test-broker-signing-key"; // BROKER_SIGNING_KEY in vitest.config.ts
+  const hex = (buffer: ArrayBuffer): string =>
+    Array.from(new Uint8Array(buffer))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+  async function sign(data: string): Promise<string> {
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      "raw",
+      enc.encode(SESSION_SIGNING_KEY),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    return hex(await crypto.subtle.sign("HMAC", key, enc.encode(data)));
+  }
+
+  /** Run the real login → callback hop and return the cookies the browser would keep. */
+  async function connect(): Promise<string> {
+    const loginRes = await SELF.fetch("https://example.com/auth/github/login?redirect_uri=/", {
+      redirect: "manual",
+    });
+    expect(loginRes.status).toBe(302);
+    const state = new URL(loginRes.headers.get("location")!).searchParams.get("state")!;
+    const stateCookie = loginRes.headers.get("set-cookie")!.split(";")[0]!;
+
+    const callback = await SELF.fetch(
+      `https://example.com/auth/github/callback?code=mock_code_123&return_to=/&state=${state}`,
+      { headers: { cookie: stateCookie }, redirect: "manual" },
+    );
+    expect(callback.status).toBe(302);
+    const cookies = callback.headers.get("set-cookie") ?? "";
+    expect(cookies, "the state cookie must be cleared").toContain("cf_oauth_state=;");
+    const session = /cf_session=([^;]+)/.exec(cookies)?.[1];
+    expect(session, "the callback must mint a session for the connected account").toBeDefined();
+    return `cf_session=${session}`;
+  }
+
+  it("reads the connected account's repositories from the session cookie alone, without the control key", async () => {
+    const cookie = await connect();
+
+    const own = await SELF.fetch("https://example.com/api/repos?owner=octodev", { headers: { cookie } });
+    expect(own.status).toBe(200);
+    const data = (await own.json()) as any;
+    expect(data.ok).toBe(true);
+    expect(data.repositories.map((repo: any) => repo.fullName)).toEqual([
+      "octodev/widget-service",
+      "octodev/secret-project",
+    ]);
+
+    // No ?owner= means "my repositories" — the 1-click path after the OAuth return.
+    const implicit = await SELF.fetch("https://example.com/api/repos", { headers: { cookie } });
+    expect(implicit.status).toBe(200);
+    expect(((await implicit.json()) as any).count).toBe(2);
+  });
+
+  it("refuses another account's repositories even with a valid session, and still accepts the control key", async () => {
+    const cookie = await connect();
+
+    const other = await SELF.fetch("https://example.com/api/repos?owner=victimorg", { headers: { cookie } });
+    expect(other.status).toBe(403);
+    expect(((await other.json()) as any).error).toContain("another account");
+
+    // The machine contract is unchanged: the control key still reads any owner.
+    const machine = await SELF.fetch("https://example.com/api/repos?owner=octodev", {
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(machine.status).toBe(200);
+  });
+
+  it("refuses forged and expired sessions, and clears the state cookie on success", async () => {
+    const exp = Math.floor(Date.now() / 1000) + 60;
+    const forged = await SELF.fetch("https://example.com/api/repos?owner=octodev", {
+      headers: { cookie: `cf_session=octodev.${exp}.${"0".repeat(64)}` },
+    });
+    expect(forged.status).toBe(401);
+
+    const past = Math.floor(Date.now() / 1000) - 10;
+    const expired = await SELF.fetch("https://example.com/api/repos?owner=octodev", {
+      headers: { cookie: `cf_session=octodev.${past}.${await sign(`octodev.${past}`)}` },
+    });
+    expect(expired.status).toBe(401);
+
+    // A correctly signed cookie for a login cannot be retargeted at another owner.
+    const retargeted = await SELF.fetch("https://example.com/api/repos?owner=victimorg", {
+      headers: { cookie: `cf_session=victimorg.${exp}.${await sign(`octodev.${exp}`)}` },
+    });
+    expect(retargeted.status).toBe(401);
+  });
+});

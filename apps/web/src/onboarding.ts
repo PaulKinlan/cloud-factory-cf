@@ -293,7 +293,18 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
       const res = await (options.fetchImpl ?? fetch)(`${base}/api/repos?owner=${encodeURIComponent(owner)}`, {
         headers,
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        // Silence here is what made the 1-click flow look broken without saying so
+        // (cloud-factory-cf-d33): the callback redirects with `connected=1&owner=…` and
+        // the list used to stay empty for an operator who had not pasted a control key.
+        setStatus(
+          res.status === 401
+            ? "Reconnect with GitHub to load your repositories"
+            : `Could not load authorized repositories (HTTP ${res.status})`,
+          "warn",
+        );
+        return;
+      }
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
         repositories?: Array<{ fullName: string; owner: string; name: string }>;
