@@ -42,12 +42,32 @@ JSON
 # `run` reports it ran and exits $FAKE_VITEST_RC.
 case "${1:-}" in
   list) [ -n "${FAKE_SELECT:-}" ] && printf '%s\n' $FAKE_SELECT; exit 0 ;;
-  run) echo "FAKE vitest run in $(basename "$PWD")"; exit "${FAKE_VITEST_RC:-0}" ;;
+  run) echo "FAKE vitest run in $(basename "$PWD")"
+       [ -n "${FAKE_BUILD_LOG:-}" ] && echo "run $(basename "$PWD")" >> "$FAKE_BUILD_LOG"
+       exit "${FAKE_VITEST_RC:-0}" ;;
   *) exit 0 ;;
 esac
 SH
+    # Fake npm. `run build -w <pkg>` is the gate's dist precondition (cloud-factory-cf-
+    # i9mx): it records the package in $FAKE_BUILD_LOG, creates the dist that package
+    # would ship, and fails with $FAKE_BUILD_RC when that is set. Everything else is a
+    # test run.
     cat > node_modules/.bin/npm <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = "run" ] && [ "${2:-}" = "build" ]; then
+  pkg="${4:-}"
+  [ -n "${FAKE_BUILD_LOG:-}" ] && echo "build ${pkg}" >> "$FAKE_BUILD_LOG"
+  if [ "${FAKE_BUILD_RC:-0}" != "0" ]; then
+    echo "fake build error: ${pkg}" >&2
+    exit "$FAKE_BUILD_RC"
+  fi
+  case "$pkg" in
+    @factory-cloud/web) mkdir -p apps/web/dist && printf 'built\n' > apps/web/dist/index.html ;;
+    @factory-cloud/sdk) mkdir -p packages/sdk/dist && printf 'built\n' > packages/sdk/dist/index.js ;;
+    @factory-cloud/canvas-model) mkdir -p packages/canvas-model/dist && printf 'built\n' > packages/canvas-model/dist/index.js ;;
+  esac
+  exit 0
+fi
 echo "FAKE npm test in $(basename "$PWD")"; exit "${FAKE_NPM_RC:-0}"
 SH
     chmod +x node_modules/.bin/vitest node_modules/.bin/npm
@@ -56,6 +76,8 @@ SH
     for ws in apps/web apps/worker; do
       mkdir -p "$ws/test" "$ws/src"
       printf '{ "name": "%s", "scripts": { "test": "vitest run" } }\n' "$ws" > "$ws/package.json"
+      # apps/web is a real bundler workspace: the gate builds it when dist is missing.
+      [ "$ws" = "apps/web" ] && printf 'export default {};\n' > "$ws/vite.config.ts"
       printf 'export const a = 1;\n' > "$ws/src/m.ts"
       printf 'export const entry = 1;\n' > "$ws/src/main.ts"
       printf 'import { a } from "../src/m";\nimport { test } from "vitest";\ntest("x", () => { void a; });\n' > "$ws/test/a.test.ts"
@@ -65,6 +87,14 @@ SH
     # the smoke set names these two worker files explicitly
     for f in worker assets; do
       printf 'export {};\n' > "apps/worker/test/$f.test.ts"
+    done
+    # The buildable packages apps/worker imports through their dist entry points; they
+    # have a build script and no tests of their own (kind: none).
+    for pkg in canvas-model sdk; do
+      mkdir -p "packages/$pkg/src"
+      printf '{ "name": "@factory-cloud/%s", "scripts": { "build": "tsc -p tsconfig.build.json" } }\n' "$pkg" > "packages/$pkg/package.json"
+      printf '{}\n' > "packages/$pkg/tsconfig.build.json"
+      printf 'export const p = 1;\n' > "packages/$pkg/src/index.ts"
     done
     mkdir -p packages/specp/tests packages/specp/src
     printf '{ "name": "specp", "scripts": { "test": "node --test tests/**/*.spec.ts" } }\n' > packages/specp/package.json
@@ -285,6 +315,42 @@ reset_tree
 printf 'export const y = 2;\n' > "$FIX/packages/plain/src/probe.ts"
 run_gate --list
 check "--list reports the FAIL verdict without running suites" 'test "$RC" -ne 0 && err_has "no test script" && out_lacks "FAKE"'
+reset_tree
+
+# 12-12c. The dist preconditions (cloud-factory-cf-i9mx, reviewer note cloud-factory-cf-
+#     nbeb): a workspace whose suite imports a missing dist must have it built BEFORE the
+#     suite runs, an existing dist must not be rebuilt, and a failed build must FAIL the
+#     gate instead of letting the suite speak for a tree it cannot load.
+#     apps/worker is the workspace with the whole chain: canvas-model, sdk, then the web
+#     bundle its ASSETS binding points at.
+export FAKE_BUILD_LOG="$TMP/build.log"
+rm -rf "$FIX/packages/canvas-model/dist" "$FIX/packages/sdk/dist" "$FIX/apps/web/dist"
+: > "$FAKE_BUILD_LOG"
+printf '\n// touch\n' >> "$FIX/apps/worker/test/worker.test.ts"
+run_gate
+check "a missing dist is built before the suite that imports it" 'test "$RC" -eq 0 && out_has "building @factory-cloud/canvas-model" && out_has "FAKE vitest run in worker"'
+check "the chain builds in dependency order, all before the suite" 'b1=$(grep -n "^build @factory-cloud/canvas-model\$" "$FAKE_BUILD_LOG" | cut -d: -f1); b2=$(grep -n "^build @factory-cloud/sdk\$" "$FAKE_BUILD_LOG" | cut -d: -f1); b3=$(grep -n "^build @factory-cloud/web\$" "$FAKE_BUILD_LOG" | cut -d: -f1); r=$(grep -n "^run worker\$" "$FAKE_BUILD_LOG" | cut -d: -f1); test -n "$b1" && test -n "$b2" && test -n "$b3" && test -n "$r" && test "$b1" -lt "$b2" && test "$b2" -lt "$b3" && test "$b3" -lt "$r"'
+check "the built dists are in place for the suite" 'test -f "$FIX/packages/canvas-model/dist/index.js" && test -f "$FIX/packages/sdk/dist/index.js" && test -f "$FIX/apps/web/dist/index.html"'
+reset_tree
+
+for d in packages/canvas-model/dist packages/sdk/dist apps/web/dist; do mkdir -p "$FIX/$d"; done
+printf 'built\n' > "$FIX/packages/canvas-model/dist/index.js"
+printf 'built\n' > "$FIX/packages/sdk/dist/index.js"
+printf 'built\n' > "$FIX/apps/web/dist/index.html"
+: > "$FAKE_BUILD_LOG"
+printf '\n// touch\n' >> "$FIX/apps/worker/test/worker.test.ts"
+run_gate
+check "an existing dist is not rebuilt (a warm worktree pays nothing)" 'test "$RC" -eq 0 && out_lacks "building @factory-cloud/" && ! grep -q "^build " "$FAKE_BUILD_LOG" && out_has "FAKE vitest run in worker"'
+reset_tree
+
+: > "$FAKE_BUILD_LOG"
+printf '\n// touch\n' >> "$FIX/apps/worker/test/worker.test.ts"
+export FAKE_BUILD_RC=1
+run_gate
+unset FAKE_BUILD_RC
+check "a failed dist build FAILs the gate and names the build" 'test "$RC" -ne 0 && err_has "did not build"'
+check "the suite never runs against a missing dist" 'out_lacks "FAKE vitest run in worker"'
+unset FAKE_BUILD_LOG
 reset_tree
 
 echo "selftest: ${checks} checks, ${fails} failure(s)"
