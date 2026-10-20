@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { githubRequest } from "./support/webhook";
+import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 
 /**
  * Auto-drain with the SDK review engine (cloud-factory-cf-7or.1 graft).
@@ -61,7 +62,7 @@ async function provision(action: string): Promise<void> {
 }
 
 function coordinator() {
-  return env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(REPOSITORY));
+  return getRepoCoordinator(env, REPOSITORY, "github");
 }
 
 async function armedAt(): Promise<number | null> {

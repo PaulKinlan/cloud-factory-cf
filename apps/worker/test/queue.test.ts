@@ -1,11 +1,12 @@
 import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { githubRequest } from "./support/webhook";
+import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 
 const COORDINATOR_URL = "https://repo-coordinator.internal";
 
 function coordinator(repository: string) {
-  return env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+  return getRepoCoordinator(env, repository, "github");
 }
 
 async function queue(repository: string, deliveryIds: string[]): Promise<void> {

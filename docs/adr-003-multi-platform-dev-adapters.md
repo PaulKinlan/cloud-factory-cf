@@ -46,8 +46,11 @@ Slices:
    adapters read the delivery id and event name from request headers, which are not
    stored (review finding `06p`). Rows written before the columns exist read back with
    `kind: null`.
-3. DO addressing: prefix `RepoCoordinator` names with the platform and migrate the
-   existing `owner/repo` rows.
+3. **Done (6to.3):** DO addressing: prefix `RepoCoordinator` names with the
+   platform via `repositoryKey()` from `@factory-cloud/sdk` (`github:org/repo`,
+   `gitlab:group/project`, `gitea:org/repo`), and migrate existing un-prefixed
+   GitHub rows via read-through migration on first access (see
+   `docs/migration-repo-coordinator-prefixing.md`).
 4. **Done (6to.4), pipeline half:** `decideAction`/`actionsFor` reason about the
    canonical event (`canonicalView()` → `kind` + `canonicalAction`) instead of the
    provider's event names, so a GitLab `Merge Request Hook`/`open` and a Gitea

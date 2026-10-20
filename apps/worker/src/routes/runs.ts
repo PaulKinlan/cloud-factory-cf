@@ -3,6 +3,7 @@ import { corePrReviewer, drainRepository } from "../pipeline";
 import { reviewRuntime } from "../review/model";
 import { traceSink } from "../events";
 import { sameSecret } from "../secrets";
+import { getRepoCoordinator } from "../repo-coordinator-addressing";
 
 export const RUN_PATH = /^\/runs\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
 
@@ -50,7 +51,8 @@ export async function routeRun(
     // and the manual lever behave the same way (cloud-factory-cf-7or graft).
     reviewRuntime(env) !== undefined;
 
-  const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+  const platform = url.searchParams.get("platform");
+  const coordinator = getRepoCoordinator(env, repository, platform);
   const report = await drainRepository(
     {
       repository,

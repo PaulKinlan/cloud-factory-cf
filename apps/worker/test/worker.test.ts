@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { githubRequest, pushPayload, signBody, TEST_SECRET } from "./support/webhook";
+import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 
 describe("worker entry point", () => {
   it("serves a health response", async () => {
@@ -42,7 +43,7 @@ describe("worker entry point", () => {
     expect(duplicate.status).toBe(200);
     await expect(duplicate.json()).resolves.toMatchObject({ ok: true, duplicate: true });
 
-    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/widgets"));
+    const stub = getRepoCoordinator(env, "acme/widgets", "github");
     const queued = await stub.fetch("https://repo-coordinator.internal/events");
     const body = (await queued.json()) as {
       count: number;
@@ -67,8 +68,8 @@ describe("worker entry point", () => {
     const response = await SELF.fetch(await githubRequest("worker-other-repo-1", "acme/gadgets"));
     expect(response.status).toBe(202);
 
-    const widgets = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/widgets"));
-    const gadgets = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/gadgets"));
+    const widgets = getRepoCoordinator(env, "acme/widgets", "github");
+    const gadgets = getRepoCoordinator(env, "acme/gadgets", "github");
 
     const widgetsEvents = (await (
       await widgets.fetch("https://repo-coordinator.internal/events")

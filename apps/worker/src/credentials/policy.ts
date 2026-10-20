@@ -1,3 +1,5 @@
+import { parseRepositoryKey } from "@factory-cloud/sdk";
+
 /**
  * Credential broker policy: the closed set of authenticated calls an agent may
  * request, and how each one is turned into an upstream request.
@@ -330,9 +332,11 @@ export function credentialHeadersFor(service: string, credential: string): Recor
   return SERVICES[service]?.headers(credential) ?? {};
 }
 
-/** `owner/name`, and nothing that could escape a path segment. */
+/** `owner/name`, and nothing that could escape a path segment. Supports platform-prefixed keys (github:owner/name). */
 export function encodeRepository(repository: string, encoding: ServiceDefinition["repositoryEncoding"]): string | null {
-  const match = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/.exec(repository.trim());
+  const parsed = parseRepositoryKey(repository.trim());
+  const repoPath = parsed ? parsed.repository : repository.trim();
+  const match = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/.exec(repoPath);
   if (!match) return null;
   const value = `${match[1]}/${match[2]}`;
   return encoding === "url-encoded" ? encodeURIComponent(value) : value;

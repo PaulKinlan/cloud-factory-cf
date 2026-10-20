@@ -1,5 +1,6 @@
 import type { Env } from "../env";
 import { MAX_WEBHOOK_BYTES } from "../webhooks";
+import { resolveRepositoryKey } from "../repo-coordinator-addressing";
 
 export const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab|gitea)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
 
@@ -55,8 +56,9 @@ export async function routeWebhooks(
 
   // One Durable Object per repository: the coordinator serialises every
   // event for a repo, which is what makes dedupe cheap and ordering real.
+  const repoKey = resolveRepositoryKey(`${owner}/${repo}`, provider);
   const stub = env.REPO_COORDINATOR.get(
-    env.REPO_COORDINATOR.idFromName(`${owner}/${repo}`),
+    env.REPO_COORDINATOR.idFromName(repoKey),
   );
 
   const forwarded = new Request(
