@@ -6,6 +6,7 @@ import * as os from 'node:os';
 import * as http from 'node:http';
 import * as crypto from 'node:crypto';
 import { runPrReview, sendWebhook, runCli, parseArgs } from '../src/index.ts';
+import { handleReviewCommand } from '../src/commands/review.ts';
 
 test('parseArgs: parses review and webhook commands correctly', () => {
   const reviewParsed = parseArgs([
@@ -767,4 +768,38 @@ test('runPrReview: retries a refused review event as COMMENT so the verdict stil
     else process.env['GITHUB_ACTIONS'] = savedEnv;
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
+});
+
+test('handleReviewCommand: a context holding the offline default never pins the review target (cloud-factory-cf-n2h0)', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-handler-repo-'));
+  const eventFilePath = path.join(tmpDir, 'event.json');
+  await fs.writeFile(
+    eventFilePath,
+    JSON.stringify({
+      number: 3,
+      pull_request: { number: 3, title: 'docs: y', user: { login: 'writer' } },
+      repository: { full_name: 'PaulKinlan/cloud-factory-cf' },
+    }),
+    'utf8',
+  );
+
+  const logs: string[] = [];
+  // This is exactly what runCli hands the handler: local/local-repo unless --repo was given.
+  const code = await handleReviewCommand(
+    { command: 'review', eventFile: eventFilePath, dryRun: true } as never,
+    {
+      cwd: tmpDir,
+      owner: 'local',
+      name: 'local-repo',
+      io: { stdout: (m) => logs.push(m), stderr: (m) => logs.push(m) },
+    },
+  );
+
+  assert.equal(code, 0);
+  const prepared = logs.find((l) => l.includes('(dry-run) Review prepared'));
+  assert.ok(prepared, 'the handler should prepare a review');
+  assert.ok(prepared!.includes('PaulKinlan/cloud-factory-cf'), `got: ${prepared}`);
+  assert.ok(!prepared!.includes('local/local-repo'));
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
 });
