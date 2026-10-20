@@ -1,5 +1,6 @@
 import type { Env } from "../env";
 import { sameSecret } from "../secrets";
+import { getRepoCoordinator } from "../repo-coordinator-addressing";
 
 export const AUDIT_PATH =
   /^\/audit\/(?<domain>events|runs)\/(?<owner>[^/]+)\/(?<repo>[^/]+)(?:\/(?<id>[^/]+))?$/;
@@ -46,7 +47,8 @@ export async function handleAudit(
   }
 
   const repository = `${owner}/${repo}`;
-  const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+  const platform = url.searchParams.get("platform");
+  const coordinator = getRepoCoordinator(env, repository, platform);
 
   if (domain === "runs") {
     if (id !== undefined) {

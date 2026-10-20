@@ -3,6 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { chooseSettlement, planAgents, sourceMatches, uniqueClaims } from "../src/canvas-runs";
 import { sinksFor } from "../src/pipeline";
 import { signBody, TEST_SECRET } from "./support/webhook";
+import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
+
+function coordinator(repository: string) {
+  return getRepoCoordinator(env, repository, "github");
+}
 
 /**
  * A stored canvas document is the agent configuration, so this exercises the
@@ -67,8 +72,8 @@ function wiredLayout(options: { prompt?: string; provider?: string; event?: stri
 
 /** The per-(event, agent) delivery ledger a repository's coordinator keeps. */
 async function ledger(repository: string, deliveryId: string): Promise<Array<{ agentId: string; status: string; attempts: number }>> {
-  const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
-  const response = await coordinator.fetch(`https://repo-coordinator.internal/deliveries?deliveryId=${encodeURIComponent(deliveryId)}`);
+  const coord = coordinator(repository);
+  const response = await coord.fetch(`https://repo-coordinator.internal/deliveries?deliveryId=${encodeURIComponent(deliveryId)}`);
   const payload = (await response.json()) as { deliveries?: Array<{ agentId: string; status: string; attempts: number }> };
   return payload.deliveries ?? [];
 }
@@ -149,8 +154,8 @@ function stubUpstream(): { calls: Array<{ url: string; body?: unknown }> } {
 }
 
 async function audit(repository: string): Promise<Array<{ documentId: string; agents: number; detail: unknown }>> {
-  const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
-  const response = await coordinator.fetch("https://repo-coordinator.internal/runs/audit?limit=10");
+  const coord = coordinator(repository);
+  const response = await coord.fetch("https://repo-coordinator.internal/runs/audit?limit=10");
   const payload = (await response.json()) as { runs?: Array<{ documentId: string; agents: number; detail: unknown }> };
   return payload.runs ?? [];
 }
@@ -285,8 +290,8 @@ describe("canvas run route", () => {
     expect(calls).toHaveLength(0);
 
     // The unrelated event is back on the queue for whoever does want it.
-    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
-    const stats = await coordinator.fetch("https://repo-coordinator.internal/stats");
+    const coord = coordinator(repository);
+    const stats = await coord.fetch("https://repo-coordinator.internal/stats");
     const counts = ((await stats.json()) as { counts?: Record<string, number> }).counts ?? {};
     expect(counts["pending"]).toBe(1);
     expect(counts["processing"] ?? 0).toBe(0);
@@ -377,12 +382,12 @@ describe("canvas findings (xkg, mj7, olu)", () => {
 
     // The second delivery was never claimed: a run claims `limit` events for the
     // whole document, so there is nothing left on a lease and no attempt spent.
-    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
-    const stats = await coordinator.fetch("https://repo-coordinator.internal/stats");
+    const coord = coordinator(repository);
+    const stats = await coord.fetch("https://repo-coordinator.internal/stats");
     const counts = ((await stats.json()) as { counts?: Record<string, number> }).counts ?? {};
     expect(counts["processing"] ?? 0).toBe(0);
     expect(counts["pending"]).toBe(1);
-    const events = await coordinator.fetch("https://repo-coordinator.internal/events?limit=10");
+    const events = await coord.fetch("https://repo-coordinator.internal/events?limit=10");
     const listed = ((await events.json()) as { events?: Array<{ deliveryId: string; status: string; attempts: number }> }).events ?? [];
     const deferred = listed.find((event) => event.deliveryId === "limit-2");
     expect(deferred?.status).toBe("pending");
@@ -421,8 +426,8 @@ describe("canvas findings (xkg, mj7, olu)", () => {
     // The second run counts in org memory, which is what the wiring says.
     expect(String((second.calls[0]?.body as { body?: string }).body)).toContain("review #2");
 
-    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
-    const repoMemory = await coordinator.fetch("https://repo-coordinator.internal/memory?scope=repo");
+    const coord = coordinator(repository);
+    const repoMemory = await coord.fetch("https://repo-coordinator.internal/memory?scope=repo");
     expect(((await repoMemory.json()) as { total?: number }).total ?? 0).toBe(0);
   });
 });
@@ -473,8 +478,8 @@ describe("fan-out: one event, several agents (cloud-factory-cf-sdq)", () => {
     // Both agents acted on the same event.
     expect(calls).toHaveLength(2);
     // The event was settled once: it is processed, not pending or processing.
-    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
-    const stats = await coordinator.fetch("https://repo-coordinator.internal/stats");
+    const coord = coordinator(repository);
+    const stats = await coord.fetch("https://repo-coordinator.internal/stats");
     const counts = ((await stats.json()) as { counts?: Record<string, number> }).counts ?? {};
     expect(counts["processed"]).toBe(1);
     expect(counts["processing"] ?? 0).toBe(0);
@@ -492,8 +497,8 @@ describe("fan-out: one event, several agents (cloud-factory-cf-sdq)", () => {
 
     const report = (await (await runDocument(repository, documentId)).json()) as { ran: number; events: number };
     expect(report).toMatchObject({ ran: 0, events: 0 });
-    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
-    const stats = await coordinator.fetch("https://repo-coordinator.internal/stats");
+    const coord = coordinator(repository);
+    const stats = await coord.fetch("https://repo-coordinator.internal/stats");
     const counts = ((await stats.json()) as { counts?: Record<string, number> }).counts ?? {};
     expect(counts["pending"]).toBe(1);
   });
@@ -525,10 +530,10 @@ describe("idempotent delivery across fan-out retries (cloud-factory-cf-eu3)", ()
 
   it("claim/complete decides whether a pair still has work", async () => {
     const repository = "acme/idempotency-ledger";
-    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+    const coord = coordinator(repository);
     const post = async (path: string, body: unknown) =>
       (await (
-        await coordinator.fetch(`https://repo-coordinator.internal${path}`, {
+        await coord.fetch(`https://repo-coordinator.internal${path}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(body),
@@ -672,7 +677,7 @@ describe("one ledger for every runner (cloud-factory-cf-7wj, cloud-factory-cf-lb
     ]);
     // Still queued, with no attempt spent by the drain.
     const stats = (await (
-      await env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository)).fetch(
+      await coordinator(repository).fetch(
         "https://repo-coordinator.internal/stats",
       )
     ).json()) as { counts: Record<string, number> };

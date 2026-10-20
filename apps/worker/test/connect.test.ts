@@ -2,6 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { ConnectStore } from "../src/events/connect";
 import { signBody, TEST_SECRET } from "./support/webhook";
+import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 
 /**
  * Webhook connection evidence (cloud-factory-cf-7gq.1).
@@ -106,7 +107,7 @@ describe("connect evidence", () => {
 
     // The delivery is still queued for the pipeline: recording evidence must not
     // swallow ordinary work.
-    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+    const stub = getRepoCoordinator(env, repository, "github");
     const events = (await (await stub.fetch(`${BASE}/events`)).json()) as {
       events: Array<Record<string, unknown>>;
     };
@@ -116,7 +117,7 @@ describe("connect evidence", () => {
   it("does not queue a ping as work the pipeline would have to skip", async () => {
     const repository = "acme/connect-nopqueue";
     await deliver(repository, "ping", "ping-only", pingBody(repository));
-    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+    const stub = getRepoCoordinator(env, repository, "github");
     const events = (await (await stub.fetch(`${BASE}/events`)).json()) as {
       events: Array<Record<string, unknown>>;
     };

@@ -46,7 +46,7 @@ export function gitlabPayload(deliveryId: string, repository = "acme/widgets") {
 export async function githubRequest(
   deliveryId: string,
   repository = "acme/widgets",
-  overrides: { body?: string; signature?: string } = {},
+  overrides: { body?: string; signature?: string; event?: string } = {},
 ): Promise<Request> {
   const body = overrides.body ?? pushPayload(deliveryId, repository);
   return new Request(`https://example.com/webhooks/github/${repository}`, {
@@ -54,7 +54,7 @@ export async function githubRequest(
     headers: {
       "content-type": "application/json",
       "x-github-delivery": deliveryId,
-      "x-github-event": "pull_request",
+      "x-github-event": overrides.event ?? "pull_request",
       "x-hub-signature-256": overrides.signature ?? (await signBody(TEST_SECRET, body)),
     },
     body,

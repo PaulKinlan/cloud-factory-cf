@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { githubRequest, pushPayload, signBody, TEST_SECRET } from "./support/webhook";
+import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 
 describe("worker entry point", () => {
   it("serves a health response", async () => {
@@ -42,7 +43,7 @@ describe("worker entry point", () => {
     expect(duplicate.status).toBe(200);
     await expect(duplicate.json()).resolves.toMatchObject({ ok: true, duplicate: true });
 
-    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/widgets"));
+    const stub = getRepoCoordinator(env, "acme/widgets", "github");
     const queued = await stub.fetch("https://repo-coordinator.internal/events");
     const body = (await queued.json()) as {
       count: number;
@@ -67,8 +68,8 @@ describe("worker entry point", () => {
     const response = await SELF.fetch(await githubRequest("worker-other-repo-1", "acme/gadgets"));
     expect(response.status).toBe(202);
 
-    const widgets = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/widgets"));
-    const gadgets = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/gadgets"));
+    const widgets = getRepoCoordinator(env, "acme/widgets", "github");
+    const gadgets = getRepoCoordinator(env, "acme/gadgets", "github");
 
     const widgetsEvents = (await (
       await widgets.fetch("https://repo-coordinator.internal/events")
@@ -101,6 +102,24 @@ describe("worker entry point", () => {
         body,
       }),
     );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "repository mismatch" });
+  });
+
+  it("refuses a payload that names a different platform than the endpoint (cloud-factory-cf-29nb)", async () => {
+    const stub = getRepoCoordinator(env, "acme/widgets", "github");
+    const body = pushPayload("mismatch-platform-1", "gitlab:acme/widgets");
+    const response = await stub.fetch("https://repo-coordinator.internal/events?provider=github", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "mismatch-platform-1",
+        "x-github-event": "pull_request",
+        "x-factory-repository": "github:acme/widgets",
+        "x-hub-signature-256": await signBody(TEST_SECRET, body),
+      },
+      body,
+    });
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ error: "repository mismatch" });
   });

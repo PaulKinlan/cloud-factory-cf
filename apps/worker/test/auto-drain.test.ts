@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { githubRequest } from "./support/webhook";
+import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 
 /**
  * Auto-drain with the SDK review engine (cloud-factory-cf-7or.1 graft).
@@ -45,6 +46,7 @@ function stubUpstream(): { calls: Call[] } {
         return new Response(DIFF, { status: 200, headers: { "content-type": "text/plain" } });
       }
       if (url.endsWith("/pulls/11/reviews")) return Response.json({ id: 1 }, { status: 201 });
+      if (url.includes("/issues/") && url.endsWith("/comments")) return Response.json({ id: 1 }, { status: 201 });
       return new Response("unexpected upstream call", { status: 500 });
     }) as unknown as typeof fetch,
   );
@@ -61,7 +63,7 @@ async function provision(action: string): Promise<void> {
 }
 
 function coordinator() {
-  return env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(REPOSITORY));
+  return getRepoCoordinator(env, REPOSITORY, "github");
 }
 
 async function armedAt(): Promise<number | null> {
@@ -137,5 +139,56 @@ describe("auto-drain with the SDK review engine", () => {
     expect(settled.find((event) => event.deliveryId === "sdk-auto-2")?.status).toBe("processed");
     expect(settled.find((event) => event.deliveryId === "sdk-auto-3")?.status).toBe("processed");
     expect(await armedAt()).toBeNull();
+  });
+
+  it("does not review a closed pull request when alarm fires (cloud-factory-cf-jtg9)", async () => {
+    const { calls } = stubUpstream();
+    await provision("pr.diff");
+    await provision("pr.review");
+
+    const response = await SELF.fetch(
+      await githubRequest("sdk-closed-1", REPOSITORY, {
+        body: JSON.stringify({
+          action: "closed",
+          number: 12,
+          pull_request: { number: 12, title: "Closed PR", merged: true },
+          sender: { login: "octocat" },
+          repository: { full_name: REPOSITORY },
+        }),
+      }),
+    );
+    expect(response.status).toBe(202);
+
+    await fireAlarm();
+
+    expect(calls.filter((call) => call.url.endsWith("/reviews"))).toHaveLength(0);
+    const settled = await events();
+    expect(settled.find((event) => event.deliveryId === "sdk-closed-1")?.status).toBe("processed");
+  });
+
+  it("comments on an opened issue when alarm fires (cloud-factory-cf-jtg9)", async () => {
+    const { calls } = stubUpstream();
+    await provision("issue.comment");
+
+    const response = await SELF.fetch(
+      await githubRequest("sdk-issue-1", REPOSITORY, {
+        event: "issues",
+        body: JSON.stringify({
+          action: "opened",
+          number: 25,
+          issue: { number: 25, title: "Help needed" },
+          sender: { login: "octocat" },
+          repository: { full_name: REPOSITORY },
+        }),
+      }),
+    );
+    expect(response.status).toBe(202);
+
+    await fireAlarm();
+
+    const issueCommentCall = calls.find((call) => call.url.endsWith("/issues/25/comments"));
+    expect(issueCommentCall).toBeDefined();
+    const settled = await events();
+    expect(settled.find((event) => event.deliveryId === "sdk-issue-1")?.status).toBe("processed");
   });
 });

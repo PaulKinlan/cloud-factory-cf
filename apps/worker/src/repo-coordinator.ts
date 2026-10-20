@@ -1,11 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
+import { parseRepositoryKey } from "@factory-cloud/sdk";
 import type { Env } from "./env";
 import { planAgents, sourceMatches } from "./canvas-runs";
 import { safeParseJson } from "./events/helpers";
-import { corePrReviewer, drainRepository } from "./pipeline";
-import { reviewRuntime } from "./review/model";
+import { createDefaultExecutionFn, drainRepository } from "./pipeline";
 import { CanvasStore, migrateCanvasTable } from "./canvas-store";
 import { MemoryHandler, migrateMemoryTable } from "./memory";
+import { sameSecret } from "./secrets";
 import {
   ConnectStore,
   EventQueue,
@@ -66,8 +67,11 @@ export class RepoCoordinator extends DurableObject<Env> {
     ctx.blockConcurrencyWhile(async () => {
       this.migrate();
     });
+    const rawName = this.ctx.id.name ?? "";
+    const parsedName = parseRepositoryKey(rawName);
+    const unadornedRepo = parsedName ? parsedName.repository : rawName;
     this.memoryHandler = new MemoryHandler(this.ctx.storage.sql);
-    this.canvasStore = new CanvasStore(this.ctx.storage.sql, this.ctx.id.name ?? "");
+    this.canvasStore = new CanvasStore(this.ctx.storage.sql, unadornedRepo);
     this.deliveryLedger = new DeliveryLedger(this.ctx.storage.sql);
     this.runAuditStore = new RunAuditStore(this.ctx.storage.sql);
     // The trace store broadcasts to this object's open sockets, so a viewer sees a
@@ -75,7 +79,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     this.runTrace = new RunTraceStore(this.ctx.storage.sql, (step) => this.broadcastStep(step));
     // Webhook connection evidence for the onboarding UI: one row per repository,
     // written on every authorised delivery and on the provider's `ping` (7gq).
-    this.connectState = new ConnectStore(this.ctx.storage.sql, this.ctx.id.name ?? "");
+    this.connectState = new ConnectStore(this.ctx.storage.sql, unadornedRepo);
     this.eventQueue = new EventQueue(this.ctx.storage.sql, {
       setAlarm: (ts: number) => this.ctx.storage.setAlarm(ts),
       deleteAlarm: () => this.ctx.storage.deleteAlarm(),
@@ -87,7 +91,215 @@ export class RepoCoordinator extends DurableObject<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const name = this.ctx.id.name ?? "";
+    const isUnprefixed = name.length > 0 && !parseRepositoryKey(name);
+
+    if (url.pathname === "/legacy/export") {
+      return this.exportLegacyState(request);
+    }
+    if (url.pathname === "/legacy/ack-migrated") {
+      return this.ackMigrated(request);
+    }
+
+    if (isUnprefixed) {
+      // Legacy un-prefixed DO: proxy request to platform-prefixed DO (ADR 003 Slice 3)
+      const targetStub = this.env.REPO_COORDINATOR.get(
+        this.env.REPO_COORDINATOR.idFromName(`github:${name}`),
+      );
+      return targetStub.fetch(request);
+    }
+
+    try {
+      await this.ensureMigrated();
+    } catch (err) {
+      return Response.json(
+        { ok: false, error: err instanceof Error ? err.message : String(err) },
+        { status: 503 },
+      );
+    }
     return this.route(request);
+  }
+
+  private async exportLegacyState(request: Request): Promise<Response> {
+    const controlKey = this.env.BROKER_CONTROL_KEY;
+    if (!controlKey || !(await sameSecret(controlKey, request.headers.get("x-factory-control-key")))) {
+      return Response.json({ ok: false, error: "unauthorised" }, { status: 401 });
+    }
+
+    const memory = this.sql.exec("SELECT key, value, metadata, created_at, updated_at FROM memory").toArray();
+    const canvas_documents = this.sql.exec("SELECT id, name, document, created_at, updated_at FROM canvas_documents").toArray();
+    const webhook_connect = this.sql.exec("SELECT id, last_ping_at, last_event_at, last_event, pings, updated_at FROM webhook_connect").toArray();
+    const events = this.sql.exec("SELECT delivery_id, provider, event, action, repository, actor, received_at, payload, status, attempts, available_at, last_error, lease_id, kind, canonical_action FROM events").toArray();
+    const event_deliveries = this.sql.exec("SELECT delivery_id, agent_id, status, attempts, updated_at FROM event_deliveries").toArray();
+    const run_audit = this.sql.exec("SELECT id, document_id, name, agents, detail, created_at FROM run_audit").toArray();
+    const run_trace = this.sql.exec("SELECT id, delivery_id, sequence, step, status, detail, artifact, created_at, ms FROM run_trace").toArray();
+
+    const empty =
+      memory.length === 0 &&
+      canvas_documents.length === 0 &&
+      webhook_connect.length === 0 &&
+      events.length === 0 &&
+      event_deliveries.length === 0 &&
+      run_audit.length === 0 &&
+      run_trace.length === 0;
+
+    return Response.json({
+      ok: true,
+      empty,
+      state: empty
+        ? null
+        : {
+            memory,
+            canvas_documents,
+            webhook_connect,
+            events,
+            event_deliveries,
+            run_audit,
+            run_trace,
+          },
+    });
+  }
+
+  private async ackMigrated(request: Request): Promise<Response> {
+    const controlKey = this.env.BROKER_CONTROL_KEY;
+    if (!controlKey || !(await sameSecret(controlKey, request.headers.get("x-factory-control-key")))) {
+      return Response.json({ ok: false, error: "unauthorised" }, { status: 401 });
+    }
+    this.ctx.storage.deleteAlarm();
+    this.sql.exec(
+      "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('migrated_to_prefixed', ?)",
+      Date.now(),
+    );
+    return Response.json({ ok: true });
+  }
+
+  private async ensureMigrated(): Promise<void> {
+    const name = this.ctx.id.name ?? "";
+    const parsed = parseRepositoryKey(name);
+    if (!parsed || parsed.platform !== "github") return;
+
+    const migrationRow = this.sql.exec<{ name: string }>(
+      "SELECT name FROM _schema_migrations WHERE name = 'legacy_read_through'",
+    ).toArray();
+    if (migrationRow.length > 0) return;
+
+    const controlKey = this.env.BROKER_CONTROL_KEY;
+    const legacyName = parsed.repository;
+    if (!controlKey) {
+      console.error(`Migration blocked for ${legacyName}: BROKER_CONTROL_KEY is unconfigured`);
+      throw new Error(`BROKER_CONTROL_KEY is unconfigured: migration for ${legacyName} cannot proceed`);
+    }
+
+    try {
+      const legacyStub = this.env.REPO_COORDINATOR.get(this.env.REPO_COORDINATOR.idFromName(legacyName));
+      const res = await legacyStub.fetch("https://repo-coordinator.internal/legacy/export", {
+        headers: { "x-factory-control-key": controlKey },
+      });
+      if (!res.ok) {
+        console.error(`Legacy export failed for ${legacyName} with status ${res.status}`);
+        return;
+      }
+      const body = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        empty?: boolean;
+        state?: Record<string, unknown[]>;
+      };
+      if (!body.ok) {
+        console.error(`Legacy export returned not ok for ${legacyName}`);
+        return;
+      }
+
+      if (body.empty) {
+        this.sql.exec(
+          "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
+          Date.now(),
+        );
+        try {
+          const ackRes = await legacyStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
+            method: "POST",
+            headers: { "x-factory-control-key": controlKey },
+          });
+          if (!ackRes.ok) {
+            console.error(`Legacy ack-migrated failed on empty path for ${legacyName} with status ${ackRes.status}`);
+          }
+        } catch (ackErr) {
+          console.error(`Legacy ack-migrated network error on empty path for ${legacyName}:`, ackErr);
+        }
+        return;
+      }
+
+      const s = body.state;
+      if (!s) return;
+
+      this.ctx.storage.transactionSync(() => {
+        for (const m of (s["memory"] as any[]) ?? []) {
+          this.sql.exec(
+            "INSERT OR IGNORE INTO memory (key, value, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            m.key, m.value, m.metadata, m.created_at, m.updated_at,
+          );
+        }
+        for (const c of (s["canvas_documents"] as any[]) ?? []) {
+          this.sql.exec(
+            "INSERT OR IGNORE INTO canvas_documents (id, name, document, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            c.id, c.name, c.document, c.created_at, c.updated_at,
+          );
+        }
+        for (const w of (s["webhook_connect"] as any[]) ?? []) {
+          this.sql.exec(
+            "INSERT OR IGNORE INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            w.id, w.last_ping_at, w.last_event_at, w.last_event, w.pings, w.updated_at,
+          );
+        }
+        for (const e of (s["events"] as any[]) ?? []) {
+          this.sql.exec(
+            "INSERT OR IGNORE INTO events (delivery_id, provider, event, action, repository, actor, received_at, payload, status, attempts, available_at, last_error, lease_id, kind, canonical_action) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            e.delivery_id, e.provider, e.event, e.action, e.repository, e.actor, e.received_at, e.payload, e.status, e.attempts, e.available_at, e.last_error, e.lease_id, e.kind, e.canonical_action,
+          );
+        }
+        for (const d of (s["event_deliveries"] as any[]) ?? []) {
+          this.sql.exec(
+            "INSERT OR IGNORE INTO event_deliveries (delivery_id, agent_id, status, attempts, updated_at) VALUES (?, ?, ?, ?, ?)",
+            d.delivery_id, d.agent_id, d.status, d.attempts, d.updated_at,
+          );
+        }
+        for (const a of (s["run_audit"] as any[]) ?? []) {
+          this.sql.exec(
+            "INSERT OR IGNORE INTO run_audit (id, document_id, name, agents, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            a.id, a.document_id, a.name, a.agents, a.detail, a.created_at,
+          );
+        }
+        for (const t of (s["run_trace"] as any[]) ?? []) {
+          this.sql.exec(
+            "INSERT OR IGNORE INTO run_trace (id, delivery_id, sequence, step, status, detail, artifact, created_at, ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            t.id, t.delivery_id, t.sequence, t.step, t.status, t.detail, t.artifact, t.created_at, t.ms,
+          );
+        }
+        this.sql.exec(
+          "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
+          Date.now(),
+        );
+      });
+
+      // Tell legacy DO to cancel its alarm and mark itself migrated
+      try {
+        const ackRes = await legacyStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
+          method: "POST",
+          headers: { "x-factory-control-key": controlKey },
+        });
+        if (!ackRes.ok) {
+          console.error(`Legacy ack-migrated failed for ${legacyName} with status ${ackRes.status}`);
+        }
+      } catch (ackErr) {
+        console.error(`Legacy ack-migrated network error for ${legacyName}:`, ackErr);
+      }
+
+      if (this.eventQueue.hasDue()) {
+        await this.eventQueue.armAlarm();
+      }
+    } catch (err) {
+      console.error(`Migration error for ${legacyName}:`, err);
+    }
   }
 
   /**
@@ -310,7 +522,9 @@ export class RepoCoordinator extends DurableObject<Env> {
     // event, the canvas owns them and the default reviewer stays out of the way.
     const due = this.eventQueue.dueProviderEvents();
     if (due.length > 0 && due.every((event) => this.canvasHandles(event))) return;
-    const repository = this.ctx.id.name ?? "";
+    const rawRepo = this.ctx.id.name ?? "";
+    const parsed = parseRepositoryKey(rawRepo);
+    const repository = parsed ? parsed.repository : rawRepo;
     const controlKey = this.env.BROKER_CONTROL_KEY;
     // Without a control key no capability can be minted, so a drain would fail every
     // event; leave the queue to POST /runs, which reports the misconfiguration.
@@ -326,13 +540,18 @@ export class RepoCoordinator extends DurableObject<Env> {
       coordinator,
       broker: this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(repository)),
       onStep: traceSink(coordinator),
-      // The model-backed reviewer when the deployment configured one, otherwise the
-      // SDK engine's deterministic heuristic synthesis.
-      executionFn: reviewRuntime(this.env) ?? corePrReviewer,
+      // Unifies ADR 003 decideAction semantics across alarm and runs paths (cloud-factory-cf-jtg9).
+      executionFn: createDefaultExecutionFn(this.env),
     });
   }
 
   private migrate(): void {
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS _schema_migrations (
+        name TEXT PRIMARY KEY,
+        migrated_at INTEGER NOT NULL
+      )
+    `);
     migrateMemoryTable(this.sql);
     migrateCanvasTable(this.sql);
     migrateEventQueueTable(this.sql);
@@ -373,7 +592,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
 
     const normalised: NormalisedEvent = normaliseEvent(provider, payload, request.headers);
-    const routedRepository = request.headers.get("x-factory-repository");
+    const routedRepository = request.headers.get("x-factory-repository") ?? this.ctx.id.name ?? null;
     const repository = normalised.repository !== "unknown"
       ? normalised.repository
       : (routedRepository ?? "unknown");
@@ -448,7 +667,9 @@ export class RepoCoordinator extends DurableObject<Env> {
       const repoName = this.ctx.id.name;
       if (this.env.CREDENTIAL_BROKER && repoName) {
         try {
-          const broker = this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(repoName));
+          const parsed = parseRepositoryKey(repoName);
+          const brokerRepo = parsed ? parsed.repository : repoName;
+          const broker = this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(brokerRepo));
           const res = await broker.fetch("https://credential-broker.internal/effective-webhook-secret");
           if (res.ok) {
             const data = (await res.json().catch(() => ({}))) as { secret?: string };
@@ -497,18 +718,24 @@ export class RepoCoordinator extends DurableObject<Env> {
       return Response.json({ ok: false, error: "not found", deliveryId }, { status: 404 });
     }
     const deliveries = this.deliveryLedger.findDeliveries(deliveryId);
+    const rawRepo = this.ctx.id.name ?? "unknown";
+    const parsed = parseRepositoryKey(rawRepo);
+    const unadorned = parsed ? parsed.repository : rawRepo;
     return Response.json({
       ok: true,
-      repository: this.ctx.id.name ?? "unknown",
+      repository: unadorned,
       event: found,
       deliveries,
     });
   }
 
   private stats(): Response {
+    const rawRepo = this.ctx.id.name ?? "unknown";
+    const parsed = parseRepositoryKey(rawRepo);
+    const unadorned = parsed ? parsed.repository : rawRepo;
     return Response.json({
       ok: true,
-      repository: this.ctx.id.name ?? "unknown",
+      repository: unadorned,
       counts: this.eventQueue.statusCounts(),
       memoryKeys: this.memoryHandler.total(),
     });
@@ -517,7 +744,9 @@ export class RepoCoordinator extends DurableObject<Env> {
   // ------------------------------------------------------------------ memory
 
   private async forwardToOrg(request: Request): Promise<Response> {
-    const repoName = this.ctx.id.name;
+    const rawRepo = this.ctx.id.name;
+    const parsed = rawRepo ? parseRepositoryKey(rawRepo) : null;
+    const repoName = parsed ? parsed.repository : rawRepo;
     const owner = repoName ? repoName.split("/")[0] : null;
     if (!owner || !this.env.ORG_COORDINATOR) {
       return Response.json({ ok: false, error: "org coordinator not available" }, { status: 503 });
@@ -578,7 +807,17 @@ async function readJson(request: Request): Promise<unknown> {
 }
 
 function sameRepository(a: string, b: string): boolean {
-  return a.trim().toLowerCase() === b.trim().toLowerCase();
+  const parsedA = parseRepositoryKey(a.trim());
+  const parsedB = parseRepositoryKey(b.trim());
+  if (parsedA && parsedB) {
+    return (
+      parsedA.platform.toLowerCase() === parsedB.platform.toLowerCase() &&
+      parsedA.repository.toLowerCase() === parsedB.repository.toLowerCase()
+    );
+  }
+  const repoA = (parsedA ? parsedA.repository : a.trim()).toLowerCase();
+  const repoB = (parsedB ? parsedB.repository : b.trim()).toLowerCase();
+  return repoA === repoB;
 }
 
 function byteLength(value: string): number {

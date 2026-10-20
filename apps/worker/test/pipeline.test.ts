@@ -12,6 +12,7 @@ import {
   type EventFacts,
 } from "../src/pipeline";
 import { githubRequest, TEST_SECRET } from "./support/webhook";
+import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 
 /**
  * End-to-end: a signed webhook lands on the queue, `POST /runs/:owner/:repo`
@@ -109,7 +110,7 @@ async function queueEvents(
   repository = REPOSITORY,
 ): Promise<Array<{ deliveryId: string; status: string; attempts: number; lastError: string | null }>> {
   const { env } = await import("cloudflare:test");
-  const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+  const coordinator = getRepoCoordinator(env, repository, "github");
   const response = await coordinator.fetch("https://repo-coordinator.internal/events?limit=50");
   const payload = (await response.json()) as {
     events?: Array<{ deliveryId: string; status: string; attempts: number; lastError: string | null }>;
@@ -119,7 +120,7 @@ async function queueEvents(
 
 async function stats(repository = REPOSITORY): Promise<{ processed: number; failed: number; pending: number; processing: number }> {
   const { env } = await import("cloudflare:test");
-  const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+  const coordinator = getRepoCoordinator(env, repository, "github");
   const queue = await coordinator.fetch("https://repo-coordinator.internal/stats");
   const payload = (await queue.json()) as { counts?: Record<string, number> };
   const counts = payload.counts ?? {};

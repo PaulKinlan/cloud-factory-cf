@@ -1,5 +1,6 @@
 import type { Env } from "../env";
 import { sameSecret } from "../secrets";
+import { getRepoCoordinator } from "../repo-coordinator-addressing";
 
 /**
  * Public surface for the observability suite (cloud-factory-cf-2ng).
@@ -41,7 +42,8 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
     return new Response("method not allowed", { status: 405 });
   }
 
-  const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`${owner}/${repo}`));
+  const platform = url.searchParams.get("platform");
+  const stub = getRepoCoordinator(env, `${owner}/${repo}`, platform);
   if (operation === "socket") {
     // Hand the upgrade to the object and pass its 101 (and socket) straight back.
     // The object's own route is /trace/socket, so the public path is rewritten

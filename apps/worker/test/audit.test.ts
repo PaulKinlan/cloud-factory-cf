@@ -2,6 +2,7 @@ import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { AUDIT_PATH } from "../src/routes/audit";
 import { githubRequest } from "./support/webhook";
+import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 import type { DeliveryLedger } from "../src/events/delivery-ledger";
 import type { EventQueue, WireEvent } from "../src/events/event-queue";
 import * as _eventsModule from "../src/events/index";
@@ -11,7 +12,7 @@ const BASE = "https://repo-coordinator.internal";
 const controlKey = "test-control-key";
 
 function coordinator(repository: string) {
-  return env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+  return getRepoCoordinator(env, repository, "github");
 }
 
 async function callAudit(

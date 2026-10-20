@@ -17,6 +17,7 @@ import {
   canonicalSinkTypes,
   type SinkDeps,
 } from "./action-sinks";
+import { reviewRuntime } from "./review/model";
 import {
   AgentRuntime,
   CoordinatorMemoryStore,
@@ -495,6 +496,35 @@ export const ruleBasedReview: AgentExecutionFn = async ({ ctx, prompt }) => {
  * ('pr.diff'), synthesizes LLM / heuristic review, and emits GitHub review.
  */
 export const corePrReviewer: AgentExecutionFn = createPrReviewerExecutionFn();
+
+/**
+ * Unifies the alarm/auto-drain path and runs path around decideAction (cloud-factory-cf-jtg9).
+ * - PR reviewable (opened/reopened/synchronize) -> runs prReviewer (reviewRuntime or corePrReviewer)
+ * - PR non-reviewable (closed/merged) -> no action taken (succeeded with no sink emission)
+ * - Issue opened -> ruleBasedReview (emits issue comment sink)
+ * - Everything else -> no action taken (succeeded with no sink emission)
+ */
+export function createDefaultExecutionFn(env?: { REVIEW_MODEL?: string }): AgentExecutionFn {
+  const prReviewer = env ? (reviewRuntime(env) ?? corePrReviewer) : corePrReviewer;
+  return async (input) => {
+    const facts = input.ctx.state["event"] as EventFacts | undefined;
+    if (!facts) {
+      return { status: "failure", error: "no event facts in run context", toolCallsCount: 0 };
+    }
+    const decision = decideAction(facts);
+    if (!decision) {
+      return {
+        status: "success",
+        output: `no action for ${facts.event}.${facts.action ?? "-"}`,
+        toolCallsCount: 0,
+      };
+    }
+    if (decision.type === "github:pr:review") {
+      return prReviewer(input);
+    }
+    return ruleBasedReview(input);
+  };
+}
 
 export function defaultSinks(deps: SinkDeps = {}): ActionSink[] {
   const catalogue = allSinks(deps);

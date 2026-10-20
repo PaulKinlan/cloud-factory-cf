@@ -1,5 +1,6 @@
 import type { Env } from "../env";
 import { sameSecret } from "../secrets";
+import { getRepoCoordinator } from "../repo-coordinator-addressing";
 
 export const ADMIN_SETTINGS_PATH = /^\/api\/admin\/settings\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
 export const ADMIN_PING_PATH = /^\/api\/admin\/test-ping\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
@@ -129,7 +130,9 @@ export async function routeAdminTestPing(
 
   const signature = await signHmacSha256(secret, payload);
 
-  const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+  const url = new URL(request.url);
+  const platform = url.searchParams.get("platform");
+  const coordinator = getRepoCoordinator(env, repository, platform);
   const webhookReq = new Request("https://repo-coordinator.internal/events?provider=github", {
     method: "POST",
     headers: {

@@ -1,13 +1,14 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { githubRequest, gitlabRequest, signBody, TEST_SECRET } from "./support/webhook";
+import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 
 describe("webhook ingestion", () => {
   it("accepts a GitLab webhook authenticated with X-Gitlab-Token", async () => {
     const response = await SELF.fetch(await gitlabRequest("gitlab-1", "acme/ingest-repo"));
     expect(response.status).toBe(202);
 
-    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/ingest-repo"));
+    const stub = getRepoCoordinator(env, "acme/ingest-repo", "gitlab");
     const events = (await (await stub.fetch("https://repo-coordinator.internal/events")).json()) as {
       events: Array<Record<string, unknown>>;
     };
@@ -100,15 +101,20 @@ describe("webhook ingestion", () => {
     expect(oversized.status).toBe(413);
   });
 
-  it("keeps github and gitlab deliveries in one per-repository queue", async () => {
+  it("isolates github and gitlab deliveries by platform key", async () => {
     const repository = "acme/mixed";
     expect((await SELF.fetch(await githubRequest("mixed-gh", repository))).status).toBe(202);
     expect((await SELF.fetch(await gitlabRequest("mixed-gl", repository))).status).toBe(202);
 
-    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
-    const body = (await (await stub.fetch("https://repo-coordinator.internal/stats")).json()) as {
+    const ghStub = getRepoCoordinator(env, repository, "github");
+    const glStub = getRepoCoordinator(env, repository, "gitlab");
+    const ghBody = (await (await ghStub.fetch("https://repo-coordinator.internal/stats")).json()) as {
       counts: Record<string, number>;
     };
-    expect(body.counts["pending"]).toBe(2);
+    const glBody = (await (await glStub.fetch("https://repo-coordinator.internal/stats")).json()) as {
+      counts: Record<string, number>;
+    };
+    expect(ghBody.counts["pending"]).toBe(1);
+    expect(glBody.counts["pending"]).toBe(1);
   });
 });

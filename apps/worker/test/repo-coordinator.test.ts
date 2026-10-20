@@ -1,9 +1,10 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { pushPayload, signBody, TEST_SECRET } from "./support/webhook";
+import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 
 function coordinator(repository: string) {
-  return env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+  return getRepoCoordinator(env, repository, "github");
 }
 
 async function post(

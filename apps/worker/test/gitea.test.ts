@@ -2,6 +2,7 @@ import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { decideAction, type EventFacts } from "../src/pipeline";
 import { signBody } from "./support/webhook";
+import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 
 /**
  * Gitea/Forgejo ingestion (ADR 003, cloud-factory-cf-6to.2).
@@ -46,7 +47,7 @@ describe("gitea webhooks", () => {
     const response = await SELF.fetch(await giteaRequest("forge/repo"));
     expect(response.status).toBe(202);
 
-    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("forge/repo"));
+    const stub = getRepoCoordinator(env, "forge/repo", "gitea");
     const events = (await (await stub.fetch(`${BASE}/events`)).json()) as {
       events: Array<Record<string, unknown>>;
     };
@@ -71,7 +72,7 @@ describe("gitea webhooks", () => {
     const response = await SELF.fetch(await giteaRequest("forge/decision-repo", { delivery: "gitea-decide" }));
     expect(response.status).toBe(202);
 
-    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("forge/decision-repo"));
+    const stub = getRepoCoordinator(env, "forge/decision-repo", "gitea");
     const listed = (await (await stub.fetch(`${BASE}/events`)).json()) as {
       events: Array<Record<string, unknown>>;
     };

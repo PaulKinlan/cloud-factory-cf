@@ -2,6 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { RunTraceStore, estimateTokens, normaliseInput, TRACE_CAP } from "../src/events/trace";
 import { pushPayload } from "./support/webhook";
+import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 
 /**
  * Observability suite (cloud-factory-cf-2ng): the trace store, the usage
@@ -13,7 +14,7 @@ const BASE = "https://repo-coordinator.internal";
 const controlKey = "test-control-key";
 
 function coordinator(repository: string) {
-  return env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repository));
+  return getRepoCoordinator(env, repository, "github");
 }
 
 async function record(repository: string, input: Record<string, unknown>): Promise<Response> {

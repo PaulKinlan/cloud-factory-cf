@@ -2,6 +2,7 @@ import type { Env } from "../env";
 import { AgentStudio, type AgentManifest } from "@factory-cloud/sdk";
 import { SERVICES } from "../credentials/policy";
 import { sameSecret } from "../secrets";
+import { getRepoCoordinator } from "../repo-coordinator-addressing";
 
 export const STUDIO_PATH =
   /^\/studio\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>author|simulate|agents)(?:\/(?<agentName>[^/]+))?$/;
@@ -77,7 +78,9 @@ export async function routeStudio(
   }
 
   if (operation === "agents") {
-    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`${owner}/${repo}`));
+    const url = new URL(request.url);
+    const platform = url.searchParams.get("platform");
+    const stub = getRepoCoordinator(env, `${owner}/${repo}`, platform);
 
     if (request.method === "GET") {
       if (agentName) {
