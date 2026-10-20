@@ -3,7 +3,7 @@ import { parseRepositoryKey } from "@factory-cloud/sdk";
 import type { Env } from "./env";
 import { planAgents, sourceMatches } from "./canvas-runs";
 import { safeParseJson } from "./events/helpers";
-import { corePrReviewer, drainRepository } from "./pipeline";
+import { corePrReviewer, createDefaultExecutionFn, drainRepository } from "./pipeline";
 import { reviewRuntime } from "./review/model";
 import { CanvasStore, migrateCanvasTable } from "./canvas-store";
 import { MemoryHandler, migrateMemoryTable } from "./memory";
@@ -438,9 +438,8 @@ export class RepoCoordinator extends DurableObject<Env> {
       coordinator,
       broker: this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(repository)),
       onStep: traceSink(coordinator),
-      // The model-backed reviewer when the deployment configured one, otherwise the
-      // SDK engine's deterministic heuristic synthesis.
-      executionFn: reviewRuntime(this.env) ?? corePrReviewer,
+      // Unifies ADR 003 decideAction semantics across alarm and runs paths (cloud-factory-cf-jtg9).
+      executionFn: createDefaultExecutionFn(this.env),
     });
   }
 

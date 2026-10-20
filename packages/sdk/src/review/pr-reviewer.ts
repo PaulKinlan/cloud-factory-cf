@@ -333,6 +333,14 @@ export function createPrReviewerExecutionFn(options: PrReviewerOptions = {}): Ag
       };
     }
 
+    if (actionName && actionName !== 'opened' && actionName !== 'reopened' && actionName !== 'synchronize') {
+      return {
+        status: 'success',
+        output: `Skipped non-open pull_request action: ${actionName}`,
+        toolCallsCount: 0,
+      };
+    }
+
     const repoFullName =
       typeof facts['repository'] === 'string'
         ? facts['repository']

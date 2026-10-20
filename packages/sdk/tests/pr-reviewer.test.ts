@@ -171,3 +171,47 @@ test('createPrReviewerExecutionFn: end-to-end execution with diff fetch and revi
   assert.ok(['APPROVE', 'COMMENT'].includes(payload?.event));
   assert.ok(payload?.body.includes('Cloud Factory PR Review: #55'));
 });
+
+test('createPrReviewerExecutionFn: skips closed pull request action without fetching diff', async () => {
+  const runtime = new AgentRuntime();
+  let signedRequestCalled = false;
+  const mockBroker: CredentialBroker = {
+    async requestCapability() {
+      return { ok: true, capability: 'mock-cap' };
+    },
+    async executeSignedRequest() {
+      signedRequestCalled = true;
+      return { ok: true, status: 200, data: '' };
+    },
+    async checkPermission() {
+      return true;
+    },
+  };
+
+  const ctx = createAgentContext({
+    id: 'test-run-closed',
+    credentials: mockBroker,
+    state: {
+      event: {
+        provider: 'github',
+        event: 'pull_request',
+        action: 'closed',
+        number: 56,
+        title: 'Closed Pull Request',
+        repository: 'acme/demo',
+        payload: {
+          action: 'closed',
+          number: 56,
+          pull_request: { title: 'Closed Pull Request', user: { login: 'alice' } },
+        },
+      },
+    },
+  });
+
+  const execFn = createPrReviewerExecutionFn();
+  const result = await runtime.runAgent('Review PR #56', ctx, execFn);
+
+  assert.equal(result.status, 'success');
+  assert.equal(signedRequestCalled, false);
+  assert.match(result.output ?? '', /Skipped non-open pull_request action: closed/);
+});

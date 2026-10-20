@@ -1,5 +1,5 @@
 import type { Env } from "../env";
-import { corePrReviewer, drainRepository } from "../pipeline";
+import { corePrReviewer, createDefaultExecutionFn, drainRepository } from "../pipeline";
 import { reviewRuntime } from "../review/model";
 import { traceSink } from "../events";
 import { sameSecret } from "../secrets";
@@ -60,7 +60,7 @@ export async function routeRun(
       coordinator,
       broker: env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository)),
       onStep: traceSink(coordinator),
-      ...(useCoreReviewer ? { executionFn: reviewRuntime(env) ?? corePrReviewer } : {}),
+      ...(useCoreReviewer ? { executionFn: createDefaultExecutionFn(env) } : {}),
       ...(env.TELEMETRY_ENDPOINT === undefined ? {} : { telemetryEndpoint: env.TELEMETRY_ENDPOINT }),
     },
     {
