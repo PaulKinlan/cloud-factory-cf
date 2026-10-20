@@ -145,21 +145,6 @@ function armedAt(stub: ReturnType<typeof stubForKey>): Promise<number | null> {
   return runInDurableObject(stub, (_instance, state) => state.storage.getAlarm());
 }
 
-/**
- * Drain the queue through the control route, the way an operator or CI would. Used by
- * the two cases whose shape the alarm path does not route yet (cloud-factory-cf-jtg9:
- * closed/merged pull requests and issue events).
- */
-async function runRepository(repository: string): Promise<Record<string, number>> {
-  const response = await SELF.fetch(`https://example.com/runs/${repository}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-factory-control-key": CONTROL_KEY },
-    body: JSON.stringify({}),
-  });
-  expect(response.status).toBe(200);
-  return (await response.json()) as Record<string, number>;
-}
-
 /** Fire the alarm the delivery armed, exactly as the platform would. */
 async function drain(stub: ReturnType<typeof stubForKey>): Promise<void> {
   await runInDurableObject(stub, (instance) =>
@@ -207,6 +192,33 @@ async function expectSettled(
   expect(distinct.size).toBe(processed);
 }
 
+/** The one review/posted comment, asserted to exist (keeps indexed access typed). */
+function singleReview(calls: Call[]): Call {
+  const posted = reviews(calls);
+  expect(posted).toHaveLength(1);
+  return posted[0] as Call;
+}
+
+function singleComment(calls: Call[]): Call {
+  const posted = comments(calls);
+  expect(posted).toHaveLength(1);
+  return posted[0] as Call;
+}
+
+/**
+ * Whether ANY coordinator instance has an alarm armed for this repository. A
+ * "nothing was queued" case has to look under both addressing keys: asserting only
+ * the legacy instance would let a regression that armed the prefixed one pass
+ * (cloud-factory-cf-29ue).
+ */
+async function anyArmed(repository: string): Promise<number | null> {
+  for (const key of coordinatorKeys(repository)) {
+    const armed = await armedAt(stubForKey(key));
+    if (armed !== null) return armed;
+  }
+  return null;
+}
+
 function reviews(calls: Call[]): Call[] {
   return calls.filter((call) => call.method === "POST" && /\/reviews$/.test(call.url));
 }
@@ -250,7 +262,7 @@ describe("synthetic GitHub deliveries, end to end", () => {
       status: "pending",
     });
 
-    // The delivery itself armed the alarm: no POST /runs anywhere in this test.
+    // The delivery itself armed the alarm: nothing here calls POST /runs.
     const armed = await armedAt(queue);
     expect(armed).not.toBeNull();
     expect(armed as number).toBeLessThanOrEqual(Date.now() + 5_000);
@@ -259,10 +271,10 @@ describe("synthetic GitHub deliveries, end to end", () => {
 
     const diff = calls.find((call) => call.method === "GET" && call.url.endsWith("/pulls/42"));
     expect(diff?.accept).toBe("application/vnd.github.v3.diff");
-    expect(reviews(calls)).toHaveLength(1);
-    expect(reviews(calls)[0].url).toContain(`/repos/${repository}/pulls/42/reviews`);
-    expect(reviews(calls)[0].body).toMatchObject({ event: "COMMENT" });
-    expect(String((reviews(calls)[0].body as Record<string, unknown>)["body"])).toContain("Cloud Factory PR Review");
+    const review = singleReview(calls);
+    expect(review.url).toContain(`/repos/${repository}/pulls/42/reviews`);
+    expect(review.body).toMatchObject({ event: "COMMENT" });
+    expect(String((review.body as Record<string, unknown>)["body"])).toContain("Cloud Factory PR Review");
 
     await expectSettled(repository, queue, 1);
     expect(await armedAt(queue)).toBeNull();
@@ -323,13 +335,9 @@ describe("synthetic GitHub deliveries, end to end", () => {
   });
 
   it("acknowledges a closed pull request without calling the provider", async () => {
-    // The rule-based runner is the ADR 003 decision path: decideAction() deliberately
-    // does not review a merged/closed request, and the event is acknowledged rather
-    // than retried. It is driven here through POST /runs because the alarm path
-    // currently runs the SDK review engine instead, which reviews every
-    // pull_request regardless of action — a divergence tracked in
-    // cloud-factory-cf-jtg9 (the same divergence is why an opened issue reaches no
-    // sink on the alarm path).
+    // decideAction() deliberately does not review a closed/merged request. Since
+    // cloud-factory-cf-jtg9 the alarm path routes that same decision, so the delivery
+    // is acknowledged and settled here without any provider call.
     const repository = "acme/e2e-closed";
     const { calls } = stubGitHub();
     await provision(repository, "pr.diff");
@@ -339,10 +347,9 @@ describe("synthetic GitHub deliveries, end to end", () => {
       (await deliver(repository, "e2e-closed-1", "pull_request", githubPullRequestPayload({ repository, action: "closed", merged: true }))).status,
     ).toBe(202);
 
-    const report = await runRepository(repository);
     const queue = await queueFor(repository, "e2e-closed-1");
+    await drain(queue);
 
-    expect(report).toMatchObject({ claimed: 1, skipped: 1, failed: 0 });
     expect(calls).toHaveLength(0);
     await expectSettled(repository, queue, 1);
     const [event] = await queueOf(queue);
@@ -350,21 +357,20 @@ describe("synthetic GitHub deliveries, end to end", () => {
   });
 
   it("comments on an opened issue through the broker", async () => {
-    // Same note as the closed-request case: the decision lives in the rule-based
-    // runner (POST /runs), which is the path the ADR 003 rules are written for.
+    // The alarm path routes an opened issue through the ADR 003 rules to the
+    // rule-based runner, which emits the issue comment sink (cloud-factory-cf-jtg9).
     const repository = "acme/e2e-issue";
     const { calls } = stubGitHub();
     await provision(repository, "issue.comment");
 
     expect((await deliver(repository, "e2e-issue-1", "issues", githubIssuesPayload({ repository, number: 9 }))).status).toBe(202);
 
-    const report = await runRepository(repository);
     const queue = await queueFor(repository, "e2e-issue-1");
+    await drain(queue);
 
-    expect(report).toMatchObject({ claimed: 1, succeeded: 1, failed: 0 });
-    expect(comments(calls)).toHaveLength(1);
-    expect(comments(calls)[0].url).toContain(`/repos/${repository}/issues/9/comments`);
-    expect(String((comments(calls)[0].body as Record<string, unknown>)["body"])).toContain("#9");
+    const comment = singleComment(calls);
+    expect(comment.url).toContain(`/repos/${repository}/issues/9/comments`);
+    expect(String((comment.body as Record<string, unknown>)["body"])).toContain("#9");
     await expectSettled(repository, queue, 1);
   });
 
@@ -390,7 +396,7 @@ describe("synthetic GitHub deliveries, end to end", () => {
     await expect(response.json()).resolves.toMatchObject({ ok: true, ping: true });
 
     expect(await anyQueued(repository)).toHaveLength(0);
-    expect(await armedAt(stubForKey(repository))).toBeNull();
+    expect(await anyArmed(repository)).toBeNull();
 
     const connect = await SELF.fetch(`https://example.com/trace/${repository}/connect`, {
       headers: { "x-factory-control-key": CONTROL_KEY },
@@ -415,6 +421,6 @@ describe("synthetic GitHub deliveries, end to end", () => {
 
     expect(await anyQueued(repository)).toHaveLength(0);
     await expectSettled(repository, stubForKey(repository), 0);
-    expect(await armedAt(stubForKey(repository))).toBeNull();
+    expect(await anyArmed(repository)).toBeNull();
   });
 });
