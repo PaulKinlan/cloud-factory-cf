@@ -794,4 +794,83 @@ describe("GitHub OAuth & App Install Flow", () => {
       "GitHub installation repositories endpoint requires an installation access token; personal access tokens (ghp_) are not accepted by GitHub",
     );
   });
+
+  it("flow=install: mints RS256 App JWT, exchanges for installation access token, and queries repos (cloud-factory-cf-uqnu)", async () => {
+    const keyPair = await crypto.subtle.generateKey(
+      { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+      true,
+      ["sign"],
+    );
+    const pkcs8Der = await crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(pkcs8Der)));
+    const pem = `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----`;
+
+    const installId = 987;
+    const appId = "app_12345";
+    let capturedJwt: string | null = null;
+    let capturedInstToken: string | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const auth = (init?.headers as any)?.authorization ?? "";
+        if (url.includes(`/app/installations/${installId}/access_tokens`)) {
+          capturedJwt = auth.replace("Bearer ", "");
+          return new Response(JSON.stringify({ token: "ghs_installation_access_token_xyz" }), { status: 200 });
+        }
+        if (url.includes(`/app/installations/${installId}`)) {
+          capturedJwt = auth.replace("Bearer ", "");
+          return new Response(JSON.stringify({ id: installId, account: { login: "apporg", type: "Organization" } }), { status: 200 });
+        }
+        if (url.includes("/installation/repositories")) {
+          capturedInstToken = auth.replace("Bearer ", "");
+          return new Response(
+            JSON.stringify({
+              total_count: 1,
+              repositories: [
+                { id: 202, full_name: "apporg/agent-shelf", name: "agent-shelf", private: false, default_branch: "main", owner: { login: "apporg" } },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const origAppId = env.GITHUB_APP_ID;
+    const origAppKey = env.GITHUB_APP_PRIVATE_KEY;
+    try {
+      (env as any).GITHUB_APP_ID = appId;
+      (env as any).GITHUB_APP_PRIVATE_KEY = pem;
+
+      const installRes = await SELF.fetch(
+        `https://example.com/auth/github/callback?installation_id=${installId}&setup_action=install&return_to=/`,
+        { method: "GET", redirect: "manual" },
+      );
+
+      expect(installRes.status).toBe(302);
+      expect(capturedJwt).toBeDefined();
+      expect(capturedInstToken).toBe("ghs_installation_access_token_xyz");
+
+      // Verify JWT payload
+      const [, payloadB64] = capturedJwt!.split(".");
+      const payload = JSON.parse(atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/")));
+      expect(payload.iss).toBe(appId);
+
+      // Verify repos persisted in OrgCoordinator
+      const orgReposRes = await SELF.fetch("https://example.com/api/repos?owner=apporg", {
+        headers: { "x-factory-control-key": "test-control-key" },
+      });
+      expect(orgReposRes.status).toBe(200);
+      const orgReposData = (await orgReposRes.json()) as any;
+      expect(orgReposData.ok).toBe(true);
+      expect(orgReposData.count).toBe(1);
+      expect(orgReposData.repositories[0].fullName).toBe("apporg/agent-shelf");
+    } finally {
+      (env as any).GITHUB_APP_ID = origAppId;
+      (env as any).GITHUB_APP_PRIVATE_KEY = origAppKey;
+    }
+  });
 });

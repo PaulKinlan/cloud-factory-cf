@@ -1,5 +1,6 @@
 import type { Env } from "../env";
 import { sameSecret } from "../secrets";
+import { importAppPrivateKey, mintAppJwt } from "../github-app";
 
 export const AUTH_LOGIN_PATH = "/auth/github/login";
 export const AUTH_CALLBACK_PATH = "/auth/github/callback";
@@ -383,58 +384,140 @@ export async function handleGithubCallback(
     }
   } else if (installationId) {
     // 2b. Install-only callback without OAuth code: query installation details & repos
-    const token = env.GITHUB_TOKEN;
-    if (!token) {
+    let appJwt: string | null = null;
+    let installationToken: string | null = null;
+
+    if (env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY) {
+      try {
+        const key = await importAppPrivateKey(env.GITHUB_APP_PRIVATE_KEY);
+        appJwt = await mintAppJwt(env.GITHUB_APP_ID, key);
+      } catch (err) {
+        return Response.json(
+          { ok: false, error: `Failed to sign GitHub App JWT: ${String(err)}` },
+          { status: 502, headers: { "set-cookie": clearCookie } },
+        );
+      }
+    } else if (env.GITHUB_TOKEN) {
+      installationToken = env.GITHUB_TOKEN;
+    }
+
+    if (appJwt) {
+      let instRes: Response;
+      try {
+        instRes = await fetch(`https://api.github.com/app/installations/${installationId}`, {
+          headers: {
+            authorization: `Bearer ${appJwt}`,
+            accept: "application/vnd.github+json",
+            "user-agent": "CloudFactory-Auth",
+          },
+        });
+      } catch (err) {
+        return Response.json(
+          { ok: false, error: `Failed to reach GitHub App installation endpoint: ${String(err)}` },
+          { status: 502, headers: { "set-cookie": clearCookie } },
+        );
+      }
+
+      if (!instRes.ok) {
+        return Response.json(
+          { ok: false, error: `GitHub /app/installations failed with HTTP ${instRes.status}` },
+          { status: 502, headers: { "set-cookie": clearCookie } },
+        );
+      }
+
+      const instData = (await instRes.json().catch(() => ({}))) as any;
+      const account = instData.account ?? instData.installation?.account;
+      if (!account?.login) {
+        return Response.json(
+          { ok: false, error: "GitHub App installation response contains no valid account login" },
+          { status: 502, headers: { "set-cookie": clearCookie } },
+        );
+      }
+      accountLogin = account.login;
+      accountType = account.type ?? "User";
+
+      let tokenRes: Response;
+      try {
+        tokenRes = await fetch(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${appJwt}`,
+            accept: "application/vnd.github+json",
+            "user-agent": "CloudFactory-Auth",
+          },
+        });
+      } catch (err) {
+        return Response.json(
+          { ok: false, error: `Failed to reach GitHub installation access token endpoint: ${String(err)}` },
+          { status: 502, headers: { "set-cookie": clearCookie } },
+        );
+      }
+
+      if (!tokenRes.ok) {
+        return Response.json(
+          { ok: false, error: `GitHub /app/installations/${installationId}/access_tokens failed with HTTP ${tokenRes.status}` },
+          { status: 502, headers: { "set-cookie": clearCookie } },
+        );
+      }
+
+      const tokenData = (await tokenRes.json().catch(() => ({}))) as any;
+      if (!tokenData?.token) {
+        return Response.json(
+          { ok: false, error: "GitHub installation access token response missing token" },
+          { status: 502, headers: { "set-cookie": clearCookie } },
+        );
+      }
+      installationToken = tokenData.token;
+    } else if (installationToken) {
+      let instRes: Response;
+      try {
+        instRes = await fetch(`https://api.github.com/app/installations/${installationId}`, {
+          headers: {
+            authorization: `Bearer ${installationToken}`,
+            accept: "application/vnd.github+json",
+            "user-agent": "CloudFactory-Auth",
+          },
+        });
+      } catch (err) {
+        return Response.json(
+          { ok: false, error: `Failed to reach GitHub App installation endpoint: ${String(err)}` },
+          { status: 502, headers: { "set-cookie": clearCookie } },
+        );
+      }
+
+      if (!instRes.ok) {
+        const errText =
+          instRes.status === 401
+            ? "GitHub App installation endpoint requires an App JWT; personal access tokens (ghp_) are not accepted by GitHub"
+            : `GitHub /app/installations failed with HTTP ${instRes.status}`;
+        return Response.json(
+          { ok: false, error: errText },
+          { status: 502, headers: { "set-cookie": clearCookie } },
+        );
+      }
+
+      const instData = (await instRes.json().catch(() => ({}))) as any;
+      const account = instData.account ?? instData.installation?.account;
+      if (!account?.login) {
+        return Response.json(
+          { ok: false, error: "GitHub App installation response contains no valid account login" },
+          { status: 502, headers: { "set-cookie": clearCookie } },
+        );
+      }
+      accountLogin = account.login;
+      accountType = account.type ?? "User";
+    } else {
       return Response.json(
-        { ok: false, error: "GitHub App installation resolution credentials (GITHUB_TOKEN) are not configured" },
+        { ok: false, error: "GitHub App credentials (GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY) or GITHUB_TOKEN are not configured" },
         { status: 503, headers: { "set-cookie": clearCookie } },
       );
     }
-
-    let instRes: Response;
-    try {
-      instRes = await fetch(`https://api.github.com/app/installations/${installationId}`, {
-        headers: {
-          authorization: `Bearer ${token}`,
-          accept: "application/vnd.github+json",
-          "user-agent": "CloudFactory-Auth",
-        },
-      });
-    } catch (err) {
-      return Response.json(
-        { ok: false, error: `Failed to reach GitHub App installation endpoint: ${String(err)}` },
-        { status: 502, headers: { "set-cookie": clearCookie } },
-      );
-    }
-
-    if (!instRes.ok) {
-      const errText =
-        instRes.status === 401
-          ? "GitHub App installation endpoint requires an App JWT; personal access tokens (ghp_) are not accepted by GitHub"
-          : `GitHub /app/installations failed with HTTP ${instRes.status}`;
-      return Response.json(
-        { ok: false, error: errText },
-        { status: 502, headers: { "set-cookie": clearCookie } },
-      );
-    }
-
-    const instData = (await instRes.json().catch(() => ({}))) as any;
-    const account = instData.account ?? instData.installation?.account;
-    if (!account?.login) {
-      return Response.json(
-        { ok: false, error: "GitHub App installation response contains no valid account login" },
-        { status: 502, headers: { "set-cookie": clearCookie } },
-      );
-    }
-
-    accountLogin = account.login;
-    accountType = account.type ?? "User";
 
     let instReposRes: Response;
     try {
       instReposRes = await fetch(`https://api.github.com/installation/repositories?per_page=100`, {
         headers: {
-          authorization: `Bearer ${token}`,
+          authorization: `Bearer ${installationToken}`,
           accept: "application/vnd.github+json",
           "user-agent": "CloudFactory-Auth",
         },
