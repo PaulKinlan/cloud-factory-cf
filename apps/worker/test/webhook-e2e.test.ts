@@ -185,13 +185,26 @@ async function deliver(
 /**
  * `stats` only reports the statuses that have rows, so "pending: 0" is an absent
  * key rather than a zero: assert the settled total and that nothing is left due.
+ *
+ * It also asserts the queue is not SPLIT across the two addressing schemes: a
+ * no delivery was LOST to the other addressing scheme: looking under both keys must
+ * find `processed` distinct deliveries. It deliberately does not assert one row per
+ * delivery across keys — the ADR 003 slice 3 read-through migration mirrors each row
+ * onto the legacy instance on purpose (observed on imp-2 f04100f: one delivery is
+ * visible under both keys), so a cross-key row count is not an invariant here.
  */
-async function expectSettled(stub: ReturnType<typeof stubForKey>, processed: number): Promise<void> {
+async function expectSettled(
+  repository: string,
+  stub: ReturnType<typeof stubForKey>,
+  processed: number,
+): Promise<void> {
   const statuses = await countsOf(stub);
   expect(statuses["pending"] ?? 0).toBe(0);
   expect(statuses["processing"] ?? 0).toBe(0);
   expect(statuses["failed"] ?? 0).toBe(0);
   expect(statuses["processed"] ?? 0).toBe(processed);
+  const distinct = new Set((await anyQueued(repository)).map((event) => event.deliveryId));
+  expect(distinct.size).toBe(processed);
 }
 
 function reviews(calls: Call[]): Call[] {
@@ -251,7 +264,7 @@ describe("synthetic GitHub deliveries, end to end", () => {
     expect(reviews(calls)[0].body).toMatchObject({ event: "COMMENT" });
     expect(String((reviews(calls)[0].body as Record<string, unknown>)["body"])).toContain("Cloud Factory PR Review");
 
-    await expectSettled(queue, 1);
+    await expectSettled(repository, queue, 1);
     expect(await armedAt(queue)).toBeNull();
 
     const trace = await SELF.fetch(`https://example.com/trace/${repository}?deliveryId=e2e-opened-1`, {
@@ -278,7 +291,7 @@ describe("synthetic GitHub deliveries, end to end", () => {
     expect(await queueOf(queue)).toHaveLength(1);
     await drain(queue);
     expect(reviews(calls)).toHaveLength(1);
-    await expectSettled(queue, 1);
+    await expectSettled(repository, queue, 1);
   });
 
   it("reviews a synchronize delivery as a new head of the same pull request", async () => {
@@ -303,7 +316,7 @@ describe("synthetic GitHub deliveries, end to end", () => {
     await drain(queue);
 
     expect(reviews(calls)).toHaveLength(2);
-    await expectSettled(queue, 2);
+    await expectSettled(repository, queue, 2);
     const settled = await queueOf(queue);
     expect(settled.map((delivery) => delivery.deliveryId).sort()).toEqual(["e2e-sync-1", "e2e-sync-2"]);
     expect(settled.every((delivery) => delivery.status === "processed")).toBe(true);
@@ -331,7 +344,7 @@ describe("synthetic GitHub deliveries, end to end", () => {
 
     expect(report).toMatchObject({ claimed: 1, skipped: 1, failed: 0 });
     expect(calls).toHaveLength(0);
-    await expectSettled(queue, 1);
+    await expectSettled(repository, queue, 1);
     const [event] = await queueOf(queue);
     expect(event).toMatchObject({ deliveryId: "e2e-closed-1", canonicalAction: "closed", status: "processed" });
   });
@@ -352,7 +365,7 @@ describe("synthetic GitHub deliveries, end to end", () => {
     expect(comments(calls)).toHaveLength(1);
     expect(comments(calls)[0].url).toContain(`/repos/${repository}/issues/9/comments`);
     expect(String((comments(calls)[0].body as Record<string, unknown>)["body"])).toContain("#9");
-    await expectSettled(queue, 1);
+    await expectSettled(repository, queue, 1);
   });
 
   it("queues a push delivery and settles it without an action", async () => {
@@ -364,7 +377,7 @@ describe("synthetic GitHub deliveries, end to end", () => {
     await drain(queue);
 
     expect(calls).toHaveLength(0);
-    await expectSettled(queue, 1);
+    await expectSettled(repository, queue, 1);
     expect((await queueOf(queue))[0]).toMatchObject({ deliveryId: "e2e-push-1", event: "push", status: "processed" });
   });
 
@@ -401,7 +414,7 @@ describe("synthetic GitHub deliveries, end to end", () => {
     await expect(forged.json()).resolves.toMatchObject({ ok: false, error: "invalid signature" });
 
     expect(await anyQueued(repository)).toHaveLength(0);
-    await expectSettled(stubForKey(repository), 0);
+    await expectSettled(repository, stubForKey(repository), 0);
     expect(await armedAt(stubForKey(repository))).toBeNull();
   });
 });
