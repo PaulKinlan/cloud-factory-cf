@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { ADMIN_SETTINGS_PATH, ADMIN_PING_PATH, handleAdmin } from "../src/routes/admin";
+import { WEBHOOK_PATH, handleWebhooks } from "../src/routes/webhooks";
 import {
   BROKER_PATH,
   STUDIO_PATH,
@@ -6,13 +8,11 @@ import {
   CANVAS_RUN_PATH,
   RUN_PATH,
   AUDIT_PATH,
-  WEBHOOK_PATH,
   handleBroker,
   handleStudio,
   handleCanvas,
   handleRuns,
   handleAudit,
-  handleWebhooks,
   serveAsset,
 } from "../src/routes";
 import type { Env } from "../src/env";
@@ -40,6 +40,9 @@ describe("domain route handlers", () => {
     expect(AUDIT_PATH.test("/audit/events/acme/widgets/deliv-1")).toBe(true);
     expect(AUDIT_PATH.test("/audit/events/acme")).toBe(false);
 
+    expect(ADMIN_SETTINGS_PATH.test("/api/admin/settings/acme/widgets")).toBe(true);
+    expect(ADMIN_PING_PATH.test("/api/admin/test-ping/acme/widgets")).toBe(true);
+
     expect(WEBHOOK_PATH.test("/webhooks/github/acme/widgets")).toBe(true);
     expect(WEBHOOK_PATH.test("/webhooks/gitlab/acme/widgets")).toBe(true);
     expect(WEBHOOK_PATH.test("/webhooks/bitbucket/acme/widgets")).toBe(false);
@@ -55,6 +58,7 @@ describe("domain route handlers", () => {
     expect(await handleCanvas(req, fakeEnv, url)).toBeNull();
     expect(await handleRuns(req, fakeEnv, url)).toBeNull();
     expect(await handleAudit(req, fakeEnv, url)).toBeNull();
+    expect(await handleAdmin(req, fakeEnv, url)).toBeNull();
     expect(await handleWebhooks(req, fakeEnv, url)).toBeNull();
   });
 
