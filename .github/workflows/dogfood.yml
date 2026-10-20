@@ -45,6 +45,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # No bubblewrap install step: hosted runners block the unprivileged user namespace
+      # bwrap needs ("setting up uid map: Permission denied"), so the sandbox test skips
+      # itself there with a named reason instead of failing the gate (cloud-factory-cf-n2h0).
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

@@ -12,12 +12,10 @@ test('createLocalTools: provides file operations and blocks path traversal', asy
     const writeTool = tools.find((t) => t.name === 'write_file')!;
     const readTool = tools.find((t) => t.name === 'read_file')!;
     const listTool = tools.find((t) => t.name === 'list_files')!;
-    const execTool = tools.find((t) => t.name === 'exec_command')!;
 
     assert.ok(writeTool);
     assert.ok(readTool);
     assert.ok(listTool);
-    assert.ok(execTool);
 
     // Write file
     const writeRes = (await writeTool.handler({ path: 'sub/test.txt', content: 'hello world' })) as any;
@@ -65,10 +63,6 @@ test('createLocalTools: provides file operations and blocks path traversal', asy
     );
     await fs.rm(outsideDir, { recursive: true, force: true });
 
-    // Exec command
-    const execRes = (await execTool.handler({ command: 'node -e "console.log(12345)"' })) as any;
-    assert.match(execRes.stdout, /12345/);
-
     // Test explicit unsandboxed mode (sandbox: 'none') still enforces basic text containment checks
     const unsandboxedTools = createLocalTools({ cwd: tmpDir, sandbox: 'none' });
     const unsandboxedExec = unsandboxedTools.find((t) => t.name === 'exec_command')!;
@@ -100,6 +94,49 @@ test('createLocalTools: provides file operations and blocks path traversal', asy
       },
       /Command containment violation: traversal '\.\.' is not allowed in command/,
     );
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A GitHub-hosted runner ships bubblewrap but forbids the unprivileged user namespace it
+ * needs ("bwrap: setting up uid map: Permission denied"), so the isolation assertions below
+ * can only run where bwrap actually works. The sandbox still fails closed everywhere — this
+ * probe decides whether the contract can be EXERCISED here, and a skip says so out loud
+ * rather than pretending the assertions passed (cloud-factory-cf-n2h0).
+ */
+async function bwrapUnavailableReason(): Promise<string | false> {
+  const { spawn } = await import('node:child_process');
+  return new Promise((resolve) => {
+    const probe = spawn('/usr/bin/bwrap', ['--ro-bind', '/', '/', '--dev', '/dev', '--unshare-pid', 'true'], {
+      timeout: 10_000,
+    });
+    let stderr = '';
+    probe.stderr?.on('data', (chunk) => { stderr += String(chunk); });
+    probe.on('error', (err) => resolve(`bubblewrap is not usable here (${err.message})`));
+    probe.on('close', (code) =>
+      resolve(code === 0 ? false : `bubblewrap cannot start here (exit ${code}: ${stderr.trim().slice(0, 160)})`),
+    );
+  });
+}
+
+test('createLocalTools: exec_command isolation under bubblewrap', async (t) => {
+  const reason = await bwrapUnavailableReason();
+  if (reason) {
+    t.skip(reason);
+    return;
+  }
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-sandbox-'));
+  try {
+    const tools = createLocalTools({ cwd: tmpDir });
+    const execTool = tools.find((t2) => t2.name === 'exec_command')!;
+    assert.ok(execTool);
+
+    // The sandboxed command runs for real through bwrap.
+    const execRes = (await execTool.handler({ command: 'node -e "console.log(12345)"' })) as any;
+    assert.match(execRes.stdout, /12345/);
 
     // Test bwrap sandbox blocks host filesystem mutations from dynamic code (fixes cloud-factory-cf-a9h)
     const hostEscapePath = path.join(os.tmpdir(), 'cf-escape-test-host');

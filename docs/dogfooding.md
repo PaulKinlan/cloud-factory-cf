@@ -149,3 +149,32 @@ The CLI:
 | `GITHUB_TOKEN` | GitHub Actions / Env | GitHub token with `pull-requests: write` permission to post review comments. |
 | `WEBHOOK_SECRET` | Worker / Repository Secrets | Secret key used to verify incoming GitHub webhook signatures (`x-hub-signature-256`). |
 | `CONTROL_KEY` | Worker / Repository Secrets | Bearer token required to trigger `/runs/:owner/:repo` queue draining. |
+
+## 5. Verifying the loop on a real pull request
+
+Two different reviewers can comment on a pull request in this repository, and they fail
+in different ways, so check which one you are looking at:
+
+| Who | Trigger | What a comment proves |
+| --- | --- | --- |
+| `dogfood-review` job (`.github/workflows/dogfood.yml`) | GitHub Actions on `opened`/`synchronize`/`reopened` | The CLI reviewer runs on the runner with the workflow's own `GITHUB_TOKEN`. Needs no infrastructure of ours. |
+| Deployed Worker (`/webhooks/github/:owner/:repo`) | A signed provider webhook | The full edge path: HMAC verification → `RepoCoordinator` SQLite queue → alarm drain → broker-issued credential → `GitHubPRReviewSink`. |
+
+The Worker path only works when all four links exist, and each failure looks different:
+
+1. **A current deployment.** `GET /health` returns the commit it was built from; a
+   deployment older than the branch under review is reviewing the wrong code.
+2. **The webhook secret.** With `WEBHOOK_SECRET` unset the Worker answers
+   `503 webhook secret not configured` and never queues the delivery (fail closed).
+3. **The provider credential and provisioning.** The review sink posts through
+   `CredentialBroker`, so the repository needs a `pr.review` capability provisioned, and
+   `GITHUB_TOKEN` set on the Worker (or App credentials). Otherwise the run settles as a
+   failure with no comment — the queue is drained, but nothing is posted.
+4. **A webhook on the repository** pointing at `<worker>/webhooks/github/<owner>/<repo>`.
+
+Without the webhook you can still exercise links 1–3 by posting a signed delivery
+yourself (section 3) and then confirming the comment with:
+
+```bash
+gh pr view <n> --json reviews,comments --jq '.reviews[].body, .comments[].body'
+```

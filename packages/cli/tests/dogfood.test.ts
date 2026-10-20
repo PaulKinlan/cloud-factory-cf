@@ -6,6 +6,7 @@ import * as os from 'node:os';
 import * as http from 'node:http';
 import * as crypto from 'node:crypto';
 import { runPrReview, sendWebhook, runCli, parseArgs } from '../src/index.ts';
+import { handleReviewCommand } from '../src/commands/review.ts';
 
 test('parseArgs: parses review and webhook commands correctly', () => {
   const reviewParsed = parseArgs([
@@ -539,6 +540,9 @@ test('runPrReview: degrades to step summary with notice without network calls (f
 
   const result = await runPrReview({
     cwd: tmpDir,
+    // Name the repository: a live post is refused outright when nothing names one
+    // (cloud-factory-cf-n2h0), and this test is about the read-only-token degradation.
+    repo: { owner: 'acme', name: 'widgets' },
     githubToken: 'ghp_readonly_fork_token',
     fetchFn: mockFetch,
     dryRun: false,
@@ -586,6 +590,216 @@ test('runCli: review command runs and succeeds with 0 exit code', async () => {
 
   assert.equal(exitCode, 0);
   assert.ok(logs.some((l) => l.includes('[factory-cloud review] Verdict:')));
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
+test('runPrReview: posts to the repository named by the event instead of the local default (cloud-factory-cf-n2h0)', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-event-repo-'));
+  await fs.writeFile(path.join(tmpDir, 'README.md'), '# hi\n', 'utf8');
+
+  const urls: string[] = [];
+  const mockFetch: typeof fetch = async (input) => {
+    urls.push(String(input));
+    return new Response(JSON.stringify({ id: 4242 }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  const result = await runPrReview({
+    cwd: tmpDir,
+    // No repo option: this is the Actions shape (--event, no --repo).
+    eventPayload: {
+      number: 42,
+      pull_request: {
+        number: 42,
+        title: 'docs: describe the loop',
+        user: { login: 'writer' },
+        head: { ref: 'fleet/docs', sha: 'a'.repeat(40) },
+        base: { ref: 'main' },
+      },
+      repository: { full_name: 'PaulKinlan/cloud-factory-cf' },
+    },
+    githubToken: 'ghp_actions_token',
+    fetchFn: mockFetch,
+    io: { stdout: () => {}, stderr: () => {} },
+  });
+
+  assert.deepEqual(result.repo, { owner: 'PaulKinlan', name: 'cloud-factory-cf' });
+  assert.equal(result.prNumber, 42);
+  assert.equal(result.posted, true);
+  assert.deepEqual(urls, [
+    'https://api.github.com/repos/PaulKinlan/cloud-factory-cf/pulls/42/reviews',
+  ]);
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
+test('runPrReview: refuses to post when nothing names a repository, and says why (cloud-factory-cf-n2h0)', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-no-repo-'));
+  await fs.writeFile(path.join(tmpDir, 'README.md'), '# hi\n', 'utf8');
+
+  let called = 0;
+  const mockFetch: typeof fetch = async () => {
+    called += 1;
+    return new Response('{}', { status: 200 });
+  };
+
+  const logs: string[] = [];
+  const savedEnv = process.env['GITHUB_REPOSITORY'];
+  delete process.env['GITHUB_REPOSITORY'];
+  try {
+    const result = await runPrReview({
+      cwd: tmpDir,
+      githubToken: 'ghp_actions_token',
+      fetchFn: mockFetch,
+      io: { stdout: (m) => logs.push(m), stderr: (m) => logs.push(m) },
+    });
+
+    assert.equal(called, 0, 'no request may be sent to a repository nobody named');
+    assert.equal(result.posted, false);
+    assert.ok(logs.some((l) => l.includes('No repository in the event payload or environment')));
+  } finally {
+    if (savedEnv === undefined) delete process.env['GITHUB_REPOSITORY'];
+    else process.env['GITHUB_REPOSITORY'] = savedEnv;
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('runCli: review takes the target from the event, not the local/local-repo default (cloud-factory-cf-n2h0)', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-event-repo-'));
+  const eventFilePath = path.join(tmpDir, 'event.json');
+  await fs.writeFile(
+    eventFilePath,
+    JSON.stringify({
+      number: 9,
+      pull_request: { number: 9, title: 'docs: x', user: { login: 'writer' } },
+      repository: { full_name: 'PaulKinlan/cloud-factory-cf' },
+    }),
+    'utf8',
+  );
+
+  const logs: string[] = [];
+  const exitCode = await runCli(
+    ['review', '--cwd', tmpDir, '--event', eventFilePath, '--dry-run'],
+    { stdout: (m) => logs.push(m), stderr: (m) => logs.push(m) },
+  );
+
+  assert.equal(exitCode, 0);
+  const prepared = logs.find((l) => l.includes('(dry-run) Review prepared'));
+  assert.ok(prepared, 'the dry run should say where the review was prepared for');
+  assert.ok(prepared!.includes('PaulKinlan/cloud-factory-cf'), `expected the event's repository, got: ${prepared}`);
+  assert.ok(!prepared!.includes('local/local-repo'), 'the CLI must not fall back to the offline default');
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
+test('runPrReview: posts an approval as a COMMENT review on Actions, because GitHub refuses bot approvals (cloud-factory-cf-n2h0)', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-actions-approve-'));
+  await fs.writeFile(path.join(tmpDir, 'README.md'), '# hi\n', 'utf8');
+
+  const calls: Array<{ url: string; event: string }> = [];
+  const mockFetch: typeof fetch = async (input, init) => {
+    const body = JSON.parse(String(init?.body ?? '{}')) as { event?: string };
+    calls.push({ url: String(input), event: String(body.event) });
+    return new Response(JSON.stringify({ id: 7 }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  const savedEnv = process.env['GITHUB_ACTIONS'];
+  process.env['GITHUB_ACTIONS'] = 'true';
+  try {
+    const result = await runPrReview({
+      cwd: tmpDir,
+      repo: { owner: 'PaulKinlan', name: 'cloud-factory-cf' },
+      prNumber: 1,
+      githubToken: 'ghs_actions_token',
+      fetchFn: mockFetch,
+      io: { stdout: () => {}, stderr: () => {} },
+    });
+
+    assert.equal(result.verdict, 'APPROVE');
+    assert.equal(result.posted, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.event, 'COMMENT', 'a bot approval must be sent as a comment review');
+  } finally {
+    if (savedEnv === undefined) delete process.env['GITHUB_ACTIONS'];
+    else process.env['GITHUB_ACTIONS'] = savedEnv;
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('runPrReview: retries a refused review event as COMMENT so the verdict still lands (cloud-factory-cf-n2h0)', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-422-retry-'));
+  await fs.writeFile(path.join(tmpDir, 'README.md'), '# hi\n', 'utf8');
+
+  const events: string[] = [];
+  const mockFetch: typeof fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body ?? '{}')) as { event?: string };
+    events.push(String(body.event));
+    if (events.length === 1) {
+      return new Response(
+        JSON.stringify({ message: 'Unprocessable Entity', errors: ['GitHub Actions is not permitted to approve pull requests.'] }),
+        { status: 422, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    return new Response(JSON.stringify({ id: 8 }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  const savedEnv = process.env['GITHUB_ACTIONS'];
+  delete process.env['GITHUB_ACTIONS'];
+  try {
+    const result = await runPrReview({
+      cwd: tmpDir,
+      repo: { owner: 'PaulKinlan', name: 'cloud-factory-cf' },
+      prNumber: 2,
+      githubToken: 'ghs_actions_token',
+      fetchFn: mockFetch,
+      io: { stdout: () => {}, stderr: () => {} },
+    });
+
+    assert.deepEqual(events, ['APPROVE', 'COMMENT']);
+    assert.equal(result.posted, true);
+  } finally {
+    if (savedEnv === undefined) delete process.env['GITHUB_ACTIONS'];
+    else process.env['GITHUB_ACTIONS'] = savedEnv;
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('handleReviewCommand: a context holding the offline default never pins the review target (cloud-factory-cf-n2h0)', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-handler-repo-'));
+  const eventFilePath = path.join(tmpDir, 'event.json');
+  await fs.writeFile(
+    eventFilePath,
+    JSON.stringify({
+      number: 3,
+      pull_request: { number: 3, title: 'docs: y', user: { login: 'writer' } },
+      repository: { full_name: 'PaulKinlan/cloud-factory-cf' },
+    }),
+    'utf8',
+  );
+
+  const logs: string[] = [];
+  // This is exactly what runCli hands the handler: local/local-repo unless --repo was given.
+  const code = await handleReviewCommand(
+    { command: 'review', eventFile: eventFilePath, dryRun: true } as never,
+    {
+      cwd: tmpDir,
+      owner: 'local',
+      name: 'local-repo',
+      io: { stdout: (m) => logs.push(m), stderr: (m) => logs.push(m) },
+    },
+  );
+
+  assert.equal(code, 0);
+  const prepared = logs.find((l) => l.includes('(dry-run) Review prepared'));
+  assert.ok(prepared, 'the handler should prepare a review');
+  assert.ok(prepared!.includes('PaulKinlan/cloud-factory-cf'), `got: ${prepared}`);
+  assert.ok(!prepared!.includes('local/local-repo'));
 
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
