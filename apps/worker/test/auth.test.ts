@@ -675,7 +675,7 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(capturedBody.client_secret).toBe("gh_test_client_secret");
 
     // 3. OrgCoordinator persistence returns 500 -> 502 (cloud-factory-cf-yp07)
-    const getSpy = vi.spyOn(env.ORG_COORDINATOR, "get").mockReturnValue({
+    const getSpy = vi.spyOn(env.ORG_COORDINATOR!, "get").mockReturnValue({
       fetch: vi.fn().mockResolvedValue(new Response("Internal Error", { status: 500 })),
     } as any);
 
@@ -862,7 +862,8 @@ describe("GitHub OAuth & App Install Flow", () => {
 
       // Verify JWT payload
       const [, payloadB64] = capturedJwt!.split(".");
-      const payload = JSON.parse(atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/")));
+      expect(payloadB64).toBeDefined();
+      const payload = JSON.parse(atob(payloadB64!.replace(/-/g, "+").replace(/_/g, "/")));
       expect(payload.iss).toBe(appId);
 
       // Verify JWT signature against keyPair.publicKey (cloud-factory-cf-5vat)
@@ -876,7 +877,8 @@ describe("GitHub OAuth & App Install Flow", () => {
         return arr;
       };
       const signedMessage = new TextEncoder().encode(`${jwtParts[0]}.${jwtParts[1]}`);
-      const signatureBytes = b64UrlToBytes(jwtParts[2]);
+      expect(jwtParts[2]).toBeDefined();
+      const signatureBytes = b64UrlToBytes(jwtParts[2]!);
       const isVerified = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", keyPair.publicKey, signatureBytes, signedMessage);
       expect(isVerified).toBe(true);
 

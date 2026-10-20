@@ -20,15 +20,16 @@ describe("GitHub App JWT & PEM helpers", () => {
     expect(jwt).toBeTypeOf("string");
     const parts = jwt.split(".");
     expect(parts.length).toBe(3);
+    const [headerB64, payloadB64, signatureB64] = parts as [string, string, string];
 
-    const header = JSON.parse(atob(parts[0].replace(/-/g, "+").replace(/_/g, "/")));
+    const header = JSON.parse(atob(headerB64.replace(/-/g, "+").replace(/_/g, "/")));
     expect(header).toMatchObject({ alg: "RS256", typ: "JWT" });
 
-    const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+    const payload = JSON.parse(atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/")));
     expect(payload.iss).toBe("123456");
     expect(payload.exp).toBeGreaterThan(payload.iat);
 
-    function base64UrlToBytes(str: string): Uint8Array {
+    function base64UrlToBytes(str: string): Uint8Array<ArrayBuffer> {
       const b64 = str.replace(/-/g, "+").replace(/_/g, "/") + "==".slice((2 - (str.length & 3)) & 3);
       const binary = atob(b64);
       const bytes = new Uint8Array(binary.length);
@@ -37,8 +38,8 @@ describe("GitHub App JWT & PEM helpers", () => {
     }
 
     // Cryptographically verify signature against public key (cloud-factory-cf-5vat)
-    const message = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
-    const sigBytes = base64UrlToBytes(parts[2]);
+    const message = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+    const sigBytes = base64UrlToBytes(signatureB64);
     const isValid = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", keyPair.publicKey, sigBytes, message);
     expect(isValid).toBe(true);
 
@@ -54,11 +55,12 @@ describe("GitHub App JWT & PEM helpers", () => {
       const pkcs1Jwt = await mintAppJwt("654321", pkcs1Key);
       const pkcs1Parts = pkcs1Jwt.split(".");
       expect(pkcs1Parts.length).toBe(3);
-      const pkcs1Payload = JSON.parse(atob(pkcs1Parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+      const [pkcs1HeaderB64, pkcs1PayloadB64, pkcs1SignatureB64] = pkcs1Parts as [string, string, string];
+      const pkcs1Payload = JSON.parse(atob(pkcs1PayloadB64.replace(/-/g, "+").replace(/_/g, "/")));
       expect(pkcs1Payload.iss).toBe("654321");
 
-      const pkcs1Message = new TextEncoder().encode(`${pkcs1Parts[0]}.${pkcs1Parts[1]}`);
-      const pkcs1SigBytes = base64UrlToBytes(pkcs1Parts[2]);
+      const pkcs1Message = new TextEncoder().encode(`${pkcs1HeaderB64}.${pkcs1PayloadB64}`);
+      const pkcs1SigBytes = base64UrlToBytes(pkcs1SignatureB64);
       const isPkcs1Valid = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", keyPair.publicKey, pkcs1SigBytes, pkcs1Message);
       expect(isPkcs1Valid).toBe(true);
     }
