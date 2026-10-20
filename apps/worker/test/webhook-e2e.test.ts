@@ -145,6 +145,17 @@ function armedAt(stub: ReturnType<typeof stubForKey>): Promise<number | null> {
   return runInDurableObject(stub, (_instance, state) => state.storage.getAlarm());
 }
 
+/**
+ * Assert the delivery itself scheduled the drain the platform would fire — production
+ * never invokes an alarm nobody armed, so a case that drains unconditionally could stay
+ * green after a regression stopped the webhook arming it (cloud-factory-cf-l7ud).
+ */
+async function expectArmed(stub: ReturnType<typeof stubForKey>): Promise<void> {
+  const armed = await armedAt(stub);
+  expect(armed).not.toBeNull();
+  expect(armed as number).toBeLessThanOrEqual(Date.now() + 5_000);
+}
+
 /** Fire the alarm the delivery armed, exactly as the platform would. */
 async function drain(stub: ReturnType<typeof stubForKey>): Promise<void> {
   await runInDurableObject(stub, (instance) =>
@@ -190,6 +201,21 @@ async function expectSettled(
   expect(statuses["processed"] ?? 0).toBe(processed);
   const distinct = new Set((await anyQueued(repository)).map((event) => event.deliveryId));
   expect(distinct.size).toBe(processed);
+}
+
+/**
+ * Assert a delivery left no trace under either RepoCoordinator key: nothing queued, no
+ * alarm armed and no processed counters. The worker may address `github:<repo>` or the
+ * bare repository, so a check on one key alone passes while the other holds the work
+ * (cloud-factory-cf-29ue).
+ */
+async function expectQuiet(repository: string): Promise<void> {
+  expect(await anyQueued(repository)).toHaveLength(0);
+  expect(await anyArmed(repository)).toBeNull();
+  for (const key of coordinatorKeys(repository)) {
+    const counts = await countsOf(stubForKey(key));
+    for (const status of ["pending", "processing", "failed", "processed"]) expect(counts[status] ?? 0).toBe(0);
+  }
 }
 
 /** The one review/posted comment, asserted to exist (keeps indexed access typed). */
@@ -263,9 +289,7 @@ describe("synthetic GitHub deliveries, end to end", () => {
     });
 
     // The delivery itself armed the alarm: nothing here calls POST /runs.
-    const armed = await armedAt(queue);
-    expect(armed).not.toBeNull();
-    expect(armed as number).toBeLessThanOrEqual(Date.now() + 5_000);
+    await expectArmed(queue);
 
     await drain(queue);
 
@@ -348,7 +372,9 @@ describe("synthetic GitHub deliveries, end to end", () => {
     ).toBe(202);
 
     const queue = await queueFor(repository, "e2e-closed-1");
+    await expectArmed(queue);
     await drain(queue);
+    expect(await armedAt(queue)).toBeNull();
 
     expect(calls).toHaveLength(0);
     await expectSettled(repository, queue, 1);
@@ -366,7 +392,9 @@ describe("synthetic GitHub deliveries, end to end", () => {
     expect((await deliver(repository, "e2e-issue-1", "issues", githubIssuesPayload({ repository, number: 9 }))).status).toBe(202);
 
     const queue = await queueFor(repository, "e2e-issue-1");
+    await expectArmed(queue);
     await drain(queue);
+    expect(await armedAt(queue)).toBeNull();
 
     const comment = singleComment(calls);
     expect(comment.url).toContain(`/repos/${repository}/issues/9/comments`);
@@ -395,8 +423,7 @@ describe("synthetic GitHub deliveries, end to end", () => {
     expect(response.status).toBe(202);
     await expect(response.json()).resolves.toMatchObject({ ok: true, ping: true });
 
-    expect(await anyQueued(repository)).toHaveLength(0);
-    expect(await anyArmed(repository)).toBeNull();
+    await expectQuiet(repository);
 
     const connect = await SELF.fetch(`https://example.com/trace/${repository}/connect`, {
       headers: { "x-factory-control-key": CONTROL_KEY },
@@ -419,8 +446,6 @@ describe("synthetic GitHub deliveries, end to end", () => {
     expect(forged.status).toBe(401);
     await expect(forged.json()).resolves.toMatchObject({ ok: false, error: "invalid signature" });
 
-    expect(await anyQueued(repository)).toHaveLength(0);
-    await expectSettled(repository, stubForKey(repository), 0);
-    expect(await anyArmed(repository)).toBeNull();
+    await expectQuiet(repository);
   });
 });
