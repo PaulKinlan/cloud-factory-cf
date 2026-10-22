@@ -229,22 +229,29 @@ describe("urls", () => {
     );
   });
 
-  it("builds the three endpoints and encodes the key", () => {
+  it("builds the endpoints and ticket parameter, without key in the socket URL", () => {
     const urls = traceUrls("https://factory.example/", "acme", "widget", "a b");
     expect(urls.trace).toBe("https://factory.example/trace/acme/widget?limit=50");
     expect(urls.usage).toBe("https://factory.example/trace/acme/widget/usage");
-    expect(urls.socket).toBe("wss://factory.example/trace/acme/widget/socket?key=a%20b&limit=50");
+    expect(urls.ticket).toBe("https://factory.example/trace/acme/widget/ticket");
+    expect(urls.socket).toBe("wss://factory.example/trace/acme/widget/socket?ticket=a%20b&limit=50");
+    expect(urls.socket).not.toContain("key=");
     expect(traceUrls("https://factory.example", "acme", "widget", "k", 12).socket).toContain("&limit=12");
+    expect(traceUrls("https://factory.example", "acme", "widget", "k", 12).socket).not.toContain("key=");
   });
 });
 
 describe("session", () => {
   it("loads usage and trace, then streams steps over the socket", async () => {
     const socket = fakeSocket();
+    let socketOpenedUrl = "";
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/usage")) {
         return jsonResponse({ ok: true, usage: { runs: 1, succeeded: 0, failed: 0, skipped: 1, actions: 0, tokensIn: 5, tokensOut: 1, estimated: true } });
+      }
+      if (url.endsWith("/ticket")) {
+        return jsonResponse({ ok: true, ticket: "test-ticket-xyz" });
       }
       return jsonResponse({ ok: true, count: 1, steps: [step({ id: "seed" })] });
     });
@@ -254,19 +261,25 @@ describe("session", () => {
       repo: "widget",
       key: "k",
       fetchImpl: fetchImpl as unknown as typeof fetch,
-      socketFactory: () => socket,
+      socketFactory: (url: string) => {
+        socketOpenedUrl = url;
+        return socket;
+      },
       pollMs: 5,
     });
 
     await session.connect();
     expect(session.state.usage?.runs).toBe(1);
     expect(session.state.steps.map((entry) => entry.id)).toEqual(["seed"]);
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    // Both requests carried the control key in a header, never in the URL.
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    // All three requests carried the control key in a header, never in the URL.
     for (const call of fetchImpl.mock.calls) {
       expect(String(call[0])).not.toContain("key=k");
       expect((call[1] as RequestInit).headers).toEqual({ "x-factory-control-key": "k" });
     }
+    // Socket was opened with the freshly minted ticket in query string, never key=
+    expect(socketOpenedUrl).toContain("ticket=test-ticket-xyz");
+    expect(socketOpenedUrl).not.toContain("key=");
 
     socket.emit("open");
     expect(session.state.status).toBe("live");
@@ -274,6 +287,42 @@ describe("session", () => {
     expect(session.state.steps[0]?.id).toBe("live-1");
     socket.emit("message", "not json");
     expect(session.state.steps).toHaveLength(2);
+    session.disconnect();
+  });
+
+  it("mints a fresh ticket before opening the socket and on each reconnect", async () => {
+    let ticketCounter = 1;
+    const socketUrls: string[] = [];
+    const socket = pingableSocket();
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/ticket")) {
+        return jsonResponse({ ok: true, ticket: `ticket-${ticketCounter++}` });
+      }
+      return jsonResponse({ ok: true, usage: null, steps: [] });
+    });
+    const session = new ObservabilitySession({
+      base: "https://factory.example",
+      owner: "acme",
+      repo: "widget",
+      key: "k",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      socketFactory: (url) => {
+        socketUrls.push(url);
+        return socket;
+      },
+      reconnectBaseMs: 100000,
+      pollMs: 100000,
+    });
+    await session.connect();
+    expect(socketUrls).toEqual(["wss://factory.example/trace/acme/widget/socket?ticket=ticket-1&limit=50"]);
+    socket.emit("open");
+    socket.emit("error");
+    await session.reconnect();
+    expect(socketUrls).toEqual([
+      "wss://factory.example/trace/acme/widget/socket?ticket=ticket-1&limit=50",
+      "wss://factory.example/trace/acme/widget/socket?ticket=ticket-2&limit=50",
+    ]);
     session.disconnect();
   });
 
@@ -401,11 +450,16 @@ describe("session", () => {
         owner: "acme",
         repo: "widget",
         key: "k",
-        fetchImpl: (async () => jsonResponse({ ok: true, usage: null, steps: [] })) as unknown as typeof fetch,
+        fetchImpl: (async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.endsWith("/ticket")) return jsonResponse({ ok: true, ticket: "k-ticket" });
+          return jsonResponse({ ok: true, usage: null, steps: [] });
+        }) as unknown as typeof fetch,
         pollMs: 100000,
       });
       await session.connect();
-      expect(opened).toEqual(["wss://factory.example/trace/acme/widget/socket?key=k&limit=50"]);
+      expect(opened).toEqual(["wss://factory.example/trace/acme/widget/socket?ticket=k-ticket&limit=50"]);
+      expect(opened[0]).not.toContain("key=");
       expect(session.polling).toBe(false);
       socket.emit("open");
       expect(session.state.status).toBe("live");
@@ -515,15 +569,19 @@ describe("heartbeat", () => {
     await session.connect();
     sockets[0]?.emit("open");
     expect(session.state.status).toBe("live");
-    await sleep(90);
+    await vi.waitFor(
+      () => {
+        expect(session.state.status).toBe("reconnecting");
+        expect(session.state.error).toContain("heartbeat lost");
+        expect(session.state.reconnectAttempts).toBe(1);
+        expect(sockets[0]?.closed).toBe(true);
+      },
+      { timeout: 1000, interval: 20 },
+    );
     // The socket still looked open; only the missing pong revealed it was dead.
-    expect(session.state.status).toBe("reconnecting");
-    expect(session.state.error).toContain("heartbeat lost");
-    expect(session.state.reconnectAttempts).toBe(1);
     expect(session.state.nextRetryAt).not.toBeNull();
     expect(session.retrying).toBe(true);
     expect(session.polling).toBe(true);
-    expect(sockets[0]?.closed).toBe(true);
     session.disconnect();
     expect(session.polling).toBe(false);
     expect(session.retrying).toBe(false);
@@ -573,6 +631,7 @@ describe("heartbeat", () => {
       socketFactory: () => {
         const socket = pingableSocket();
         sockets.push(socket);
+        setTimeout(() => socket.emit("open"), 5);
         return socket;
       },
       heartbeatMs: 10,
@@ -583,11 +642,13 @@ describe("heartbeat", () => {
     });
     await session.connect();
     sockets[0]?.emit("open");
-    await sleep(160);
-    // A socket that opens and then never answers must not reset the backoff,
-    // otherwise a flapping Worker is retried every second forever.
-    expect(session.state.reconnectAttempts).toBeGreaterThanOrEqual(2);
-    expect(sockets.length).toBeGreaterThanOrEqual(2);
+    await vi.waitFor(
+      () => {
+        expect(session.state.reconnectAttempts).toBeGreaterThanOrEqual(2);
+        expect(sockets.length).toBeGreaterThanOrEqual(2);
+      },
+      { timeout: 1500, interval: 20 },
+    );
     session.disconnect();
   });
 

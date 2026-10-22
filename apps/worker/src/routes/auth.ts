@@ -1,10 +1,12 @@
 import type { Env } from "../env";
 import { sameSecret } from "../secrets";
 import { importAppPrivateKey, mintAppJwt } from "../github-app";
+import { mintTraceTicket } from "./trace";
 
 export const AUTH_LOGIN_PATH = "/auth/github/login";
 export const AUTH_CALLBACK_PATH = "/auth/github/callback";
 export const API_REPOS_PATH = "/api/repos";
+export const API_REPOS_TRACE_TICKET_PATH = /^\/api\/repos\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/trace-ticket$/;
 
 /**
  * The browser's credential after a successful connect (cloud-factory-cf-d33).
@@ -154,7 +156,47 @@ export async function handleAuth(
     return handleApiRepos(request, env, url);
   }
 
+  const ticketMatch = API_REPOS_TRACE_TICKET_PATH.exec(url.pathname);
+  if (ticketMatch?.groups) {
+    return handleApiReposTraceTicket(request, env, url, ticketMatch.groups as { owner: string; repo: string });
+  }
+
   return null;
+}
+
+/**
+ * Mints an ephemeral ~60s trace WebSocket ticket for the specified repository (cloud-factory-cf-aqq3).
+ * Accepts either x-factory-control-key or the browser session cookie for that repository's owner.
+ */
+export async function handleApiReposTraceTicket(
+  request: Request,
+  env: Env,
+  url: URL,
+  { owner, repo }: { owner: string; repo: string },
+): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("method not allowed", { status: 405 });
+  }
+  const controlKey = env.BROKER_CONTROL_KEY;
+  if (!controlKey) {
+    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
+  }
+  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY ?? env.WEBHOOK_SECRET;
+  const provided = request.headers.get("x-factory-control-key");
+  const isControlAuthed = provided ? await sameSecret(controlKey, provided) : false;
+  let isSessionAuthed = false;
+  if (!isControlAuthed && signingKey) {
+    const session = await readSession(request.headers, signingKey);
+    if (session.ok && session.login.toLowerCase() === owner.toLowerCase()) {
+      isSessionAuthed = true;
+    }
+  }
+  if (!isControlAuthed && !isSessionAuthed) {
+    return Response.json({ ok: false, error: "not authorised to mint trace ticket" }, { status: 401 });
+  }
+  const ticketSigningKey = signingKey ?? controlKey;
+  const { ticket, expiresAt } = await mintTraceTicket(ticketSigningKey, owner, repo);
+  return Response.json({ ok: true, ticket, expiresAt });
 }
 
 export async function handleGithubLogin(

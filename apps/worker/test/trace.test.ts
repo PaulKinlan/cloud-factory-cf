@@ -223,9 +223,17 @@ describe("trace route guards", () => {
     return import("../src/index").then((module) => module.default);
   }
 
-  async function call(path: string, headers: Record<string, string> = {}, workerEnv = env): Promise<Response> {
+  async function call(
+    path: string,
+    init: Record<string, string> | RequestInit = {},
+    workerEnv = env,
+  ): Promise<Response> {
     const handler = await app();
-    return handler.fetch(new Request(`https://factory.example${path}`, { headers }), workerEnv as never);
+    const reqInit: RequestInit =
+      "headers" in init || "method" in init
+        ? (init as RequestInit)
+        : { headers: init as Record<string, string> };
+    return handler.fetch(new Request(`https://factory.example${path}`, reqInit), workerEnv as never);
   }
 
   it("serves the trace to the control plane only", async () => {
@@ -258,16 +266,85 @@ describe("trace route guards", () => {
     const empty = await call("/trace/acme/widget", { "x-factory-control-key": "" }, { ...env, BROKER_CONTROL_KEY: controlKey } as never);
     expect(empty.status).toBe(401);
 
-    // The socket takes the key as a query parameter (a browser cannot set a
-    // handshake header), and a real upgrade gets the 101 from the object.
-    const socket = await call(
+    // A bare control key in the query string is rejected (cloud-factory-cf-aqq3):
+    // secrets must never travel in URL query strings.
+    const bareKeySocket = await call(
       `/trace/acme/widget/socket?key=${controlKey}`,
       { upgrade: "websocket" },
+      { ...env, BROKER_CONTROL_KEY: controlKey } as never,
+    );
+    expect(bareKeySocket.status).toBe(401);
+
+    // Minting a short-lived, single-use ticket requires the control key header.
+    const unauthTicket = await call(
+      "/trace/acme/widget/ticket",
+      { method: "POST" },
+      { ...env, BROKER_CONTROL_KEY: controlKey } as never,
+    );
+    expect(unauthTicket.status).toBe(401);
+
+    const ticketRes = await call(
+      "/trace/acme/widget/ticket",
+      { method: "POST", headers: { "x-factory-control-key": controlKey } },
+      { ...env, BROKER_CONTROL_KEY: controlKey } as never,
+    );
+    expect(ticketRes.status).toBe(200);
+    const { ticket, expiresAt } = (await ticketRes.json()) as { ticket: string; expiresAt: number };
+    expect(typeof ticket).toBe("string");
+    expect(expiresAt).toBeGreaterThan(Date.now());
+
+    // The WebSocket handshake succeeds with a valid ticket.
+    const socket = await call(
+      `/trace/acme/widget/socket?ticket=${encodeURIComponent(ticket)}`,
+      { headers: { upgrade: "websocket" } },
       { ...env, BROKER_CONTROL_KEY: controlKey } as never,
     );
     expect(socket.status).toBe(101);
     socket.webSocket?.accept();
     socket.webSocket?.close();
+
+    // Tickets are single-use: reuse is rejected.
+    const reusedSocket = await call(
+      `/trace/acme/widget/socket?ticket=${encodeURIComponent(ticket)}`,
+      { headers: { upgrade: "websocket" } },
+      { ...env, BROKER_CONTROL_KEY: controlKey } as never,
+    );
+    expect(reusedSocket.status).toBe(401);
+
+    // Invalid / forged ticket is rejected.
+    const forgedSocket = await call(
+      "/trace/acme/widget/socket?ticket=forged-ticket-123",
+      { headers: { upgrade: "websocket" } },
+      { ...env, BROKER_CONTROL_KEY: controlKey } as never,
+    );
+    expect(forgedSocket.status).toBe(401);
+
+    // Machine/direct callers can also connect with the control key in a header.
+    const headerSocket = await call(
+      "/trace/acme/widget/socket",
+      { headers: { upgrade: "websocket", "x-factory-control-key": controlKey } },
+      { ...env, BROKER_CONTROL_KEY: controlKey } as never,
+    );
+    expect(headerSocket.status).toBe(101);
+    headerSocket.webSocket?.accept();
+    headerSocket.webSocket?.close();
+
+    // Also verify /api/repos/:owner/:repo/trace-ticket endpoint
+    const apiTicketRes = await call(
+      "/api/repos/acme/widget/trace-ticket",
+      { method: "POST", headers: { "x-factory-control-key": controlKey } },
+      { ...env, BROKER_CONTROL_KEY: controlKey } as never,
+    );
+    expect(apiTicketRes.status).toBe(200);
+    const apiTicketData = (await apiTicketRes.json()) as { ticket: string };
+    const apiSocket = await call(
+      `/trace/acme/widget/socket?ticket=${encodeURIComponent(apiTicketData.ticket)}`,
+      { headers: { upgrade: "websocket" } },
+      { ...env, BROKER_CONTROL_KEY: controlKey } as never,
+    );
+    expect(apiSocket.status).toBe(101);
+    apiSocket.webSocket?.accept();
+    apiSocket.webSocket?.close();
 
     // The webhook path is untouched by the new route.
     expect(env.REPO_COORDINATOR).toBe(worker);

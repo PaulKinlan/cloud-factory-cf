@@ -9,12 +9,15 @@ happened:
 | --- | --- | --- |
 | Trace | `GET /trace/:owner/:repo` | Which steps ran, in order, with their artifacts |
 | Usage | `GET /trace/:owner/:repo/usage` | How much work ran and roughly what it cost |
-| Live stream | `WS /trace/:owner/:repo/socket?key=…` | The same steps as they are recorded |
+| Ticket | `POST /trace/:owner/:repo/ticket` | Short-lived single-use ticket for the WebSocket |
+| Live stream | `WS /trace/:owner/:repo/socket?ticket=…` | The same steps as they are recorded |
 
-All three require the control key (`x-factory-control-key: $BROKER_CONTROL_KEY`, or
-`?key=` for the socket, which is the one place a browser cannot send a header). A
+Control endpoints require the control key (`x-factory-control-key: $BROKER_CONTROL_KEY`).
+The WebSocket handshake accepts `?ticket=` using an ephemeral single-use ticket minted via
+`POST /trace/:owner/:repo/ticket` (or `x-factory-control-key` in a header for non-browser
+clients); raw control keys in query strings are rejected (`cloud-factory-cf-aqq3`). A
 trace contains prompts and agent output, so it is control-plane data; with no key
-configured the routes answer `503`, with a wrong key `401`.
+configured the routes answer `503`, with a wrong key or expired ticket `401`.
 
 ## What a step is
 
@@ -66,7 +69,10 @@ and a deployment that wants money adds its own rate.
 ## Live stream
 
 ```
-WS /trace/:owner/:repo/socket?key=<BROKER_CONTROL_KEY>
+POST /trace/:owner/:repo/ticket (Header: x-factory-control-key: <BROKER_CONTROL_KEY>)
+→ {"ok":true,"ticket":"<uuid>","expiresAt":…}
+
+WS /trace/:owner/:repo/socket?ticket=<ticket>
 → {"type":"hello","repository":"acme/widget","steps":[ …last 20, newest first… ]}
 → {"type":"step","step":{ …one step as it is recorded… }}
 ```
