@@ -14,6 +14,7 @@ import {
   type ShareTarget,
 } from "./sync";
 import { initObservability } from "./observability";
+import { installLightDismiss } from "./light-dismiss";
 import { mountConnectGate } from "./onboarding";
 import {
   KIND_LABELS,
@@ -883,6 +884,9 @@ announce(`Canvas ready with ${doc.nodes.length} nodes`);
 
 // The repository gate: the header pill owns the scope, and the panels that need a
 // repository (share, observability) start from whatever the operator connected.
+// Backdrop/back-gesture dismissal for every dialog that asks for it (cloud-factory-cf-v62o).
+installLightDismiss(document);
+
 mountConnectGate(document, {
   appSlug: "cloud-factory",
   onScope: (scope) => {

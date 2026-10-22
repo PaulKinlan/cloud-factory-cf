@@ -183,7 +183,7 @@
       </section>
     </main>
 
-    <dialog id="connect-dialog" class="export-dialog connect-dialog" aria-label="Connect a GitHub repository">
+    <dialog id="connect-dialog" class="export-dialog connect-dialog" closedby="any" aria-label="Connect a GitHub repository">
       <h2>Connect GitHub</h2>
       <p class="muted">
         A repository is connected when its webhook reaches the factory. Install the app, then point the
@@ -227,7 +227,7 @@
       <span id="connect-announcer" class="sr-only" aria-live="polite"></span>
     </dialog>
 
-    <dialog id="share-dialog" class="export-dialog share-dialog" aria-label="Store this canvas with a repository">
+    <dialog id="share-dialog" class="export-dialog share-dialog" closedby="any" aria-label="Store this canvas with a repository">
       <h2>Repository documents</h2>
       <p class="muted">
         Saving stores the layout with the repository through the control-key API. Nothing leaves this page until you click Save.
@@ -255,7 +255,7 @@
       <ul id="share-list" class="share-list" aria-label="Stored documents"></ul>
     </dialog>
 
-    <dialog id="export-dialog" class="export-dialog" aria-label="Exported agent configuration">
+    <dialog id="export-dialog" class="export-dialog" closedby="any" aria-label="Exported agent configuration">
       <h2>Agent configuration</h2>
       <p class="muted">This is what the control plane consumes — edges collapsed into the agent they belong to.</p>
       <pre id="export-json"></pre>
