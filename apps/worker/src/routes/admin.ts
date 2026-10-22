@@ -10,10 +10,13 @@ export async function handleAdmin(
   env: Env,
   url: URL,
 ): Promise<Response | null> {
-  // 1. Rewrite /admin to serve admin.html via ASSETS
+  // 1. Serve admin dashboard via ASSETS at /admin by fetching /admin/index.html (avoiding 307 redirect)
   if (url.pathname === "/admin" || url.pathname === "/admin/") {
     if (!env.ASSETS) return new Response("not found", { status: 404 });
-    const assetUrl = new URL("/admin.html", request.url);
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return new Response("method not allowed", { status: 405 });
+    }
+    const assetUrl = new URL("/admin/index.html", request.url);
     const assetReq = new Request(assetUrl.toString(), request);
     return env.ASSETS.fetch(assetReq);
   }

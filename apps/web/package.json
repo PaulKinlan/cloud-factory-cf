@@ -6,7 +6,7 @@
   "description": "Isocan-style infinite canvas for wiring agents, event sources, memory hubs and action sinks",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && mkdir -p dist/admin && cp dist/admin.html dist/admin/index.html",
     "preview": "vite preview --port 4173",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
