@@ -3,14 +3,22 @@
  *
  * `<dialog closedby="any">` is the declarative way to let a click on the backdrop — and
  * the platform's back/dismiss gesture — close a modal dialog that was opened with
- * `showModal()` (see docs/speed.md's neighbours for the project's stance on native APIs
- * first). It is the whole mechanism in browsers that implement it; nothing else is
- * needed.
+ * `showModal()`. In an engine that implements the attribute, that one attribute is the
+ * whole mechanism and nothing else is needed.
+ *
+ * Where it is missing the fallback below covers the BACKDROP CLICK only. It deliberately
+ * does not claim the platform back gesture: the gesture is a browser-level dismissal that
+ * no portable web API can intercept once `closedby` is absent, and the history-based
+ * alternative (pushState on open, close on popstate) changes how the canvas's own back
+ * button behaves for every user, needs a Safari device to verify, and cannot be tested on
+ * this fleet's Linux VMs (cloud-factory-cf-pmkq). What keeps an engine without `closedby`
+ * usable is that every light-dismissable dialog still carries an explicit Close control,
+ * which light-dismiss.test.ts asserts — so dismissal is narrower there, never missing.
  *
  * TODO(baseline/dialog-closedby): delete installLightDismiss(), its call in main.ts and
  * the fallback test once `closedby` is Baseline Widely Available (web-features
  * `dialog-closedby`: Chrome/Edge 134, Firefox 141, no Safari as of 2026-10) — from then
- * on the attribute alone can dismiss the dialog on the backdrop.
+ * on the attribute alone can dismiss the dialog on the backdrop and the back gesture.
  */
 
 /** Does this browser implement `closedby` natively? Missing global means "no". */

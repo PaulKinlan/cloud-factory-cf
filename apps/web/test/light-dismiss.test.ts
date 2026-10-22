@@ -45,6 +45,15 @@ describe("dialog light-dismiss (cloud-factory-cf-v62o)", () => {
     }
   });
 
+  it("keeps an explicit close control inside every light-dismissable dialog", () => {
+    // The fallback engine (no closedby) only gets backdrop dismissal, never the platform
+    // back gesture, so the dialog must be escapable without any dismissal affordance
+    // working at all (cloud-factory-cf-pmkq).
+    for (const id of ["connect-close", "share-close", "export-close"]) {
+      expect(new RegExp(`<button[^>]*id="${id}"[^>]*>\\s*Close\\s*</button>`).test(indexHtml), `${id} must offer an explicit Close`).toBe(true);
+    }
+  });
+
   it("closes when the backdrop is clicked, where closedby is not implemented", () => {
     const dialog = fakeDialog();
     installLightDismiss(fakeRoot([dialog]));
