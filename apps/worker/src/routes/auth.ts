@@ -225,6 +225,55 @@ export async function handleGithubLogin(
   });
 }
 
+/** Why a callback's `state` did not match its signed `cf_oauth_state` cookie. */
+type StateFailure =
+  | "missing-state"
+  | "missing-cookie"
+  | "malformed-cookie"
+  | "bad-signature"
+  | "expired"
+  | "mismatch";
+
+const STATE_FAILURE_MESSAGES: Record<StateFailure, string> = {
+  "missing-state": "Missing required OAuth state parameter",
+  "missing-cookie": "Missing OAuth state cookie",
+  "malformed-cookie": "Malformed OAuth state cookie",
+  "bad-signature": "Invalid OAuth state signature",
+  expired: "OAuth state expired",
+  mismatch: "OAuth state mismatch (CSRF detected)",
+};
+
+/**
+ * Did this browser really start the flow that this callback answers? The `cf_oauth_state`
+ * cookie is signed over `<nonce>.<expiry>`, and the callback must echo that nonce as
+ * `state` — the standard OAuth CSRF check, shared by the code flow (which rejects a
+ * failure) and the install flow (which treats it as "unproven caller", see
+ * handleGithubCallback).
+ */
+async function verifyOAuthState(
+  request: Request,
+  state: string | null,
+  signingKey: string,
+): Promise<{ ok: true } | { ok: false; reason: StateFailure }> {
+  if (!state) return { ok: false, reason: "missing-state" };
+
+  const cookieVal = getCookie(request.headers, "cf_oauth_state");
+  if (!cookieVal) return { ok: false, reason: "missing-cookie" };
+
+  const parts = cookieVal.split(".");
+  if (parts.length !== 3) return { ok: false, reason: "malformed-cookie" };
+
+  const [cookieNonce, expStr, sig] = parts as [string, string, string];
+  const expectedSig = await signHmacSha256(signingKey, `${cookieNonce}.${expStr}`);
+  if (!(await sameSecret(expectedSig, sig))) return { ok: false, reason: "bad-signature" };
+
+  const exp = parseInt(expStr, 10);
+  if (isNaN(exp) || Math.floor(Date.now() / 1000) > exp) return { ok: false, reason: "expired" };
+
+  if (!(await sameSecret(cookieNonce, state))) return { ok: false, reason: "mismatch" };
+  return { ok: true };
+}
+
 export async function handleGithubCallback(
   request: Request,
   env: Env,
@@ -251,55 +300,39 @@ export async function handleGithubCallback(
 
   // OAuth code exchange requires strict CSRF verification via state parameter + signed cookie.
   // When code is present, enforce state verification before exchanging code for tokens.
-  if (code) {
-    if (!state) {
-      return Response.json(
-        { ok: false, error: "Missing required OAuth state parameter" },
-        { status: 400, headers: { "set-cookie": clearCookie } },
-      );
-    }
+  const stateCheck = await verifyOAuthState(request, state, signingKey);
+  if (code && !stateCheck.ok) {
+    return Response.json(
+      { ok: false, error: STATE_FAILURE_MESSAGES[stateCheck.reason] },
+      { status: 400, headers: { "set-cookie": clearCookie } },
+    );
+  }
 
-    const cookieVal = getCookie(request.headers, "cf_oauth_state");
-    if (!cookieVal) {
-      return Response.json(
-        { ok: false, error: "Missing OAuth state cookie" },
-        { status: 400, headers: { "set-cookie": clearCookie } },
-      );
+  // An install callback this browser did not start (no valid signed state) proves that an
+  // installation exists, never who is asking: the App JWT resolves *any* installation of
+  // the app, so `installation_id` is caller-supplied. Running the install branch for such
+  // a caller wrote another org's `authorized_repos` (a cross-tenant write) and handed back
+  // a session for that org's login. So an unproven install callback now does no GitHub
+  // work and writes nothing; it sends the operator back to complete the OAuth login, which
+  // keeps the state gate and mints a session only for the login GitHub confirms
+  // (cloud-factory-cf-dnrm).
+  if (!code && !stateCheck.ok) {
+    const pendingUrl = new URL(returnTo, url.origin);
+    if (pendingUrl.origin !== url.origin) {
+      pendingUrl.href = new URL("/", url.origin).href;
     }
-
-    const parts = cookieVal.split(".");
-    if (parts.length !== 3) {
-      return Response.json(
-        { ok: false, error: "Malformed OAuth state cookie" },
-        { status: 400, headers: { "set-cookie": clearCookie } },
-      );
+    pendingUrl.searchParams.set("connected", "1");
+    pendingUrl.searchParams.set("count", "0");
+    // The canvas opens its connect dialog on `connected=1`; an empty repository list and
+    // this flag are the operator's prompt to run the OAuth flow that yields a session.
+    pendingUrl.searchParams.set("needs_oauth", "1");
+    if (installationId) {
+      pendingUrl.searchParams.set("installation_id", installationId);
     }
-
-    const [cookieNonce, expStr, sig] = parts as [string, string, string];
-    const dataToSign = `${cookieNonce}.${expStr}`;
-    const expectedSig = await signHmacSha256(signingKey, dataToSign);
-
-    if (!(await sameSecret(expectedSig, sig))) {
-      return Response.json(
-        { ok: false, error: "Invalid OAuth state signature" },
-        { status: 400, headers: { "set-cookie": clearCookie } },
-      );
-    }
-
-    const exp = parseInt(expStr, 10);
-    if (isNaN(exp) || Math.floor(Date.now() / 1000) > exp) {
-      return Response.json(
-        { ok: false, error: "OAuth state expired" },
-        { status: 400, headers: { "set-cookie": clearCookie } },
-      );
-    }
-
-    if (!(await sameSecret(cookieNonce, state))) {
-      return Response.json(
-        { ok: false, error: "OAuth state mismatch (CSRF detected)" },
-        { status: 400, headers: { "set-cookie": clearCookie } },
-      );
-    }
+    return new Response(null, {
+      status: 302,
+      headers: await successHeaders(pendingUrl, url, signingKey, null),
+    });
   }
 
   const clientId = env.GITHUB_CLIENT_ID;
@@ -655,27 +688,40 @@ export async function handleGithubCallback(
     redirectUrl.searchParams.set("installation_id", installationId);
   }
 
+  // A session is the browser's credential for reading one account's repositories
+  // (`/api/repos`), so it may only be minted for a caller whose identity GitHub has
+  // actually confirmed. An OAuth `code` exchange does that: GitHub returns a token for
+  // the presenting user and `/user` names them. An install-only callback carries a
+  // caller-supplied `installation_id` and no identity at all — GitHub's App JWT can
+  // resolve any installation of the app — so minting a session there handed any caller
+  // a credential for another org's login and its private repository metadata
+  // (cloud-factory-cf-dnrm). Install-only callbacks still register the installation
+  // (section 3) and redirect, they just do not authenticate the browser.
+  const authenticatedLogin = accessToken ? accountLogin : null;
+
   return new Response(null, {
     status: 302,
-    headers: await successHeaders(redirectUrl, url, signingKey, accountLogin),
+    headers: await successHeaders(redirectUrl, url, signingKey, authenticatedLogin),
   });
 }
 
 /**
  * Success is a redirect plus the cookies the browser needs afterwards: the state cookie
- * goes away, and — when the account is known — a session for it is minted so the canvas
- * can load its own repositories (see SESSION_COOKIE).
+ * goes away, and — when the caller has been authenticated by an OAuth code exchange — a
+ * session for that login is minted so the canvas can load its own repositories (see
+ * SESSION_COOKIE). `sessionLogin` is `null` for install-only callbacks, which prove an
+ * installation exists but not who is asking.
  */
 async function successHeaders(
   redirectUrl: URL,
   url: URL,
   signingKey: string,
-  accountLogin: string,
+  sessionLogin: string | null,
 ): Promise<Headers> {
   const headers = new Headers({ location: redirectUrl.toString() });
   headers.append("set-cookie", `cf_oauth_state=; ${cookieAttrs(url, "/auth/github")}; Max-Age=0`);
-  if (accountLogin !== "unknown") {
-    headers.append("set-cookie", sessionCookie(await mintSessionToken(signingKey, accountLogin), url));
+  if (sessionLogin && sessionLogin !== "unknown") {
+    headers.append("set-cookie", sessionCookie(await mintSessionToken(signingKey, sessionLogin), url));
   }
   return headers;
 }

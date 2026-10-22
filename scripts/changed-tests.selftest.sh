@@ -71,6 +71,17 @@ fi
 echo "FAKE npm test in $(basename "$PWD")"; exit "${FAKE_NPM_RC:-0}"
 SH
     chmod +x node_modules/.bin/vitest node_modules/.bin/npm
+    # Fake npx. The gate invokes `npx vitest …`, and a REAL npx resolves a command it
+    # cannot find in the workspace's own node_modules through the registry: the fixture
+    # workspaces have no node_modules, so this self-test silently depended on the network
+    # and hit its 60s bound on a loaded VM (case 9, unowned test file -> smoke set).
+    cat > node_modules/.bin/npx <<'SH'
+#!/usr/bin/env bash
+# Fake npx: drop the command name (vitest) and run this fixture's fake runner.
+shift
+exec vitest "$@"
+SH
+    chmod +x node_modules/.bin/npx
     # apps/* : vitest workspaces. packages/* : node:test, plus a workspace with no
     # test script at all (the unmapped-source case).
     for ws in apps/web apps/worker; do
@@ -154,6 +165,26 @@ reset_tree
 printf '// edit\n' >> "$FIX/packages/nodep/tests/n.test.ts"
 run_gate
 check "test-only delta runs the owning workspace suite" 'test "$RC" -eq 0 && out_has "whole suite (test-file delta" && out_has "FAKE npm test in nodep"'
+reset_tree
+
+# 3b. A MODIFIED test file in a vitest workspace runs only the affected suites: naming
+#     every suite in the workspace because one test file was edited is what put
+#     apps/worker's 35-file suite past the fast tier's bound and got unrelated landings
+#     KILLED at it (cloud-factory-cf-67sy).
+printf '\n// touch\n' >> "$FIX/apps/web/test/a.test.ts"
+export FAKE_SELECT="apps/web/test/a.test.ts"
+run_gate
+check "a modified test file runs the affected suites, not the whole suite" 'test "$RC" -eq 0 && out_has "1 affected test file(s) (test-file delta" && out_has "FAKE vitest run in web"'
+run_gate --list
+check "--list reports affected suites for a modified test file" 'test "$RC" -eq 0 && out_has "1 affected test file(s) (test-file delta"'
+unset FAKE_SELECT
+reset_tree
+
+# 3c. ... while a DELETED test file keeps the workspace-wide run, because --changed cannot
+#     select a path that no longer exists (cloud-factory-cf-8f1).
+rm "$FIX/apps/worker/test/assets.test.ts"
+run_gate
+check "a deleted test keeps the workspace-wide run" 'test "$RC" -eq 0 && out_has "whole suite (test-file delta" && out_has "FAKE vitest run in worker"'
 reset_tree
 
 # 4. THE BUG THIS SELF-TEST EXISTS FOR (bead cloud-factory-cf-9uu): a test change in one
