@@ -515,9 +515,11 @@ describe("heartbeat", () => {
     await session.connect();
     sockets[0]?.emit("open");
     expect(session.state.status).toBe("live");
-    await sleep(90);
+    // Wait for the transition instead of sleeping a fixed 90ms: with real timers on a
+    // loaded VM the 10ms heartbeat interval may not get its second turn inside the sleep,
+    // which made this a red for every lane whose delta selects apps/web.
+    await vi.waitFor(() => expect(session.state.status).toBe("reconnecting"), { timeout: 5000, interval: 10 });
     // The socket still looked open; only the missing pong revealed it was dead.
-    expect(session.state.status).toBe("reconnecting");
     expect(session.state.error).toContain("heartbeat lost");
     expect(session.state.reconnectAttempts).toBe(1);
     expect(session.state.nextRetryAt).not.toBeNull();
@@ -553,8 +555,7 @@ describe("heartbeat", () => {
     // handshake is being swallowed: no `open` event will ever arrive.
     expect(session.state.status).toBe("connecting");
     expect(sockets[0]?.readyState).toBe(0);
-    await sleep(90);
-    expect(session.state.status).toBe("reconnecting");
+    await vi.waitFor(() => expect(session.state.status).toBe("reconnecting"), { timeout: 5000, interval: 10 });
     expect(session.state.error).toContain("handshake timed out");
     expect(session.state.reconnectAttempts).toBe(1);
     expect(sockets[0]?.closed).toBe(true);
@@ -583,10 +584,14 @@ describe("heartbeat", () => {
     });
     await session.connect();
     sockets[0]?.emit("open");
-    await sleep(160);
-    // A socket that opens and then never answers must not reset the backoff,
-    // otherwise a flapping Worker is retried every second forever.
-    expect(session.state.reconnectAttempts).toBeGreaterThanOrEqual(2);
+    // A socket that opens and then never answers must not reset the backoff, otherwise a
+    // flapping Worker is retried every second forever. Wait for the second attempt rather
+    // than sleeping 160ms: the backoff timers are real timers, and a starved CPU can spend
+    // the whole sleep before the first attempt has even failed.
+    await vi.waitFor(() => expect(session.state.reconnectAttempts).toBeGreaterThanOrEqual(2), {
+      timeout: 5000,
+      interval: 10,
+    });
     expect(sockets.length).toBeGreaterThanOrEqual(2);
     session.disconnect();
   });

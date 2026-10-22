@@ -61,11 +61,17 @@ contract:
   Node like `apps/web/src/main.ts`—which is driven in Chrome via CDP—are explicitly
   listed in `DECLARED_UNVERIFIED` referencing `cloud-factory-cf-5e8`/`d8s`, and trigger
   the workspace smoke suite instead of failing);
-- a delta whose only changes are **test files** runs the owning workspace's whole
-  suite (a deleted or renamed test is never selected by `vitest --changed`, so
-  asking for the delta would run nothing), and test files no workspace runs are
-  named as "not part of the gate"; it never hard-FAILs on a test-only delta —
-  that red means the *mapping* is wrong, not the change (bead `cloud-factory-cf-8f1`);
+- a delta that contains **test files** runs the suites that delta affects — the
+  changed test files plus the suites of the changed sources beside them — and falls
+  back to the owning workspace's whole suite only when `vitest --changed` cannot
+  select the delta (a **deleted or renamed** test is never selected, so asking for
+  the delta would run nothing: bead `cloud-factory-cf-8f1`); test files no workspace
+  runs are named as "not part of the gate"; it never hard-FAILs on a test-only
+  delta — that red means the *mapping* is wrong, not the change. Naming every suite
+  in the workspace because one test file was edited put `apps/worker`'s 35-file
+  suite past the fast tier's bound and got unrelated landings killed at it, so only
+  the deleted/renamed case pays for a workspace-wide run now (bead
+  `cloud-factory-cf-67sy`);
 - a test-file delta that removes **every** test file of a workspace is named as a no-op
   ("no test files remain") instead of running a suite that can only answer
   `No test files found` — vitest exits 1 for that, which would be a red for a mapping

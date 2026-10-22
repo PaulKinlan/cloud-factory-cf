@@ -351,8 +351,40 @@ for ws in "${WS_ORDER[@]}"; do
       continue
     fi
 
-    # Whole suite: a deleted or renamed test is never selected by `vitest --changed`,
-    # so asking for the delta would run nothing (cloud-factory-cf-8f1).
+    # Is this delta removing a test file? `vitest --changed` can only select a path that
+    # still exists, so a deleted or renamed test keeps the workspace-wide run
+    # (cloud-factory-cf-8f1).
+    test_gone=""
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      [ -f "$path" ] || test_gone+="$path"$'\n'
+    done <<< "$ws_tests"
+
+    selected=0
+    if [ -z "$test_gone" ] && [ "$kind" = "vitest" ]; then
+      selected=$( (cd "$ws" && npx vitest list --changed "$BASE" --filesOnly 2>/dev/null) | grep -cE '\.(test|spec)\.[cm]?[jt]sx?$' || true)
+      case "$selected" in ''|*[!0-9]*) selected=0 ;; esac
+    fi
+
+    if [ -z "$test_gone" ] && [ "$selected" -gt 0 ]; then
+      # Every changed test file still exists and vitest can attribute this delta to suites:
+      # run exactly those. Naming every suite in the workspace because one test file was
+      # edited is what put apps/worker's 35-file suite past the fast tier's bound and got
+      # unrelated landings KILLED at it (cloud-factory-cf-67sy).
+      if [ "$LIST" -eq 1 ]; then
+        echo "changed-tests: ${ws}: ${selected} affected test file(s) (test-file delta)"
+        (cd "$ws" && npx vitest list --changed "$BASE" --filesOnly 2>/dev/null) | sed 's/^/  /'
+        continue
+      fi
+      echo "changed-tests: ${ws}: ${selected} affected test file(s) (test-file delta: $(echo "$ws_tests" | tr '\n' ' '))"
+      ran=$((ran + 1))
+      run_ws_tests "$ws" npx vitest run --changed "$BASE" || status=1
+      continue
+    fi
+
+    # Whole suite: a deleted or renamed test is never selected by `vitest --changed`, so
+    # asking for the delta would run nothing, and a delta vitest cannot attribute at all
+    # must not pass on an empty run (cloud-factory-cf-8f1).
     if [ "$LIST" -eq 1 ]; then
       echo "changed-tests: ${ws}: whole suite (test-file delta)"
       echo "$ws_tests" | grep -v '^$' | sed 's/^/  /'
