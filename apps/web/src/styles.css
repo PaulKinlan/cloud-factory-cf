@@ -962,6 +962,25 @@ textarea.field__control {
   width: 100%;
 }
 
+.connect-url-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.connect-url-row .field__control {
+  flex: 1;
+}
+
+.connect-url-row .button {
+  white-space: nowrap;
+}
+
 .connect-dialog .dialog-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
   flex-wrap: wrap;
+  margin-top: 14px;
 }

@@ -198,32 +198,26 @@
         </div>
         <label class="field">
           <span>Owner</span>
-          <input id="connect-owner" type="text" placeholder="owner or organisation" autocomplete="off" />
+          <input id="connect-owner" class="field__control" type="text" placeholder="owner or organisation" autocomplete="off" />
         </label>
         <label class="field">
           <span>Repository</span>
-          <input id="connect-repo" type="text" placeholder="repo" autocomplete="off" />
-        </label>
-        <label class="field">
-          <span>Control key</span>
-          <input id="connect-key" type="password" autocomplete="off" placeholder="not stored on this device" />
+          <input id="connect-repo" class="field__control" type="text" placeholder="repo" autocomplete="off" />
         </label>
       </div>
-      <label class="field">
+      <div class="field">
         <span>Webhook URL (payload URL)</span>
-        <input id="connect-url" type="text" readonly />
-      </label>
+        <div class="connect-url-row">
+          <input id="connect-url" class="field__control" type="text" readonly />
+          <button type="button" id="connect-copy" class="button button--ghost">Copy</button>
+        </div>
+      </div>
       <div class="dialog-actions share-actions">
-        <a id="connect-install" class="button" href="https://github.com/apps/cloud-agent-factory/installations/new" target="_blank" rel="noopener noreferrer">Install GitHub App</a>
-        <button type="button" id="connect-copy" class="button button--ghost">Copy webhook URL</button>
+        <a id="connect-install" class="button button--agent" href="https://github.com/apps/cloud-agent-factory/installations/new" target="_blank" rel="noopener noreferrer">Install GitHub App</a>
         <button type="button" id="connect-check" class="button button--ghost">Check connection</button>
         <button type="button" id="connect-close" class="button button--ghost">Close</button>
       </div>
       <p id="connect-status" class="connect-status connect-status--muted" role="status" aria-live="polite">Not checked yet</p>
-      <p class="muted">
-        The control key stays in this page. Your webhook secret is set when you create the hook in GitHub and is
-        never typed here.
-      </p>
       <span id="connect-announcer" class="sr-only" aria-live="polite"></span>
     </dialog>
 

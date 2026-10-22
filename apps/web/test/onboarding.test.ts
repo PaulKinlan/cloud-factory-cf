@@ -132,13 +132,19 @@ describe("markup contract", () => {
     expect(indexHtml).toMatch(/<dialog[^>]*id="connect-dialog"/);
   });
 
-  it("shows the webhook URL read-only and keeps the key out of the DOM's value", () => {
+  it("shows the webhook URL read-only and styles input controls with field__control", () => {
     const url = /<input[^>]*id="connect-url"[^>]*>/.exec(indexHtml)?.[0] ?? "";
     expect(url).toContain("readonly");
-    const key = /<input[^>]*id="connect-key"[^>]*>/.exec(indexHtml)?.[0] ?? "";
-    expect(key).toContain('type="password"');
-    expect(key).toContain('autocomplete="off"');
-    // The key lives in the page only; nothing here persists it.
+    expect(url).toContain('class="field__control"');
+
+    const owner = /<input[^>]*id="connect-owner"[^>]*>/.exec(indexHtml)?.[0] ?? "";
+    expect(owner).toContain('class="field__control"');
+
+    const repo = /<input[^>]*id="connect-repo"[^>]*>/.exec(indexHtml)?.[0] ?? "";
+    expect(repo).toContain('class="field__control"');
+
+    // Control key is removed entirely from connect dialog
+    expect(indexHtml).not.toContain('id="connect-key"');
     expect(indexHtml).not.toContain("localStorage");
   });
 
