@@ -72,8 +72,20 @@ To run without the master key:
 3. Leave `BROKER_CONTROL_KEY` unset **unless** you use the CLI, a scheduler, or the
    execution routes above. Set it only if `docs/credentials.md`'s "still
    control-key-only" list matters to you.
-4. Verify: sign in with GitHub, open the canvas — no prompt; `/api/repos` lists your
-   own repositories; `curl -H 'x-factory-control-key: …'` still works where it did.
+4. Verify what a keyless deployment actually serves **today** (see the table below).
+
+### What works with the key unset — as of `a902a86`
+
+| Surface | Keyless behaviour | Blocked on |
+| --- | --- | --- |
+| `/audit/*`, `/canvas/<owner>/<repo>/documents`, `/studio/*`, `/analysis/*/tree` | serves the session's own tenant; 403 for another `:owner` | — |
+| `/api/repos` (the canvas repository list) | **still 503** — `handleApiRepos` returns early when `BROKER_CONTROL_KEY` is unset, before it looks at a session | `cloud-factory-cf-owqq` (implemented on `fleet/imp-admin`, unmerged) |
+| The web UI | **still prompts** for a control key in the connect dialog and admin panel | `cloud-factory-cf-qdud` |
+| `/runs/*`, `/canvas/.../run`, `/broker/*`, `/admin/*`, `/trace/*` | 503/401 without the key | `cloud-factory-cf-ec98` |
+
+So a keyless deployment is a *supported target*, not a finished state: the tenant
+boundary is real on the routes listed as serving sessions, and the three rows above say
+what is not. Do not read this ADR as a claim that the key is already unnecessary.
 
 Rollback is setting `BROKER_CONTROL_KEY` again: the machine path is checked first and
 was never removed, so no route becomes unusable while the debts are open.
@@ -82,8 +94,9 @@ was never removed, so no route becomes unusable while the debts are open.
 
 **Positive.** Removing one shared secret removes the blast radius that made a hosted,
 multi-customer deployment impossible. A leaked browser credential is one login's
-read access, revocable by expiring a cookie, not every tenant's data. The prompt
-disappears, so nobody has a habit of pasting the master key.
+read access, revocable by expiring a cookie, not every tenant's data. Once slice 2
+lands, the prompt disappears, so nobody has a habit of pasting the master key (until
+then it still appears — see the keyless table above).
 
 **Negative / accepted.** Two credentials to reason about instead of one; a session
 cannot act for an org it merely has read access to (that is ADR 006's org role), so an
@@ -100,9 +113,9 @@ closes this).
 
 | Slice | Work | Bead | State |
 | --- | --- | --- | --- |
-| 1 | Session as tenant-bound control-plane credential on `/audit`, `/canvas` documents, `/studio`, `/analysis` tree | `cloud-factory-cf-e1ql` | implemented, in review |
-| 2 | UI stops prompting for the control key; repo connect via browser session | `cloud-factory-cf-qdud` | open |
-| 3 | Trace WebSocket stops carrying the key in a query string (ephemeral ticket) | `cloud-factory-cf-aqq3` | in review (lane imp-2) |
+| 1 | Session as tenant-bound control-plane credential on `/audit`, `/canvas` documents, `/studio`, `/analysis` tree | `cloud-factory-cf-e1ql` | implemented, cleared for landing |
+| 2 | UI stops prompting for the control key; repo connect via browser session (`/api/repos` keyless fix is `owqq`) | `cloud-factory-cf-qdud` | open |
+| 3 | Trace WebSocket stops carrying the key in a query string (ephemeral ticket) | `cloud-factory-cf-aqq3` | branch exists (`fleet/imp-2-aqq3`); its lane is gone and the bead is `review-failed`/`waiting` — orphaned, needs re-routing |
 | 4 | Per-tenant capability issuance; execution routes drop the master key | `cloud-factory-cf-ec98` | open (needs ADR 006 slices 1–2) |
 
 ## Alternatives considered
