@@ -56,7 +56,7 @@ export async function handleGitTree(request: Request, env: Env, url: URL): Promi
       if (!revision) return Response.json({ ok: false, error: "tarball revision required" }, { status: 400 });
       try {
         if (contentType === "application/gzip") {
-          bytes = await readBounded(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip")), MAX_TREE_BYTES);
+          bytes = await readBounded(new Blob([new Uint8Array(bytes)]).stream().pipeThrough(new DecompressionStream("gzip")), MAX_TREE_BYTES);
         }
         body = JSON.stringify({ source: "tarball", revision, files: tarballFiles(bytes) });
       } catch (error) { return Response.json({ ok: false, error: (error as Error).message }, { status: 400 }); }

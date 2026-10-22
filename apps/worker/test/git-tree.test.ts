@@ -64,6 +64,13 @@ describe("provider-independent git tree snapshot", () => {
     });
     expect(response.status).toBe(201);
     await expect((await call(endpoint)).json()).resolves.toMatchObject({ source: "tarball", revision: "archive-1", count: 1, files: [{ path: "docs/hello.txt", size: 5 }] });
+    const compressed = new Blob([new Uint8Array(bytes)]).stream().pipeThrough(new CompressionStream("gzip"));
+    const gzip = await new Response(compressed).arrayBuffer();
+    const zipped = await SELF.fetch(`${endpoint}&revision=archive-gz`, {
+      method: "POST", headers: { "x-factory-control-key": key, "content-type": "application/gzip" }, body: gzip,
+    });
+    expect(zipped.status).toBe(201);
+    await expect((await call(endpoint)).json()).resolves.toMatchObject({ revision: "archive-gz", count: 1 });
     expect((await SELF.fetch(`${endpoint}&revision=archive-2`, { method: "POST", headers: { "x-factory-control-key": key, "content-type": "application/x-tar" }, body: new Uint8Array(512) })).status).toBe(400);
   });
 
