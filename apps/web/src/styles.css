@@ -375,6 +375,27 @@ kbd {
   font-size: 0.85rem;
 }
 
+/* Typography: headings break evenly instead of leaving one orphan word on the last
+   line, and prose gets the standard "pretty" pass for the same reason
+   (cloud-factory-cf-1v4g). Both are capped/degrade to normal wrapping in engines that
+   lack them, so neither needs fallback code or a Baseline TODO. Balance is kept off
+   long body copy, where it is a no-op at best. */
+.topbar h1,
+.inspector h2,
+.export-dialog h2,
+.obs-header h2,
+.obs-section h3,
+.obs-hud-label {
+  text-wrap: balance;
+}
+
+.muted,
+.obs-note,
+.obs-hud-note,
+p {
+  text-wrap: pretty;
+}
+
 .field {
   display: block;
   margin-bottom: 12px;
