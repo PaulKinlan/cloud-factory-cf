@@ -5,6 +5,7 @@ import { planAgents, sourceMatches } from "./canvas-runs";
 import { safeParseJson } from "./events/helpers";
 import { createDefaultExecutionFn, drainRepository } from "./pipeline";
 import { CanvasStore, migrateCanvasTable } from "./canvas-store";
+import { GitTreeStore, migrateGitTreeTable } from "./git-tree-store";
 import { MemoryHandler, migrateMemoryTable } from "./memory";
 import { sameSecret } from "./secrets";
 import {
@@ -55,6 +56,7 @@ const AUTO_DRAIN_RETRY_MS = 30_000;
 export class RepoCoordinator extends DurableObject<Env> {
   private memoryHandler!: MemoryHandler;
   private canvasStore!: CanvasStore;
+  private gitTreeStore!: GitTreeStore;
   private eventQueue!: EventQueue;
   private deliveryLedger!: DeliveryLedger;
   private runAuditStore!: RunAuditStore;
@@ -72,6 +74,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     const unadornedRepo = parsedName ? parsedName.repository : rawName;
     this.memoryHandler = new MemoryHandler(this.ctx.storage.sql);
     this.canvasStore = new CanvasStore(this.ctx.storage.sql, unadornedRepo);
+    this.gitTreeStore = new GitTreeStore(this.ctx.storage.sql);
     this.deliveryLedger = new DeliveryLedger(this.ctx.storage.sql);
     this.runAuditStore = new RunAuditStore(this.ctx.storage.sql);
     // The trace store broadcasts to this object's open sockets, so a viewer sees a
@@ -368,6 +371,20 @@ export class RepoCoordinator extends DurableObject<Env> {
       const requeued = await this.eventQueue.requeueExpiredLeases();
       return Response.json({ ok: true, requeued });
     }
+    if (url.pathname === "/git-tree") {
+      if (request.method === "GET") return this.gitTreeStore.list(url);
+      if (request.method === "PUT") {
+        const text = await request.text();
+        if (new TextEncoder().encode(text).length > 4 * 1024 * 1024) return Response.json({ ok: false, error: "tree exceeds size limit" }, { status: 413 });
+        let body: unknown;
+        try { body = JSON.parse(text); } catch { return Response.json({ ok: false, error: "invalid json" }, { status: 400 }); }
+        return this.ctx.storage.transactionSync(() => this.gitTreeStore.replace(body));
+      }
+      return new Response("method not allowed", { status: 405 });
+    }
+    if (request.method === "GET" && url.pathname.startsWith("/git-tree/files/")) {
+      return this.gitTreeStore.file(decodeURIComponent(url.pathname.slice("/git-tree/files/".length)));
+    }
     if (url.pathname === "/canvas" || url.pathname.startsWith("/canvas/")) {
       const id = url.pathname === "/canvas" ? "" : decodeURIComponent(url.pathname.slice("/canvas/".length));
       if (request.method === "GET") return id ? this.canvasStore.get(id) : this.canvasStore.list(url);
@@ -554,6 +571,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     `);
     migrateMemoryTable(this.sql);
     migrateCanvasTable(this.sql);
+    migrateGitTreeTable(this.sql);
     migrateEventQueueTable(this.sql);
     migrateRunAuditTable(this.sql);
     migrateRunTraceTable(this.sql);
