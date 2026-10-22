@@ -15,6 +15,7 @@ import {
 } from "./sync";
 import { initObservability } from "./observability";
 import { mountConnectGate } from "./onboarding";
+import { coalescePerFrame } from "./pan-frame";
 import {
   KIND_LABELS,
   NODE_HEIGHT,
@@ -695,6 +696,13 @@ function fitToContent(): void {
 // Pan: drag the background (not a node).
 let pan: { pointerId: number; startX: number; startY: number; originX: number; originY: number } | null = null;
 
+const panFrames = coalescePerFrame<PointerEvent>((event) => {
+  if (!pan || pan.pointerId !== event.pointerId) return;
+  doc.view.x = pan.originX + (event.clientX - pan.startX);
+  doc.view.y = pan.originY + (event.clientY - pan.startY);
+  applyView();
+});
+
 viewport.addEventListener("pointerdown", (event) => {
   const target = event.target as HTMLElement;
   if (target.closest(".node") || target.closest(".edge-remove")) return;
@@ -712,14 +720,16 @@ viewport.addEventListener("pointerdown", (event) => {
 
 viewport.addEventListener("pointermove", (event) => {
   if (!pan || pan.pointerId !== event.pointerId) return;
-  doc.view.x = pan.originX + (event.clientX - pan.startX);
-  doc.view.y = pan.originY + (event.clientY - pan.startY);
-  applyView();
+  // A trackpad fires these faster than frames; apply the pan once per frame
+  // (cloud-factory-cf-7mw9).
+  panFrames.schedule(event);
 });
 
 const endPan = (event: PointerEvent): void => {
   if (!pan || pan.pointerId !== event.pointerId) return;
   pan = null;
+  // Drop a pan still queued for the next frame so it cannot land after release.
+  panFrames.cancel();
   viewport.classList.remove("is-panning");
   persist();
 };
