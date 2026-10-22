@@ -135,13 +135,17 @@ describe("markup contract", () => {
   it("shows the webhook URL read-only and styles input controls with field__control", () => {
     const url = /<input[^>]*id="connect-url"[^>]*>/.exec(indexHtml)?.[0] ?? "";
     expect(url).toContain("readonly");
-    expect(url).toContain('class="field__control"');
+    expect(url).toContain("field__control");
 
     const owner = /<input[^>]*id="connect-owner"[^>]*>/.exec(indexHtml)?.[0] ?? "";
-    expect(owner).toContain('class="field__control"');
+    expect(owner).toContain("field__control");
 
     const repo = /<input[^>]*id="connect-repo"[^>]*>/.exec(indexHtml)?.[0] ?? "";
-    expect(repo).toContain('class="field__control"');
+    expect(repo).toContain("field__control");
+
+    // Repo select also has field__control
+    const repoSelect = /<select[^>]*id="connect-repo-select"[^>]*>/.exec(indexHtml)?.[0] ?? "";
+    expect(repoSelect).toContain("field__control");
 
     // Control key is removed entirely from connect dialog
     expect(indexHtml).not.toContain('id="connect-key"');

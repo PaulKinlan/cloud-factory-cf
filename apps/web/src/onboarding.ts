@@ -152,7 +152,7 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
   const poller = new ConnectPoller({
     base,
     scope: () => scope,
-    key: () => keyInput?.value ?? "",
+    ...(keyInput !== null ? { key: () => keyInput.value ?? "" } : {}),
     ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
     now,
     onChange: (state) => {
@@ -190,7 +190,7 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     options.onScope?.(next);
     if (changed) {
       poller.reset();
-      if (scope !== null && (keyInput?.value ?? "") !== "") {
+      if (scope !== null && (keyInput === null || (keyInput.value ?? "") !== "")) {
         void poller.check().finally(() => {
           if (!poller.state.paused) poller.start();
         });
@@ -264,6 +264,14 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     void navigator.clipboard?.writeText(text).then(
       () => {
         if (announcer !== null) announcer.textContent = "Webhook URL copied";
+        const copyLabel = copyButton.querySelector("span");
+        if (copyLabel) {
+          const original = copyLabel.textContent;
+          copyLabel.textContent = "Copied!";
+          setTimeout(() => {
+            copyLabel.textContent = original;
+          }, 1500);
+        }
       },
       () => {
         // Clipboard permissions can be refused; the field is selectable regardless.
@@ -405,7 +413,7 @@ export interface PollerState {
 export interface ConnectPollerOptions {
   base: string;
   scope: () => Scope | null;
-  key: () => string;
+  key?: () => string;
   fetchImpl?: typeof fetch;
   now?: () => number;
   onChange?: (state: PollerState) => void;
@@ -484,7 +492,8 @@ export class ConnectPoller {
 
   private eligible(): boolean {
     const scope = this.options.scope();
-    return scope !== null && this.options.key() !== "" && !this.state.paused;
+    const hasKey = this.options.key !== undefined ? this.options.key() !== "" : true;
+    return scope !== null && hasKey && !this.state.paused;
   }
 
   /**
@@ -495,15 +504,20 @@ export class ConnectPoller {
    */
   async check(): Promise<void> {
     const scope = this.options.scope();
-    const key = this.options.key();
-    if (scope === null || key === "") {
-      this.update({ evidence: null, error: scope === null ? "No repository selected" : "A control key is needed" });
+    const hasKeyOption = this.options.key !== undefined;
+    const key = this.options.key?.() ?? "";
+    if (scope === null) {
+      this.update({ evidence: null, error: "No repository selected" });
+      return;
+    }
+    if (hasKeyOption && key === "") {
+      this.update({ evidence: null, error: "A control key is needed" });
       return;
     }
     if (this.state.checking) return; // one request at a time, however slow the network
     const generation = this.generation;
     const isStale = (): boolean => {
-      if (generation !== this.generation || key !== this.options.key()) return true;
+      if (generation !== this.generation || (hasKeyOption && key !== this.options.key?.())) return true;
       const current = this.options.scope();
       return current === null || current.owner !== scope.owner || current.repo !== scope.repo;
     };
@@ -518,9 +532,13 @@ export class ConnectPoller {
     };
     this.update({ checking: true });
     try {
+      const headers: Record<string, string> = {};
+      if (key !== "") {
+        headers["x-factory-control-key"] = key;
+      }
       const response = await this.fetchImpl(
         `${this.options.base.replace(/\/+$/, "")}/trace/${encodeURIComponent(scope.owner)}/${encodeURIComponent(scope.repo)}/connect`,
-        { headers: { "x-factory-control-key": key } },
+        { headers, credentials: "same-origin" },
       );
       if (response.status === 401) {
         if (isStale()) {
@@ -528,7 +546,12 @@ export class ConnectPoller {
           return;
         }
         this.stop();
-        this.update({ checking: false, evidence: null, error: "control key rejected (401)", paused: true });
+        this.update({
+          checking: false,
+          evidence: null,
+          error: hasKeyOption ? "control key rejected (401)" : "unauthorised (401)",
+          paused: true,
+        });
         return;
       }
       if (!response.ok) {

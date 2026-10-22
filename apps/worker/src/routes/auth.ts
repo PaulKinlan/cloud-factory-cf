@@ -51,7 +51,7 @@ function cookieAttrs(url: URL, path: string): string {
 }
 
 /** `<login>.<exp>.<hmac>`, signed over the login and its expiry. */
-async function mintSessionToken(
+export async function mintSessionToken(
   signingKey: string,
   login: string,
   nowMs: number = Date.now(),
@@ -66,7 +66,7 @@ function sessionCookie(token: string, url: URL): string {
 }
 
 /** Reads and verifies the session cookie; a failure reason is never surfaced to the caller. */
-async function readSession(
+export async function readSession(
   headers: Headers,
   signingKey: string,
   nowMs: number = Date.now(),
