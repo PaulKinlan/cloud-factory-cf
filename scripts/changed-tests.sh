@@ -306,6 +306,29 @@ if [ -n "$unmapped_tests" ]; then
   echo "$unmapped_tests" | grep -v '^$' | sed 's/^/  /'
 fi
 
+# Edge-routed modules are exercised through SELF.fetch, not imported by their tests.
+# Vitest --changed only follows its module graph, so those suites need explicit pins.
+# The same contract is consumed by fleet-check's independent coverage reporter.
+if [ ! -f .fleet/coverage-contract.json ]; then
+  echo "changed-tests: FAIL missing .fleet/coverage-contract.json" >&2
+  exit 1
+fi
+mapfile -t pinned_pairs < <(node -e '
+  const fs = require("fs");
+  const contract = JSON.parse(fs.readFileSync(".fleet/coverage-contract.json", "utf8"));
+  const changed = new Set(process.argv[1].split("\n"));
+  for (const [source, tests] of Object.entries(contract)) {
+    if (changed.has(source)) for (const test of tests) console.log(source + "\t" + test);
+  }
+' "$changed" | sort -u)
+pinned_sources=""
+pinned_tests=()
+for pair in "${pinned_pairs[@]}"; do
+  pinned_sources+="${pair%%$'\t'*}"$'\n'
+  pinned_tests+=("${pair#*$'\t'}")
+done
+is_pinned_source() { case $'\n'"$pinned_sources" in *$'\n'"$1"$'\n'*) return 0 ;; *) return 1 ;; esac; }
+
 # Per-workspace execution. Tests and sources are decided independently: a test-file
 # delta in one workspace is never skipped because another workspace's source changed.
 for ws in "${WS_ORDER[@]}"; do
@@ -332,7 +355,7 @@ for ws in "${WS_ORDER[@]}"; do
         elif [ "$ws_has_tests" -eq 0 ]; then
           echo "changed-tests: FAIL ${path} — ${ws} has no test files left, so this source change runs no suite" >&2
           status=1
-        elif ! source_is_referenced "$ws" "$path"; then
+        elif ! is_pinned_source "$path" && ! source_is_referenced "$ws" "$path"; then
           unreferenced+="$path"$'\n'
         fi
       done <<< "$ws_sources"
@@ -403,7 +426,9 @@ for ws in "${WS_ORDER[@]}"; do
   else
     selected=1   # node:test packages run their whole suite, so a source change is covered
   fi
-  undeclared=$(echo "$ws_sources" | grep -v '^$' | while read -r path; do is_declared "$path" || echo "$path"; done)
+  undeclared=$(echo "$ws_sources" | grep -v '^$' | while read -r path; do
+    is_declared "$path" || is_pinned_source "$path" || echo "$path"
+  done)
 
   if [ "$kind" = "vitest" ] && [ "$selected" -eq 0 ]; then
     if [ -n "$undeclared" ]; then
@@ -412,8 +437,12 @@ for ws in "${WS_ORDER[@]}"; do
       status=1
       continue
     fi
-    # Every changed source here is DECLARED UNVERIFIED: run the whole workspace suite
-    # so the verdict still has evidence instead of an empty pass.
+    # Only declared/pinned sources remain: pins run below; declared UI files need
+    # the workspace suite as evidence rather than an empty pass.
+    if [ -z "$(echo "$ws_sources" | grep -v '^$' | while read -r path; do is_declared "$path" && echo "$path"; done)" ]; then
+      echo "changed-tests: ${ws}: pinned suites (edge-routed source)"
+      continue
+    fi
     echo "changed-tests: ${ws}: whole suite (declared-unverified source)"
     if [ "$LIST" -eq 1 ]; then continue; fi
     if ! has_test_files "$ws"; then
@@ -441,6 +470,23 @@ for ws in "${WS_ORDER[@]}"; do
   echo "changed-tests: ${ws}: whole suite (${kind})"
   ran=$((ran + 1))
   run_ws_tests "$ws" npm test --silent || status=1
+done
+
+# Pin integration suites for changed sources that Vitest cannot trace through the
+# workerd entry point. Fail closed if a contracted suite has been removed.
+declare -A pinned_ran=()
+for test in "${pinned_tests[@]}"; do
+  [ -n "${pinned_ran[$test]:-}" ] && continue
+  pinned_ran["$test"]=1
+  if [ ! -f "$test" ]; then
+    echo "changed-tests: FAIL contracted suite $test is missing" >&2
+    status=1
+    continue
+  fi
+  echo "changed-tests: pinned suite $test (edge-routed source)"
+  if [ "$LIST" -eq 1 ]; then continue; fi
+  ran=$((ran + 1))
+  run_ws_tests "$(ws_of "$test")" npx vitest run "${test#apps/worker/}" || status=1
 done
 
 if [ "$selftest_wanted" -eq 1 ]; then

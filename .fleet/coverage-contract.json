@@ -1,0 +1,5 @@
+{
+  "apps/worker/src/auth/tenant.ts": ["apps/worker/test/auth.test.ts"],
+  "apps/worker/src/routes/auth.ts": ["apps/worker/test/auth.test.ts"],
+  "apps/worker/src/routes/git-tree.ts": ["apps/worker/test/git-tree.test.ts"]
+}

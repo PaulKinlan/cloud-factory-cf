@@ -96,9 +96,17 @@ SH
     # a stylesheet is source with no node suite of its own (cloud-factory-cf-9jb)
     printf 'body { margin: 0; }\n' > apps/web/src/styles.css
     # the smoke set names these two worker files explicitly
-    for f in worker assets; do
+    for f in worker assets auth git-tree; do
       printf 'export {};\n' > "apps/worker/test/$f.test.ts"
     done
+    mkdir -p .fleet apps/worker/src/auth apps/worker/src/routes
+    cat > .fleet/coverage-contract.json <<'JSON'
+{
+  "apps/worker/src/auth/tenant.ts": ["apps/worker/test/auth.test.ts"],
+  "apps/worker/src/routes/auth.ts": ["apps/worker/test/auth.test.ts"],
+  "apps/worker/src/routes/git-tree.ts": ["apps/worker/test/git-tree.test.ts"]
+}
+JSON
     # The buildable packages apps/worker imports through their dist entry points; they
     # have a build script and no tests of their own (kind: none).
     for pkg in canvas-model sdk; do
@@ -268,6 +276,26 @@ reset_tree
 printf '\n// touch\n' >> "$FIX/apps/web/src/m.ts"
 run_gate
 check "source delta that selects no suite FAILs" 'test "$RC" -ne 0 && err_has "match no suite in this workspace"'
+reset_tree
+
+# 6b. Edge-routed modules are not imported directly by tests; a changed test can
+#     otherwise hide their unmapped state behind the workspace's selected suites.
+for route in auth/tenant routes/auth routes/git-tree; do
+  mkdir -p "$FIX/apps/worker/src/${route%/*}"
+  printf 'export const routed = 1;\n' > "$FIX/apps/worker/src/$route.ts"
+  export FAKE_SELECT="apps/worker/test/assets.test.ts"
+  run_gate
+  check "edge-routed $route selects its pinned integration suite" 'test "$RC" -eq 0 && out_has "pinned suite apps/worker/test/"'
+  run_gate --list
+  check "--list includes the pinned suite for $route" 'test "$RC" -eq 0 && out_has "pinned suite apps/worker/test/"'
+  unset FAKE_SELECT
+  reset_tree
+done
+mkdir -p "$FIX/apps/worker/src/routes"
+printf 'export const routed = 1;\n' > "$FIX/apps/worker/src/routes/auth.ts"
+rm "$FIX/apps/worker/test/auth.test.ts"
+run_gate
+check "a removed contracted suite FAILs rather than silently passing" 'test "$RC" -ne 0 && err_has "contracted suite apps/worker/test/auth.test.ts is missing"'
 reset_tree
 
 # 7. DECLARED_UNVERIFIED source still runs the workspace suite for evidence.
