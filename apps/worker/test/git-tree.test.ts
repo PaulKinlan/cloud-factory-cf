@@ -1,5 +1,7 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { validateTree } from "../src/git-tree-store";
+import { tarballFiles } from "../src/git-tarball";
 
 const endpoint = "https://example.com/analysis/acme/off-github-example/tree?platform=gitlab";
 const key = "test-control-key";
@@ -21,6 +23,12 @@ function call(url = endpoint, method = "GET", body?: unknown, controlKey: string
 }
 
 describe("provider-independent git tree snapshot", () => {
+  it("rejects unsafe and duplicate paths before storage", () => {
+    expect(() => validateTree({ ...tree, files: [{ path: "../escape", size: 0 }] })).toThrow("invalid or duplicate file path");
+    expect(() => validateTree({ ...tree, files: [tree.files[0], tree.files[0]] })).toThrow("invalid or duplicate file path");
+    expect(() => tarballFiles(new Uint8Array(512))).toThrow("invalid tarball");
+  });
+
   it("ingests a snapshot from isomorphic-git and lists paths with file content", async () => {
     const saved = await call(endpoint, "POST", tree);
     expect(saved.status).toBe(201);
