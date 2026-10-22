@@ -202,6 +202,9 @@ These are the pathologies that turn one lane's change red for everyone else:
   `GITLAB_WEBHOOK_TOKEN` are fixed test values).
 - **One workerd at a time.** The pool starts one runtime; do not launch a second
   `wrangler dev` or browser in a test.
+- **Serialize workerd test files (`fileParallelism: false`).** Test files in
+  `apps/worker` run sequentially to avoid SQLite DO migration concurrency races,
+  storage collisions, and CPU starvation across multiple Miniflare workers.
 
 ## Adding coverage without slowing the gate
 
