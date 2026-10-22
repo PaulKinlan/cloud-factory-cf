@@ -286,3 +286,81 @@ test('createLocalTools: exec_command network-none skips ignored dirs and bounds 
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('createLocalTools: network-none masks a host socket created after an earlier command (cloud-factory-cf-vy8o)', async (t) => {
+  const reason = await bwrapUnavailableReason();
+  if (reason) {
+    t.skip(reason);
+    return;
+  }
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-stale-'));
+  try {
+    const tools = createLocalTools({ cwd: tmpDir, sandboxNetwork: 'none' });
+    const execTool = tools.find((t2) => t2.name === 'exec_command')!;
+
+    // First command: no socket exists yet, so the mask built for it is empty.
+    const first = (await execTool.handler({ command: 'true' })) as any;
+    assert.equal(first.exitCode, 0);
+
+    // Now a host process leaves a socket in the workspace, as a proxy or API daemon
+    // would. A cached scan would never see it.
+    const sockPath = path.join(tmpDir, 'later-host.sock');
+    const server = net.createServer((connection) => {
+      connection.write('HOST_SOCKET_REACHED\n');
+      connection.end();
+    });
+    await new Promise<void>((resolve) => server.listen(sockPath, () => resolve()));
+    try {
+      const second = (await execTool.handler({
+        command: `node -e 'const net = require("net"); net.connect("${sockPath}").on("data", () => console.log("HOST_SOCKET_REACHED")).on("error", e => console.log("MASKED_ERR:" + e.code))'`,
+      })) as any;
+      assert.match(second.stdout, /MASKED_ERR:/);
+      assert.doesNotMatch(second.stdout, /HOST_SOCKET_REACHED/);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await fs.rm(sockPath, { force: true }).catch(() => {});
+    }
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('createLocalTools: an incomplete socket scan refuses the command instead of running unmasked (cloud-factory-cf-6rne, cloud-factory-cf-bcra)', async (t) => {
+  const reason = await bwrapUnavailableReason();
+  if (reason) {
+    t.skip(reason);
+    return;
+  }
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-budget-'));
+  try {
+    await fs.mkdir(path.join(tmpDir, 'one'));
+    await fs.mkdir(path.join(tmpDir, 'two'));
+
+    const tools = createLocalTools({
+      cwd: tmpDir,
+      sandboxNetwork: 'none',
+      // Deliberately too small for this tree.
+      socketScan: { maxDirs: 1 },
+    });
+    const execTool = tools.find((t2) => t2.name === 'exec_command')!;
+
+    await assert.rejects(
+      () => execTool.handler({ command: 'true' }) as Promise<unknown>,
+      (err: unknown) => {
+        assert.match(String((err as Error).message ?? err), /more than 1 directories/);
+        assert.match(String((err as Error).message ?? err), /socketScan/);
+        return true;
+      },
+    );
+
+    // The same tree is fine with the default budget: the refusal is a bounded
+    // security control, not a hard workspace-size limit.
+    const permissive = createLocalTools({ cwd: tmpDir, sandboxNetwork: 'none' });
+    const okRes = (await permissive.find((t2) => t2.name === 'exec_command')!.handler({ command: 'true' })) as any;
+    assert.equal(okRes.exitCode, 0);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});

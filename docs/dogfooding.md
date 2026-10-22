@@ -116,6 +116,34 @@ Or invoke `@factory-cloud/cli` directly:
 npx @factory-cloud/cli review --pr 42 --repo PaulKinlan/cloud-factory-cf --dry-run
 ```
 
+### What `exec_command`'s sandbox actually guarantees
+
+`createLocalTools()` runs commands under bubblewrap. The guarantee is stated
+precisely because it is easy to over-read (cloud-factory-cf-5vuu):
+
+| Guarantee | How |
+| --- | --- |
+| Filesystem confined to the workspace | `/usr`, `/dev`, `/proc` read-only, fresh tmpfs `/home` and `/tmp`, workspace bound read-write |
+| No IP egress with `sandboxNetwork: 'none'` | `--unshare-net`, and `/etc/resolv.conf` is not mounted in that mode |
+| No host Unix-socket relay with `sandboxNetwork: 'none'` | every socket found in the workspace is masked with `--ro-bind /dev/null` |
+
+Unix sockets are **not** namespaced, so the third row is the one that needs a scan of
+the workspace, and that scan is a security control:
+
+- it is **re-run for every command**, so a socket that appears later is still masked
+  (a cache would silently unmask it — cloud-factory-cf-vy8o);
+- it is **bounded** (`socketScan: { maxDirs = 4096, maxDepth = 12, timeoutMs = 5000 }`)
+  and skips dependency/build trees (`node_modules`, `.git`, `target`, `venv`, `vendor`,
+  `dist`, …), so a normal workspace costs tens of directories;
+- if it cannot finish — budget exceeded, unreadable directory, too deep — the command
+  is **refused**, not run with an unverified mask. Raise the budget with
+  `createLocalTools({ socketScan: { maxDirs, maxDepth, timeoutMs } })` rather than
+  removing the check.
+
+Not covered: a socket the sandbox's own command creates and then dials *within the same
+command* (that traffic never leaves the sandbox), and anything under a skipped
+directory — which is why the skip list is visible and the refusal is loud.
+
 ---
 
 ## 3. Webhook Simulation & Testing

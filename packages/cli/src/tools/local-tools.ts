@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { ToolDefinition } from '@factory-cloud/sdk';
+import { scanWorkspaceSockets, type SocketScanOptions } from './socket-scan.ts';
 
 const execAsync = promisify(exec);
 
@@ -12,13 +13,17 @@ export interface LocalToolsOptions {
   commandTimeoutMs?: number;
   sandbox?: 'bwrap' | 'none';
   sandboxNetwork?: 'host' | 'none';
+  /**
+   * Budget for the `network-none` Unix-socket scan (cloud-factory-cf-6rne,
+   * cloud-factory-cf-bcra). Exceeding it refuses the command (never an unmasked run).
+   */
+  socketScan?: SocketScanOptions;
 }
 
 export function createLocalTools(options: LocalToolsOptions = {}): readonly ToolDefinition[] {
   const rootDir = path.resolve(options.cwd ?? process.cwd());
   const maxFileSize = options.maxFileSize ?? 1024 * 1024; // 1 MB
   const commandTimeoutMs = options.commandTimeoutMs ?? 30000;
-  let cachedHostSockets: string[] | null = null;
 
   async function resolveSafePath(filePath: string, allowMissing = false): Promise<string> {
     const realRoot = await fs.realpath(rootDir).catch(() => rootDir);
@@ -169,7 +174,7 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
   const execCommandTool: ToolDefinition = {
     name: 'exec_command',
     description:
-      'Execute a shell command within the local workspace directory. Under sandbox mode (default: bubblewrap), confines the filesystem to the workspace and isolates network namespaces (sandboxNetwork: "host" | "none"). When sandboxNetwork is "none", network namespaces are unshared (--unshare-net blocking IP/loopback/metadata egress) and pre-existing host Unix domain sockets within the workspace are masked with /dev/null.',
+      'Execute a shell command within the local workspace directory. Under sandbox mode (default: bubblewrap), confines the filesystem to the workspace and isolates network namespaces (sandboxNetwork: "host" | "none"). With sandboxNetwork: "none" the IP namespace is unshared (--unshare-net: no loopback, LAN or metadata egress) and host Unix domain sockets found inside the workspace are masked with /dev/null. The socket scan is bounded and re-run per command; if it cannot complete within its budget the command is refused rather than run with an unverified mask, so a socket that appears after the last command is still masked.',
     parameters: {
       type: 'object',
       properties: {
@@ -255,62 +260,20 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
         // Mount workspace root read-write only
         bwrapArgs.push('--bind', realRoot, realRoot);
 
-        // When network isolation is requested, mask any pre-existing host Unix domain sockets within the workspace (fixes cloud-factory-cf-5vuu, cloud-factory-cf-6rne)
+        // With the IP namespace unshared, the remaining door to the host is a Unix
+        // domain socket: sockets are not namespaced, so a socket a host process left
+        // in the workspace still reaches the host network (cloud-factory-cf-5vuu).
+        // Mask every socket the bounded scan finds. The scan runs per command, so a
+        // socket created after an earlier command is masked too (cloud-factory-cf-vy8o),
+        // and a scan that cannot finish refuses the command instead of running with an
+        // unverified mask (cloud-factory-cf-6rne, cloud-factory-cf-bcra).
         if (networkMode === 'none') {
-          if (cachedHostSockets === null) {
-            const IGNORED_DIRS = new Set([
-              'node_modules',
-              '.git',
-              '.cache',
-              '.venv',
-              '.cargo',
-              'dist',
-              'build',
-              '.next',
-              '.turbo',
-            ]);
-            const MAX_SCANNED_DIRS = 2048;
-            const MAX_DEPTH = 10;
-            let dirsScanned = 0;
-            const found: string[] = [];
-
-            const scanDir = async (dir: string, depth: number): Promise<void> => {
-              if (depth > MAX_DEPTH) {
-                throw new Error(
-                  `Sandbox security scan failed: workspace directory nesting exceeds maximum depth (${MAX_DEPTH}) at '${dir}'. Cannot verify Unix socket containment.`,
-                );
-              }
-              dirsScanned++;
-              if (dirsScanned > MAX_SCANNED_DIRS) {
-                throw new Error(
-                  `Sandbox security scan failed: workspace directory count exceeds limit (${MAX_SCANNED_DIRS}). Cannot safely verify Unix socket containment.`,
-                );
-              }
-
-              let entries;
-              try {
-                entries = await fs.readdir(dir, { withFileTypes: true });
-              } catch (err: any) {
-                throw new Error(
-                  `Sandbox security scan failed: unable to read directory '${dir}' for Unix socket containment: ${err?.message || err}`,
-                );
-              }
-
-              for (const entry of entries) {
-                const fullPath = path.join(dir, entry.name);
-                if (entry.isSocket()) {
-                  found.push(fullPath);
-                } else if (entry.isDirectory() && !entry.isSymbolicLink() && !IGNORED_DIRS.has(entry.name)) {
-                  await scanDir(fullPath, depth + 1);
-                }
-              }
-            };
-
-            await scanDir(realRoot, 0);
-            cachedHostSockets = found;
-          }
-
-          for (const sock of cachedHostSockets) {
+          const scan = await scanWorkspaceSockets(realRoot, {
+            ...options.socketScan,
+            // Never outlive the command's own deadline: the scan runs before execAsync.
+            timeoutMs: Math.min(options.socketScan?.timeoutMs ?? 5000, timeout),
+          });
+          for (const sock of scan.sockets) {
             bwrapArgs.push('--ro-bind', '/dev/null', sock);
           }
         }
