@@ -59,6 +59,22 @@ beforeEach(() => {
   setupDefaultFetch();
 });
 
+/**
+ * Start a login/install flow so a callback can prove this browser began it: the login
+ * sets the signed `cf_oauth_state` cookie and hands the nonce to GitHub as `state`.
+ * An install callback without one is an unproven caller (cloud-factory-cf-dnrm).
+ */
+async function beginOAuthIntent(): Promise<{ state: string; cookie: string }> {
+  const login = await SELF.fetch("https://example.com/auth/github/login?client_id=gh_test_client_id", {
+    method: "GET",
+    redirect: "manual",
+  });
+  expect(login.status).toBe(302);
+  const state = new URL(login.headers.get("location")!).searchParams.get("state")!;
+  const cookie = login.headers.get("set-cookie")!.split(";")[0]!;
+  return { state, cookie };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -353,6 +369,31 @@ describe("GitHub OAuth & App Install Flow", () => {
   });
 
   it("/auth/github/callback: accepts external App install callbacks without code exchange", async () => {
+    // A dedicated org, so "did an unproven install write anything?" is answerable even when
+    // earlier tests in this file left rows in the shared Durable Object storage.
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/app/installations/inst_789/access_tokens")) {
+          return new Response(JSON.stringify({ token: "ghs_oauthprobe_token" }), { status: 201 });
+        }
+        if (url.includes("/app/installations/inst_789")) {
+          return new Response(JSON.stringify({ id: 789, account: { login: "oauthprobe", type: "Organization" } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.includes("/installation/repositories")) {
+          return new Response(JSON.stringify({ total_count: 0, repositories: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
     // 1. Direct install setup URL with state=owner/repo (from onboarding installUrl)
     const installWithState = await SELF.fetch(
       "https://example.com/auth/github/callback?installation_id=inst_789&setup_action=install&state=acme%2Fwidget",
@@ -414,6 +455,119 @@ describe("GitHub OAuth & App Install Flow", () => {
     expect(loc4).toContain("connected=1");
     expect(loc4).toContain("installation_id=inst_789");
     expect(installWithLeftoverNoState.headers.get("set-cookie")).toContain("cf_oauth_state=;");
+
+    // 5. None of the four above proved this browser began the install, so none of them may
+    //    mint a session or register repositories (cloud-factory-cf-dnrm): the stub resolves
+    //    installation 789 to `oauthprobe`, and only a proven caller may touch it.
+    for (const [label, res, location] of [
+      ["state=owner/repo", installWithState, loc1],
+      ["no state", installWithoutState, loc2],
+      ["leftover cookie", installWithLeftoverCookie, loc3],
+      ["leftover cookie, no state", installWithLeftoverNoState, loc4],
+    ] as const) {
+      expect(res.headers.get("set-cookie") ?? "", `${label}: no cf_session`).not.toContain("cf_session=");
+      expect(new URL(location).searchParams.get("needs_oauth"), `${label}: asks for OAuth`).toBe("1");
+    }
+    const notRegistered = await SELF.fetch("https://example.com/api/repos?owner=oauthprobe", {
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(notRegistered.status).toBe(200);
+    expect(((await notRegistered.json()) as any).count, "unproven install must not write repos").toBe(0);
+  });
+
+  it("/auth/github/callback: install-only callbacks never mint a browser session (cloud-factory-cf-dnrm)", async () => {
+    // An install callback proves an installation exists, never who is asking: the App JWT
+    // resolves any installation of the app, so `installation_id` is caller-supplied. The
+    // session cookie is the credential that reads that account's repositories through
+    // `/api/repos`, so minting it here let any caller read another org's private repo
+    // metadata. Only an OAuth code exchange (identity from GitHub's /user) may mint one.
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/app/installations/inst_victim_4242/access_tokens")) {
+          return new Response(JSON.stringify({ token: "ghs_victim_installation_token" }), {
+            status: 201,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.includes("/app/installations/inst_victim_4242")) {
+          return new Response(JSON.stringify({ id: 4242, account: { login: "victimcorp", type: "Organization" } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.includes("/installation/repositories")) {
+          return new Response(
+            JSON.stringify({
+              total_count: 1,
+              repositories: [
+                { id: 4243, full_name: "victimcorp/payroll", name: "payroll", private: true, default_branch: "main", owner: { login: "victimcorp" } },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    // The attacker's own login flow gives them a genuine signed state cookie — which is
+    // continuity of *their* browser, not ownership of the installation they name.
+    const loginRes = await SELF.fetch("https://example.com/auth/github/login?client_id=gh_test_client_id", {
+      method: "GET",
+      redirect: "manual",
+    });
+    const attackerState = new URL(loginRes.headers.get("location")!).searchParams.get("state")!;
+    const attackerCookie = loginRes.headers.get("set-cookie")!.split(";")[0]!;
+
+    const callback = await SELF.fetch(
+      `https://example.com/auth/github/callback?installation_id=inst_victim_4242&setup_action=install&state=${attackerState}&return_to=/`,
+      { method: "GET", headers: { cookie: attackerCookie }, redirect: "manual" },
+    );
+    expect(callback.status).toBe(302);
+    const callbackCookies = callback.headers.get("set-cookie") ?? "";
+    expect(callbackCookies).toContain("cf_oauth_state=;");
+    expect(callbackCookies, "install-only callbacks must not mint cf_session").not.toContain("cf_session=");
+
+    // The installation is still registered for machine callers…
+    const machine = await SELF.fetch("https://example.com/api/repos?owner=victimcorp", {
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(machine.status).toBe(200);
+    expect(((await machine.json()) as any).count).toBe(1);
+
+    // …but the caller leaves with nothing that reads victim metadata back.
+    expect(/cf_session=/.test(callbackCookies)).toBe(false);
+    const viaStateOnly = await SELF.fetch("https://example.com/api/repos?owner=victimcorp", {
+      headers: { cookie: attackerCookie },
+    });
+    expect(viaStateOnly.status).toBe(401);
+  });
+
+  it("/auth/github/callback: an install callback with no signed state does no GitHub work at all (cloud-factory-cf-dnrm)", async () => {
+    const githubCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      (async (input: RequestInfo | URL) => {
+        githubCalls.push(String(input));
+        return new Response("Not found", { status: 404 });
+      }) as unknown as typeof fetch,
+    );
+
+    const res = await SELF.fetch(
+      "https://example.com/auth/github/callback?installation_id=12345678&setup_action=install",
+      { method: "GET", redirect: "manual" },
+    );
+
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get("location")!);
+    expect(location.searchParams.get("needs_oauth")).toBe("1");
+    expect(location.searchParams.get("installation_id")).toBe("12345678");
+    expect(res.headers.get("set-cookie") ?? "").not.toContain("cf_session=");
+    // The App JWT could resolve any installation, so an unproven caller must not even reach
+    // GitHub: an installation id is a small integer and appears in every public install URL.
+    expect(githubCalls, "an unproven install callback must not call GitHub at all").toEqual([]);
   });
 
   it("/auth/github/callback: surfaces distinct errors when token exchange or upstream APIs fail (cloud-factory-cf-b1a)", async () => {
@@ -522,10 +676,12 @@ describe("GitHub OAuth & App Install Flow", () => {
       }) as unknown as typeof fetch,
     );
 
+    const intent = await beginOAuthIntent();
     const installCallbackRes = await SELF.fetch(
-      "https://example.com/auth/github/callback?installation_id=inst_app_888&setup_action=install&return_to=/",
+      `https://example.com/auth/github/callback?installation_id=inst_app_888&setup_action=install&state=${intent.state}&return_to=/`,
       {
         method: "GET",
+        headers: { cookie: intent.cookie },
         redirect: "manual",
       },
     );
@@ -550,6 +706,7 @@ describe("GitHub OAuth & App Install Flow", () => {
   });
 
   it("install callback: rejects unauthenticated state injection and fails visibly on API failure (cloud-factory-cf-lpmz, cloud-factory-cf-jmlv)", async () => {
+    const intent = await beginOAuthIntent();
     // 1. Unauthenticated request with state=victimorg/evil-repo where GitHub API 401s
     vi.stubGlobal(
       "fetch",
@@ -566,11 +723,13 @@ describe("GitHub OAuth & App Install Flow", () => {
       "https://example.com/auth/github/callback?installation_id=inst_attacker&setup_action=install&state=victimorg/evil-repo",
       { method: "GET", redirect: "manual" },
     );
-    // Must return 502 and NOT redirect with connected=1
-    expect(evilInstallRes.status).toBe(502);
-    const evilJson = (await evilInstallRes.json()) as any;
-    expect(evilJson.ok).toBe(false);
-    expect(evilJson.error).toContain("GitHub App installation endpoint requires an App JWT");
+    // An install callback with no signed state of this browser's own is an unproven caller:
+    // it must not run the install branch at all (no GitHub calls, no writes, no session) and
+    // must send the operator to the OAuth login instead (cloud-factory-cf-dnrm).
+    expect(evilInstallRes.status).toBe(302);
+    const evilLocation = new URL(evilInstallRes.headers.get("location")!);
+    expect(evilLocation.searchParams.get("needs_oauth")).toBe("1");
+    expect(evilInstallRes.headers.get("set-cookie") ?? "").not.toContain("cf_session=");
 
     // Ensure victimorg's authorized_repos remained empty / untouched
     const victimReposRes = await SELF.fetch("https://example.com/api/repos?owner=victimorg", {
@@ -600,8 +759,8 @@ describe("GitHub OAuth & App Install Flow", () => {
     );
 
     const failReposRes = await SELF.fetch(
-      "https://example.com/auth/github/callback?installation_id=inst_999&setup_action=install",
-      { method: "GET", redirect: "manual" },
+      `https://example.com/auth/github/callback?installation_id=inst_999&setup_action=install&state=${intent.state}`,
+      { method: "GET", headers: { cookie: intent.cookie }, redirect: "manual" },
     );
     expect(failReposRes.status).toBe(502);
     const failJson = (await failReposRes.json()) as any;
@@ -741,6 +900,7 @@ describe("GitHub OAuth & App Install Flow", () => {
 
   it("flow=install: rejects PAT with explicit error on App installation endpoints (cloud-factory-cf-egp6, cloud-factory-cf-kgr3)", async () => {
     const installId = 555;
+    const intent = await beginOAuthIntent();
 
     vi.stubGlobal(
       "fetch",
@@ -755,8 +915,8 @@ describe("GitHub OAuth & App Install Flow", () => {
     );
 
     const installRes = await SELF.fetch(
-      `https://example.com/auth/github/callback?installation_id=${installId}&setup_action=install&return_to=/`,
-      { method: "GET", redirect: "manual" },
+      `https://example.com/auth/github/callback?installation_id=${installId}&setup_action=install&state=${intent.state}&return_to=/`,
+      { method: "GET", headers: { cookie: intent.cookie }, redirect: "manual" },
     );
 
     expect(installRes.status).toBe(502);
@@ -767,6 +927,7 @@ describe("GitHub OAuth & App Install Flow", () => {
 
   it("flow=install: rejects 401 on /installation/repositories with installation access token error (cloud-factory-cf-c8qj)", async () => {
     const installId = 777;
+    const intent = await beginOAuthIntent();
 
     vi.stubGlobal(
       "fetch",
@@ -783,8 +944,8 @@ describe("GitHub OAuth & App Install Flow", () => {
     );
 
     const installRes = await SELF.fetch(
-      `https://example.com/auth/github/callback?installation_id=${installId}&setup_action=install&return_to=/`,
-      { method: "GET", redirect: "manual" },
+      `https://example.com/auth/github/callback?installation_id=${installId}&setup_action=install&state=${intent.state}&return_to=/`,
+      { method: "GET", headers: { cookie: intent.cookie }, redirect: "manual" },
     );
 
     expect(installRes.status).toBe(502);
@@ -806,6 +967,7 @@ describe("GitHub OAuth & App Install Flow", () => {
     const pem = `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----`;
 
     const installId = 987;
+    const intent = await beginOAuthIntent();
     const appId = "app_12345";
     let capturedJwt: string | null = null;
     let capturedInstToken: string | null = null;
@@ -852,8 +1014,8 @@ describe("GitHub OAuth & App Install Flow", () => {
       (env as any).GITHUB_APP_PRIVATE_KEY = pem;
 
       const installRes = await SELF.fetch(
-        `https://example.com/auth/github/callback?installation_id=${installId}&setup_action=install&return_to=/`,
-        { method: "GET", redirect: "manual" },
+        `https://example.com/auth/github/callback?installation_id=${installId}&setup_action=install&state=${intent.state}&return_to=/`,
+        { method: "GET", headers: { cookie: intent.cookie }, redirect: "manual" },
       );
 
       expect(installRes.status).toBe(302);
