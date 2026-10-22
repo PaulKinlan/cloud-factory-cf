@@ -241,7 +241,9 @@ test('createLocalTools: exec_command network confinement under bubblewrap (cloud
         assert.match(hostUnixRes.stdout, /HOST_SOCKET_REACHED/);
 
         // Mode 'none' cannot reach the host Unix socket because it is masked with /dev/null
-        const noneUnixRes = (await isolatedExec.handler({
+        const noneUnixTools = createLocalTools({ cwd: tmpDir, sandboxNetwork: 'none' });
+        const noneUnixExec = noneUnixTools.find((t2) => t2.name === 'exec_command')!;
+        const noneUnixRes = (await noneUnixExec.handler({
           command: `node -e 'const net = require("net"); net.connect("${sockPath}").on("data", () => console.log("HOST_SOCKET_REACHED")).on("error", e => console.log("MASKED_ERR:" + e.code))'`,
         })) as any;
         assert.match(noneUnixRes.stdout, /MASKED_ERR:/);
@@ -253,6 +255,33 @@ test('createLocalTools: exec_command network confinement under bubblewrap (cloud
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('createLocalTools: exec_command network-none skips ignored dirs and bounds socket scans (cloud-factory-cf-6rne)', async (t) => {
+  const reason = await bwrapUnavailableReason();
+  if (reason) {
+    t.skip(reason);
+    return;
+  }
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-dirs-'));
+  try {
+    // Create ignored directory trees (e.g. node_modules/pkg/...)
+    const nmDir = path.join(tmpDir, 'node_modules', 'large-pkg', 'dist');
+    await fs.mkdir(nmDir, { recursive: true });
+
+    const tools = createLocalTools({ cwd: tmpDir, sandboxNetwork: 'none' });
+    const execTool = tools.find((t2) => t2.name === 'exec_command')!;
+
+    // Should execute quickly without walking inside node_modules
+    const start = Date.now();
+    const res = (await execTool.handler({ command: 'node -e "console.log(999)"' })) as any;
+    const elapsed = Date.now() - start;
+    assert.match(res.stdout, /999/);
+    assert.ok(elapsed < 5000, `Execution took ${elapsed}ms, expected < 5000ms`);
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }

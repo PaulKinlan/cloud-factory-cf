@@ -18,6 +18,7 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
   const rootDir = path.resolve(options.cwd ?? process.cwd());
   const maxFileSize = options.maxFileSize ?? 1024 * 1024; // 1 MB
   const commandTimeoutMs = options.commandTimeoutMs ?? 30000;
+  let cachedHostSockets: string[] | null = null;
 
   async function resolveSafePath(filePath: string, allowMissing = false): Promise<string> {
     const realRoot = await fs.realpath(rootDir).catch(() => rootDir);
@@ -254,24 +255,62 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
         // Mount workspace root read-write only
         bwrapArgs.push('--bind', realRoot, realRoot);
 
-        // When network isolation is requested, mask any pre-existing host Unix domain sockets within the workspace (fixes cloud-factory-cf-5vuu)
+        // When network isolation is requested, mask any pre-existing host Unix domain sockets within the workspace (fixes cloud-factory-cf-5vuu, cloud-factory-cf-6rne)
         if (networkMode === 'none') {
-          const scanSockets = async (dir: string): Promise<string[]> => {
+          if (cachedHostSockets === null) {
+            const IGNORED_DIRS = new Set([
+              'node_modules',
+              '.git',
+              '.cache',
+              '.venv',
+              '.cargo',
+              'dist',
+              'build',
+              '.next',
+              '.turbo',
+            ]);
+            const MAX_SCANNED_DIRS = 2048;
+            const MAX_DEPTH = 10;
+            let dirsScanned = 0;
             const found: string[] = [];
-            const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
-            for (const entry of entries) {
-              const fullPath = path.join(dir, entry.name);
-              if (entry.isSocket()) {
-                found.push(fullPath);
-              } else if (entry.isDirectory() && !entry.isSymbolicLink()) {
-                const sub = await scanSockets(fullPath);
-                found.push(...sub);
+
+            const scanDir = async (dir: string, depth: number): Promise<void> => {
+              if (depth > MAX_DEPTH) {
+                throw new Error(
+                  `Sandbox security scan failed: workspace directory nesting exceeds maximum depth (${MAX_DEPTH}) at '${dir}'. Cannot verify Unix socket containment.`,
+                );
               }
-            }
-            return found;
-          };
-          const hostSockets = await scanSockets(realRoot);
-          for (const sock of hostSockets) {
+              dirsScanned++;
+              if (dirsScanned > MAX_SCANNED_DIRS) {
+                throw new Error(
+                  `Sandbox security scan failed: workspace directory count exceeds limit (${MAX_SCANNED_DIRS}). Cannot safely verify Unix socket containment.`,
+                );
+              }
+
+              let entries;
+              try {
+                entries = await fs.readdir(dir, { withFileTypes: true });
+              } catch (err: any) {
+                throw new Error(
+                  `Sandbox security scan failed: unable to read directory '${dir}' for Unix socket containment: ${err?.message || err}`,
+                );
+              }
+
+              for (const entry of entries) {
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isSocket()) {
+                  found.push(fullPath);
+                } else if (entry.isDirectory() && !entry.isSymbolicLink() && !IGNORED_DIRS.has(entry.name)) {
+                  await scanDir(fullPath, depth + 1);
+                }
+              }
+            };
+
+            await scanDir(realRoot, 0);
+            cachedHostSockets = found;
+          }
+
+          for (const sock of cachedHostSockets) {
             bwrapArgs.push('--ro-bind', '/dev/null', sock);
           }
         }
