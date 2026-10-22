@@ -58,12 +58,44 @@ rather than sanitised.
 | Binding | Purpose |
 | --- | --- |
 | `CREDENTIAL_BROKER` | Durable Object namespace (one per repository, migration `v3`) |
-| `BROKER_SIGNING_KEY` | HMAC-SHA256 key for capability tokens |
-| `BROKER_CONTROL_KEY` | Grants capability issuance and audit read |
+| `BROKER_SIGNING_KEY` | HMAC-SHA256 key for capability tokens **and for the `cf_session` browser credential** |
+| `BROKER_CONTROL_KEY` | Machine/operator key: grants capability issuance and any tenant's control-plane reads |
 | `GITHUB_TOKEN`, `GITLAB_TOKEN` | Upstream credentials, read by the broker only |
 
 Set them with `wrangler secret put <NAME>`; never in `vars`, `.dev.vars` in git,
 or a prompt.
+
+## Control-plane authentication: who may touch which tenant
+
+A control-plane route accepts **one of two credentials** (`src/auth/tenant.ts`,
+`authorizeControlPlane`):
+
+| Caller | Credential | May touch | Denial |
+| --- | --- | --- | --- |
+| Machine (CLI, scheduler, operator) | `x-factory-control-key` = `BROKER_CONTROL_KEY` | any tenant | 401 |
+| Browser | `cf_session` cookie, minted by `/auth/github/callback` | only the login it was minted for — the `:owner` in the path | 403 `cross-tenant` |
+| Neither | — | nothing | 401, or 503 when **no** credential is configured |
+
+The `:owner` segment **is** the tenant boundary. A valid session for `alice`
+reading `/audit/events/bob/widgets` is refused as another account's tenancy
+rather than retried with a weaker credential; the comparison is
+case-insensitive because GitHub logins are. A session signs with
+`BROKER_SIGNING_KEY` (falling back to `BROKER_CONTROL_KEY`/`WEBHOOK_SECRET`), so
+a deployment can run browsers **without** the master control key — that is the
+point of the split: the control key names no tenant, so anything holding it can
+reach every repository, and a browser was never able to hold it securely.
+
+Covered today by this boundary: `/audit/*`, `/canvas/<owner>/<repo>/documents`,
+`/studio/*`, `/analysis/*/tree`. Still control-key-only, because they issue
+capabilities with the master key or forward it to a Durable Object that verifies
+it: `/runs/*`, `/canvas/.../run`, `/broker/*`, `/admin/*`, `/trace/*`. Tying
+those to a tenant identity needs per-tenant capability issuance (ADR 006), not
+just a session check.
+
+On a multi-platform deployment the owner segment is compared against the GitHub
+login, so a GitLab/Bitbucket/Gitea namespace that merely *shares a name* with a
+GitHub login is reachable only with the machine key. Map identities per platform
+before handing the master key to anyone.
 
 ## Audit
 
@@ -73,13 +105,18 @@ action, outcome, upstream status, duration and a short reason.
 
 Deliberately **not** stored: the credential, the capability token, request
 bodies and response bodies. `GET /broker/<owner>/<repo>/audit` requires the
-control key because the metadata names agents and actions.
+control key because the metadata names agents and actions (the tenant-bound
+`/audit/*` route above is the browser-readable equivalent).
 
 ## Known limits (follow-ups, not hidden)
 
 - Per-agent quota is enforced (see below), as is a provisioning record per
   (agent, service, action). The remaining gap is that one shared control key is
   both the provisioning authority and the issuance authority.
+- Execution routes (`/runs/*`, `/canvas/.../run`) still require the machine key:
+  they issue capabilities with it server-side. Browsers authenticate as a tenant
+  (above) but cannot yet start a run without it, which is the next step
+  (per-tenant capability issuance, ADR 006).
 - Capability issuance requires a provisioning record per (agent, service,
   action) — see below — but the control key can still create one for any agent:
   the next step is tying provisioning to an authenticated control-plane caller

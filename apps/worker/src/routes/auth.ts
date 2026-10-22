@@ -65,8 +65,13 @@ function sessionCookie(token: string, url: URL): string {
   return `${SESSION_COOKIE}=${encodeURIComponent(token)}; ${cookieAttrs(url, "/")}; Max-Age=${SESSION_TTL_SECONDS}`;
 }
 
-/** Reads and verifies the session cookie; a failure reason is never surfaced to the caller. */
-async function readSession(
+/**
+ * Reads and verifies the session cookie; a failure reason is never surfaced to the caller.
+ *
+ * Exported for `auth/tenant.ts`, which uses the same session as a tenant-bound
+ * control-plane credential (cloud-factory-cf-e1ql).
+ */
+export async function readSession(
   headers: Headers,
   signingKey: string,
   nowMs: number = Date.now(),

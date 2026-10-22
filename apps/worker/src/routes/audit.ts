@@ -1,5 +1,5 @@
 import type { Env } from "../env";
-import { sameSecret } from "../secrets";
+import { authorizeControlPlane, authzDenial } from "../auth/tenant";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
 
 export const AUDIT_PATH =
@@ -14,8 +14,9 @@ export const AUDIT_PATH =
  *   GET /audit/events/:owner/:repo/:deliveryId   detailed single-event audit with payload & deliveries
  *   GET /audit/runs/:owner/:repo                 canvas runs audit records
  *
- * Control-plane reads carry sensitive event payloads, prompts and actor metadata,
- * so every route is protected by BROKER_CONTROL_KEY (header x-factory-control-key).
+ * Control-plane reads carry sensitive event payloads, prompts and actor metadata, so
+ * every route needs the control key (machine callers) or a browser session bound to
+ * the `:owner` it asks about (cloud-factory-cf-e1ql, see `auth/tenant.ts`).
  */
 export async function handleAudit(
   request: Request,
@@ -32,14 +33,12 @@ export async function handleAudit(
     id?: string;
   };
 
-  const controlKey = env.BROKER_CONTROL_KEY;
-  if (!controlKey) {
-    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
-  }
-
-  const providedKey = request.headers.get("x-factory-control-key");
-  if (!(await sameSecret(controlKey, providedKey))) {
-    return Response.json({ ok: false, error: "not authorised to read audit logs" }, { status: 401 });
+  const authz = await authorizeControlPlane(request, env, { owner });
+  if (!authz.ok) {
+    return authzDenial(authz, {
+      unauthorised: "not authorised to read audit logs",
+      "cross-tenant": "not authorised to read another account's audit logs",
+    });
   }
 
   if (request.method !== "GET") {

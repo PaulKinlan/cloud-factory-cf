@@ -12,7 +12,13 @@ All webhook events and run executions are recorded within the repository's `Repo
 
 ## Public Audit API
 
-All audit endpoints are control-plane read surfaces and require authentication via the `x-factory-control-key` header matching `BROKER_CONTROL_KEY`. If unconfigured, endpoints return `503 Service Unavailable`; if invalid or missing, they return `401 Unauthorized`. Non-GET requests return `405 Method Not Allowed`.
+All audit endpoints are control-plane read surfaces and accept either credential
+(see [credentials.md](credentials.md#control-plane-authentication-who-may-touch-which-tenant)):
+the `x-factory-control-key` header matching `BROKER_CONTROL_KEY` (machine callers,
+any tenant), or the browser's `cf_session` cookie, which may only read the account it
+was minted for — asking for another `:owner` is `403`. With no credential configured
+at all the endpoints return `503 Service Unavailable`; with a missing or invalid
+credential `401 Unauthorized`. Non-GET requests return `405 Method Not Allowed`.
 
 | Method | Path | Description |
 |---|---|---|

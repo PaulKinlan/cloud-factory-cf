@@ -1,6 +1,7 @@
 import type { Env } from "../env";
 import { traceSink } from "../events";
 import { runCanvasDocument } from "../canvas-runs";
+import { authorizeControlPlane, authzDenial } from "../auth/tenant";
 import { sameSecret } from "../secrets";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
 
@@ -57,7 +58,8 @@ export async function routeCanvasRun(
 /**
  * Canvas documents live in the repository's coordinator object. They are
  * control-plane data (a layout names agents and actions), so every method needs
- * the same control key the broker uses.
+ * the control key, or a browser session for that repository's owner
+ * (cloud-factory-cf-e1ql).
  */
 export async function routeCanvas(
   request: Request,
@@ -66,12 +68,12 @@ export async function routeCanvas(
   repo: string,
   id: string | undefined,
 ): Promise<Response> {
-  const controlKey = env.BROKER_CONTROL_KEY;
-  if (!controlKey) {
-    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
-  }
-  if (!(await sameSecret(controlKey, request.headers.get("x-factory-control-key")))) {
-    return Response.json({ ok: false, error: "not authorised to read or write canvas documents" }, { status: 401 });
+  const authz = await authorizeControlPlane(request, env, { owner });
+  if (!authz.ok) {
+    return authzDenial(authz, {
+      unauthorised: "not authorised to read or write canvas documents",
+      "cross-tenant": "not authorised to read or write another account's canvas documents",
+    });
   }
   if (!["GET", "PUT", "DELETE"].includes(request.method)) {
     return new Response("method not allowed", { status: 405 });
