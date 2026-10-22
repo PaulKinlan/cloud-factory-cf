@@ -71,6 +71,17 @@ fi
 echo "FAKE npm test in $(basename "$PWD")"; exit "${FAKE_NPM_RC:-0}"
 SH
     chmod +x node_modules/.bin/vitest node_modules/.bin/npm
+    # Fake npx. The gate invokes `npx vitest …`, and a REAL npx resolves a command it
+    # cannot find in the workspace's own node_modules through the registry: the fixture
+    # workspaces have no node_modules, so this self-test silently depended on the network
+    # and hit its 60s bound on a loaded VM (case 9, unowned test file -> smoke set).
+    cat > node_modules/.bin/npx <<'SH'
+#!/usr/bin/env bash
+# Fake npx: drop the command name (vitest) and run this fixture's fake runner.
+shift
+exec vitest "$@"
+SH
+    chmod +x node_modules/.bin/npx
     # apps/* : vitest workspaces. packages/* : node:test, plus a workspace with no
     # test script at all (the unmapped-source case).
     for ws in apps/web apps/worker; do
