@@ -103,8 +103,12 @@ contract:
   changed (the old gate only consulted test files when *no* source changed, so a
   failing test delta rode in green behind an unrelated source edit);
 - for `vitest` workspaces it asks `vitest list --changed --filesOnly` what is
-  affected; `node:test` workspaces are seconds, so a change there runs their whole
-  suite;
+  affected; edge-routed Worker modules have no direct test import for Vitest to
+  trace, so `.fleet/coverage-contract.json` pins their `SELF.fetch` integration
+  suites alongside the affected set. A missing pinned suite fails the gate. This
+  small mapping is also read by the coverage reporter, preventing a PASS with
+  PARTIAL coverage for those paths without running the whole Worker suite.
+  `node:test` workspaces are seconds, so a change there runs their whole suite;
 - a source delta that runs nothing exits non-zero rather than reporting green;
 - the gate's own logic has no workspace suite, so `scripts/changed-tests.selftest.sh`
   (fake runners in a throwaway repo — no deps, ~5s) runs whenever the gate changes.
