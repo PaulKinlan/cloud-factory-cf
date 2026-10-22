@@ -4,6 +4,7 @@ import { handleAdmin } from "./routes/admin";
 import { handleAuth } from "./routes/auth";
 import { handleStudio } from "./routes/studio";
 import { handleCanvas } from "./routes/canvas";
+import { handleGitTree } from "./routes/git-tree";
 import { handleRuns } from "./routes/runs";
 import { handleAudit } from "./routes/audit";
 import { handleTrace } from "./routes/trace";
@@ -45,6 +46,9 @@ export default {
 
     const canvasResponse = await handleCanvas(request, env, url);
     if (canvasResponse) return canvasResponse;
+
+    const gitTreeResponse = await handleGitTree(request, env, url);
+    if (gitTreeResponse) return gitTreeResponse;
 
     const runResponse = await handleRuns(request, env, url);
     if (runResponse) return runResponse;
