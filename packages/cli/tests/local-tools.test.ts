@@ -225,6 +225,31 @@ test('createLocalTools: exec_command network confinement under bubblewrap (cloud
       })) as any;
       assert.match(metaCheck.stdout, /FAILED:/);
       assert.doesNotMatch(metaCheck.stdout, /CONNECTED/);
+
+      // Unix socket isolation test: host Unix domain socket placed in workspace (fixes cloud-factory-cf-5vuu)
+      const sockPath = path.join(tmpDir, 'test-host.sock');
+      const unixServer = net.createServer((c) => {
+        c.write('HOST_SOCKET_REACHED\n');
+        c.end();
+      });
+      await new Promise<void>((resolve) => unixServer.listen(sockPath, () => resolve()));
+      try {
+        // Mode 'host' can reach the socket
+        const hostUnixRes = (await hostExec.handler({
+          command: `node -e 'const net = require("net"); net.connect("${sockPath}").on("data", d => console.log(d.toString().trim()))'`,
+        })) as any;
+        assert.match(hostUnixRes.stdout, /HOST_SOCKET_REACHED/);
+
+        // Mode 'none' cannot reach the host Unix socket because it is masked with /dev/null
+        const noneUnixRes = (await isolatedExec.handler({
+          command: `node -e 'const net = require("net"); net.connect("${sockPath}").on("data", () => console.log("HOST_SOCKET_REACHED")).on("error", e => console.log("MASKED_ERR:" + e.code))'`,
+        })) as any;
+        assert.match(noneUnixRes.stdout, /MASKED_ERR:/);
+        assert.doesNotMatch(noneUnixRes.stdout, /HOST_SOCKET_REACHED/);
+      } finally {
+        await new Promise<void>((resolve) => unixServer.close(() => resolve()));
+        await fs.rm(sockPath, { force: true }).catch(() => {});
+      }
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

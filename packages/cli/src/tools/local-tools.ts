@@ -168,7 +168,7 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
   const execCommandTool: ToolDefinition = {
     name: 'exec_command',
     description:
-      'Execute a shell command within the local workspace directory. Under sandbox mode (default: bubblewrap), confines the filesystem to the workspace and supports network confinement (sandboxNetwork: "host" | "none").',
+      'Execute a shell command within the local workspace directory. Under sandbox mode (default: bubblewrap), confines the filesystem to the workspace and isolates network namespaces (sandboxNetwork: "host" | "none"). When sandboxNetwork is "none", network namespaces are unshared (--unshare-net blocking IP/loopback/metadata egress) and pre-existing host Unix domain sockets within the workspace are masked with /dev/null.',
     parameters: {
       type: 'object',
       properties: {
@@ -253,6 +253,29 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
 
         // Mount workspace root read-write only
         bwrapArgs.push('--bind', realRoot, realRoot);
+
+        // When network isolation is requested, mask any pre-existing host Unix domain sockets within the workspace (fixes cloud-factory-cf-5vuu)
+        if (networkMode === 'none') {
+          const scanSockets = async (dir: string): Promise<string[]> => {
+            const found: string[] = [];
+            const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+            for (const entry of entries) {
+              const fullPath = path.join(dir, entry.name);
+              if (entry.isSocket()) {
+                found.push(fullPath);
+              } else if (entry.isDirectory() && !entry.isSymbolicLink()) {
+                const sub = await scanSockets(fullPath);
+                found.push(...sub);
+              }
+            }
+            return found;
+          };
+          const hostSockets = await scanSockets(realRoot);
+          for (const sock of hostSockets) {
+            bwrapArgs.push('--ro-bind', '/dev/null', sock);
+          }
+        }
+
         bwrapArgs.push('--chdir', realRoot);
         bwrapArgs.push('--', '/bin/sh', '-c', cmdStr);
 
