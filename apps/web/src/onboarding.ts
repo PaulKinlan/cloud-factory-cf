@@ -171,7 +171,7 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
       urlInput.value = scope === null ? "" : webhookUrl(base, scope.owner, scope.repo);
     }
     if (installLink !== null) {
-      installLink.href = installUrl(options.appSlug ?? "cloud-factory", scope === null ? "" : `${scope.owner}/${scope.repo}`);
+      installLink.href = installUrl(options.appSlug ?? "cloud-agent-factory", scope === null ? "" : `${scope.owner}/${scope.repo}`);
     }
   }
 

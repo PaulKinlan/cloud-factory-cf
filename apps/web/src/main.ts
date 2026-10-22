@@ -900,7 +900,7 @@ announce(`Canvas ready with ${doc.nodes.length} nodes`);
 // The repository gate: the header pill owns the scope, and the panels that need a
 // repository (share, observability) start from whatever the operator connected.
 mountConnectGate(document, {
-  appSlug: "cloud-factory",
+  appSlug: "cloud-agent-factory",
   onScope: (scope) => {
     // Prefill, never overwrite: an operator may already have typed a scope.
     if (scope !== null && shareRepository.value.trim() === "") {

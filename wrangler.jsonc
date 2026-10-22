@@ -20,7 +20,8 @@
     "run_worker_first": true
   },
   "vars": {
-    "ENVIRONMENT": "development"
+    "ENVIRONMENT": "development",
+    "GITHUB_APP_SLUG": "cloud-agent-factory"
   },
   "durable_objects": {
     "bindings": [
