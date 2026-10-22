@@ -11,6 +11,7 @@ export interface LocalToolsOptions {
   maxFileSize?: number;
   commandTimeoutMs?: number;
   sandbox?: 'bwrap' | 'none';
+  sandboxNetwork?: 'host' | 'none';
 }
 
 export function createLocalTools(options: LocalToolsOptions = {}): readonly ToolDefinition[] {
@@ -166,7 +167,8 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
 
   const execCommandTool: ToolDefinition = {
     name: 'exec_command',
-    description: 'Execute a shell command within the local workspace directory',
+    description:
+      'Execute a shell command within the local workspace directory. Under sandbox mode (default: bubblewrap), confines the filesystem to the workspace and supports network confinement (sandboxNetwork: "host" | "none").',
     parameters: {
       type: 'object',
       properties: {
@@ -180,6 +182,7 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
       const timeout = typeof params.timeoutMs === 'number' ? params.timeoutMs : commandTimeoutMs;
       const realRoot = await fs.realpath(rootDir).catch(() => rootDir);
       const sandboxMode = options.sandbox ?? 'bwrap';
+      const networkMode = options.sandboxNetwork ?? 'host';
 
       if (sandboxMode === 'bwrap') {
         const hasBwrap = await fs
@@ -195,6 +198,8 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
 
         const bwrapArgs: string[] = [
           '/usr/bin/bwrap',
+          '--unshare-pid',
+          '--die-with-parent',
           '--ro-bind',
           '/usr',
           '/usr',
@@ -217,6 +222,10 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
           '/home',
         ];
 
+        if (networkMode === 'none') {
+          bwrapArgs.push('--unshare-net');
+        }
+
         // Read-only mount ONLY the node executable itself rather than its parent directory (fixes cloud-factory-cf-buy)
         const realExec = await fs.realpath(process.execPath).catch(() => process.execPath);
         bwrapArgs.push('--ro-bind', realExec, realExec);
@@ -224,20 +233,22 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
           bwrapArgs.push('--ro-bind', process.execPath, process.execPath);
         }
 
-        // Mount DNS/SSL configuration read-only if present
-        const hasEtcResolv = await fs
-          .stat('/etc/resolv.conf')
-          .then(() => true)
-          .catch(() => false);
-        if (hasEtcResolv) {
-          bwrapArgs.push('--ro-bind', '/etc/resolv.conf', '/etc/resolv.conf');
-        }
-        const hasEtcSsl = await fs
-          .stat('/etc/ssl')
-          .then(() => true)
-          .catch(() => false);
-        if (hasEtcSsl) {
-          bwrapArgs.push('--ro-bind', '/etc/ssl', '/etc/ssl');
+        // Mount DNS/SSL configuration read-only if present and network is enabled
+        if (networkMode !== 'none') {
+          const hasEtcResolv = await fs
+            .stat('/etc/resolv.conf')
+            .then(() => true)
+            .catch(() => false);
+          if (hasEtcResolv) {
+            bwrapArgs.push('--ro-bind', '/etc/resolv.conf', '/etc/resolv.conf');
+          }
+          const hasEtcSsl = await fs
+            .stat('/etc/ssl')
+            .then(() => true)
+            .catch(() => false);
+          if (hasEtcSsl) {
+            bwrapArgs.push('--ro-bind', '/etc/ssl', '/etc/ssl');
+          }
         }
 
         // Mount workspace root read-write only
