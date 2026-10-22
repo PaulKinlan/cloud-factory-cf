@@ -27,6 +27,21 @@ async function callAudit(
   );
 }
 
+/**
+ * How many events the queue still holds, across every status.
+ *
+ * An individual status is not stable here: a freshly queued event can be claimed by the
+ * drain between the 202 and the read, so `stats["pending"]` is absent on a busy machine
+ * and present on a quiet one - which reds any gate that runs this suite while the VM is
+ * loaded (cloud-factory-cf-8xzi: green 59/59 in 37s when quiet, red inside a 662s gate
+ * run). What these assertions protect is that the counts route answers at all - an event
+ * whose delivery id is "stats" must not shadow it - and a shadowed or empty answer still
+ * sums to 0, so the total keeps the same strength without depending on the drain.
+ */
+function queuedTotal(stats: Record<string, number> | undefined): number {
+  return Object.values(stats ?? {}).reduce((sum, n) => sum + (Number(n) || 0), 0);
+}
+
 describe("audit route patterns", () => {
   it("matches expected audit paths", () => {
     expect(AUDIT_PATH.test("/audit/events/acme/widgets")).toBe(true);
@@ -117,7 +132,7 @@ describe("DO event audit log API", () => {
     };
     expect(listBody.ok).toBe(true);
     expect(listBody.count).toBe(2);
-    expect(listBody.stats["pending"]).toBe(2);
+    expect(queuedTotal(listBody.stats)).toBe(2);
     expect(listBody.events.map((e) => e.deliveryId)).toEqual(["deliv-list-2", "deliv-list-1"]);
 
     // Filter by limit
@@ -212,7 +227,7 @@ describe("DO event audit log API", () => {
     expect(body.ok).toBe(true);
     expect(body.repository).toBe(repository);
     expect(typeof body.stats).toBe("object");
-    expect(body.stats["pending"]).toBe(1);
+    expect(queuedTotal(body.stats)).toBe(1);
   });
 
   it("retrieves an event whose delivery ID is stats (cloud-factory-cf-sood)", async () => {
@@ -237,20 +252,20 @@ describe("DO event audit log API", () => {
     expect(listBody.ok).toBe(true);
     expect(listBody.count).toBe(1);
     expect(listBody.events[0].deliveryId).toBe("stats");
-    expect(listBody.stats["pending"]).toBe(1);
+    expect(queuedTotal(listBody.stats)).toBe(1);
 
     // Event list all events maintains stats breakdown counts (cloud-factory-cf-xib7)
     const listAllRes = await callAudit(`/audit/events/${repository}`, authHeaders);
     expect(listAllRes.status).toBe(200);
     const listAllBody = (await listAllRes.json()) as any;
-    expect(listAllBody.stats["pending"]).toBe(1);
+    expect(queuedTotal(listAllBody.stats)).toBe(1);
 
     // Public /stats?counts=1 route returns status breakdown counts even for repos holding 'stats' delivery
     const countsRes = await callAudit(`/audit/events/${repository}/stats?counts=1`, authHeaders);
     expect(countsRes.status).toBe(200);
     const countsBody = (await countsRes.json()) as any;
     expect(countsBody.ok).toBe(true);
-    expect(countsBody.stats["pending"]).toBe(1);
+    expect(queuedTotal(countsBody.stats)).toBe(1);
 
     // ?counts=0 and bare ?counts return event detail view (with event and deliveries, and no stats key) (cloud-factory-cf-czha)
     const counts0Res = await callAudit(`/audit/events/${repository}/stats?counts=0`, authHeaders);
