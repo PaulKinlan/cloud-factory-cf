@@ -15,6 +15,7 @@ import {
 } from "./sync";
 import { initObservability } from "./observability";
 import { mountConnectGate } from "./onboarding";
+import { coalescePerFrame } from "./pan-frame";
 import {
   KIND_LABELS,
   NODE_HEIGHT,
@@ -695,6 +696,16 @@ function fitToContent(): void {
 // Pan: drag the background (not a node).
 let pan: { pointerId: number; startX: number; startY: number; originX: number; originY: number } | null = null;
 
+/** Move the view to a pan position. Shared so the release point lands exactly too. */
+const applyPanTo = (clientX: number, clientY: number): void => {
+  if (!pan) return;
+  doc.view.x = pan.originX + (clientX - pan.startX);
+  doc.view.y = pan.originY + (clientY - pan.startY);
+  applyView();
+};
+
+const panFrames = coalescePerFrame<PointerEvent>((event) => applyPanTo(event.clientX, event.clientY));
+
 viewport.addEventListener("pointerdown", (event) => {
   const target = event.target as HTMLElement;
   if (target.closest(".node") || target.closest(".edge-remove")) return;
@@ -712,13 +723,18 @@ viewport.addEventListener("pointerdown", (event) => {
 
 viewport.addEventListener("pointermove", (event) => {
   if (!pan || pan.pointerId !== event.pointerId) return;
-  doc.view.x = pan.originX + (event.clientX - pan.startX);
-  doc.view.y = pan.originY + (event.clientY - pan.startY);
-  applyView();
+  // A trackpad fires these faster than frames; apply the pan once per frame
+  // (cloud-factory-cf-7mw9).
+  panFrames.schedule(event);
 });
 
 const endPan = (event: PointerEvent): void => {
   if (!pan || pan.pointerId !== event.pointerId) return;
+  // Drop the queued frame first, then land the release point itself: a drag that
+  // ends between frames would otherwise lose its last movement and snap back
+  // (cloud-factory-cf-lrak).
+  panFrames.cancel();
+  applyPanTo(event.clientX, event.clientY);
   pan = null;
   viewport.classList.remove("is-panning");
   persist();
