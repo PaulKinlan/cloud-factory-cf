@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import * as os from 'node:os';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import * as http from 'node:http';
+import * as net from 'node:net';
 import { createLocalTools } from '../src/index.ts';
 
 test('createLocalTools: provides file operations and blocks path traversal', async () => {
@@ -175,6 +177,56 @@ test('createLocalTools: exec_command isolation under bubblewrap', async (t) => {
       );
     } finally {
       await fs.rm(nodeParentMarker, { force: true });
+    }
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('createLocalTools: exec_command network confinement under bubblewrap (cloud-factory-cf-u8py)', async (t) => {
+  const reason = await bwrapUnavailableReason();
+  if (reason) {
+    t.skip(reason);
+    return;
+  }
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-net-'));
+  try {
+    // Start a temporary local HTTP server on the host loopback
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('HOST_SERVER_OK');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const address = server.address() as net.AddressInfo;
+    const localUrl = `http://127.0.0.1:${address.port}`;
+
+    try {
+      // Default / host mode: can connect to host loopback
+      const hostTools = createLocalTools({ cwd: tmpDir, sandboxNetwork: 'host' });
+      const hostExec = hostTools.find((t2) => t2.name === 'exec_command')!;
+      const hostRes = (await hostExec.handler({
+        command: `node -e 'fetch("${localUrl}").then(r => r.text()).then(t => console.log("CONNECTED:" + t))'`,
+      })) as any;
+      assert.match(hostRes.stdout, /CONNECTED:HOST_SERVER_OK/);
+
+      // None mode: cannot connect to loopback or metadata IP (169.254.169.254)
+      const isolatedTools = createLocalTools({ cwd: tmpDir, sandboxNetwork: 'none' });
+      const isolatedExec = isolatedTools.find((t2) => t2.name === 'exec_command')!;
+
+      const localCheck = (await isolatedExec.handler({
+        command: `node -e 'fetch("${localUrl}", { signal: AbortSignal.timeout(1000) }).then(() => console.log("CONNECTED")).catch(e => console.log("FAILED:" + (e.cause?.code || e.message)))'`,
+      })) as any;
+      assert.match(localCheck.stdout, /FAILED:/);
+      assert.doesNotMatch(localCheck.stdout, /CONNECTED/);
+
+      const metaCheck = (await isolatedExec.handler({
+        command: `node -e 'fetch("http://169.254.169.254:80", { signal: AbortSignal.timeout(1000) }).then(() => console.log("CONNECTED")).catch(e => console.log("FAILED:" + (e.cause?.code || e.message)))'`,
+      })) as any;
+      assert.match(metaCheck.stdout, /FAILED:/);
+      assert.doesNotMatch(metaCheck.stdout, /CONNECTED/);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
