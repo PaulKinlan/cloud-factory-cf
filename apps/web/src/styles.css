@@ -33,7 +33,11 @@ body {
   background: var(--bg);
   color: var(--ink);
   font: 15px/1.5 var(--font);
-  overflow: hidden;
+  /* clip, not hidden: the shell wants containment without becoming a scroll
+     container that script, scrollIntoView and assistive tech can scroll
+     (cloud-factory-cf-7j7i). Focus rings survive because the shell's controls sit
+     inside the topbar's 12px/18px padding, which is wider than the 2px outline. */
+  overflow: clip;
 }
 
 .sr-only {
