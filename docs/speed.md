@@ -11,7 +11,7 @@ served by `fleet-deps`.
 | --- | --- | --- |
 | `npm run build` | `vite build` for `apps/web`, then `wrangler deploy --dry-run` — bundles the Worker, validates `wrangler.jsonc`, DO bindings, migrations and the `ASSETS` directory | 2.0–2.3s |
 | `npm run typecheck` | `tsc --noEmit` per workspace (sdk, cli, worker, web) | 4.0–4.4s |
-| `npm test` | `vitest run` inside workerd (`@cloudflare/vitest-plugin`), `node:test` for packages (`canvas-model`, `sdk`, `cli`), and Vitest for `apps/web` | 7.5–9s |
+| `npm test` | `vitest run` inside workerd (`@cloudflare/vitest-plugin`, serialized via `fileParallelism: false`), `node:test` for packages (`canvas-model`, `sdk`, `cli`), and Vitest for `apps/web` | ~185s full suite under load (78s for 6 files); deterministic pass |
 | `npm run ci` | build + typecheck + test | 14–17s idle VM; 45s+ when the VM is loaded |
 | `npm run test:file -- test/<file>.test.ts` | one workerd test file | 2–3s |
 | `npm run test -w @factory-cloud/canvas-model` | `node:test` model tests (`packages/canvas-model`) | 0.2s |
@@ -200,11 +200,19 @@ These are the pathologies that turn one lane's change red for everyone else:
 - **Machine assertions.** Nothing reads the VM's files, env or network; all
   bindings come from `vitest.config.ts` (`WEBHOOK_SECRET`,
   `GITLAB_WEBHOOK_TOKEN` are fixed test values).
-- **One workerd at a time.** The pool starts one runtime; do not launch a second
-  `wrangler dev` or browser in a test.
-- **Serialize workerd test files (`fileParallelism: false`).** Test files in
-  `apps/worker` run sequentially to avoid SQLite DO migration concurrency races,
-  storage collisions, and CPU starvation across multiple Miniflare workers.
+- **Serialize workerd test files (`fileParallelism: false`).** Without serialization,
+  Vitest dispatches test files concurrently across multiple runner workers. While this
+  overlaps initial import/transform time, parallel execution causes SQLite DO migration
+  concurrency races (e.g. `no such table: run_trace: SQLITE_ERROR`), cross-test fetch
+  mock collisions, and severe CPU starvation under VM load. In `apps/worker/vitest.config.ts`,
+  `fileParallelism: false` runs workerd test files sequentially. While serialization
+  adds ~+31% wall-clock to partial runs (measured in A/B: 59.97s parallel vs 78.41s
+  serialized across 6 worker files), it eliminates race flakes and drops full gate
+  runtime under load from >2000s (with recurring migration errors) to ~185s with 100%
+  deterministic passes (257/257 tests).
+- **Do not launch ad-hoc runtimes.** Tests must execute inside the configured Vitest
+  workerd pool; do not start secondary `wrangler dev` processes or headless browsers
+  inside unit tests.
 
 ## Adding coverage without slowing the gate
 
