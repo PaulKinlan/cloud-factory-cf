@@ -24,7 +24,7 @@ async function readBounded(body: ReadableStream<Uint8Array> | null, limit: numbe
   return bytes;
 }
 
-const PATH = /^\/git-tree\/([^/]+)\/([^/]+)(?:\/files\/(.+))?$/;
+const PATH = /^\/analysis\/([^/]+)\/([^/]+)\/tree(?:\/files\/(.+))?$/;
 
 /** Authenticated, provider-independent tree ingestion; no GitHub API/token is needed. */
 export async function handleGitTree(request: Request, env: Env, url: URL): Promise<Response | null> {
@@ -36,17 +36,17 @@ export async function handleGitTree(request: Request, env: Env, url: URL): Promi
   if (!(await sameSecret(env.BROKER_CONTROL_KEY, request.headers.get("x-factory-control-key")))) {
     return Response.json({ ok: false, error: "not authorised" }, { status: 401 });
   }
-  if (path ? request.method !== "GET" : !["GET", "PUT"].includes(request.method)) {
+  if (path ? request.method !== "GET" : !["GET", "POST"].includes(request.method)) {
     return new Response("method not allowed", { status: 405 });
   }
-  if (request.method === "PUT" && Number(request.headers.get("content-length")) > MAX_TREE_BYTES) {
+  if (request.method === "POST" && Number(request.headers.get("content-length")) > MAX_TREE_BYTES) {
     return Response.json({ ok: false, error: "tree exceeds size limit" }, { status: 413 });
   }
   const coordinator = getRepoCoordinator(env, `${owner}/${repo}`, url.searchParams.get("platform"));
   const target = path ? `/git-tree/files/${path}` : "/git-tree";
   const query = path ? "" : url.search;
   let body: BodyInit | undefined;
-  if (request.method === "PUT") {
+  if (request.method === "POST") {
     let bytes: Uint8Array;
     try { bytes = await readBounded(request.body, MAX_TREE_BYTES); }
     catch { return Response.json({ ok: false, error: "payload exceeds size limit" }, { status: 413 }); }
@@ -65,7 +65,7 @@ export async function handleGitTree(request: Request, env: Env, url: URL): Promi
     }
   }
   return coordinator.fetch(new Request(`https://repo-coordinator.internal${target}${query}`, {
-    method: request.method,
+    method: request.method === "POST" ? "PUT" : request.method,
     body,
   }));
 }
