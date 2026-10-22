@@ -154,7 +154,7 @@ describe("DO event audit log API", () => {
   });
 
   it("provides detailed audit for a single event including payload and agent deliveries", async () => {
-    const repository = "audit/detail-test";
+    const repository = `audit/detail-test-${crypto.randomUUID().slice(0, 8)}`;
     const deliveryId = "deliv-detail-1";
     const req = await githubRequest(deliveryId, repository);
     const queued = await SELF.fetch(req);
