@@ -1202,5 +1202,37 @@ describe("/api/repos: the browser session minted by the connect callback (cloud-
     const noKeysData = (await noKeysRes.json()) as any;
     expect(noKeysData.ok).toBe(false);
     expect(noKeysData.error).toContain("control key not configured");
+
+    // 6. WEBHOOK_SECRET must never authenticate a session cookie (cloud-factory-cf-yk2j)
+    const webhookOnlyEnv = {
+      ...env,
+      BROKER_CONTROL_KEY: undefined,
+      BROKER_SIGNING_KEY: undefined,
+      WEBHOOK_SECRET: "my-webhook-secret",
+    };
+    // Sign cookie with WEBHOOK_SECRET
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    const enc = new TextEncoder();
+    const whKey = await crypto.subtle.importKey(
+      "raw",
+      enc.encode("my-webhook-secret"),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const whSig = Array.from(new Uint8Array(await crypto.subtle.sign("HMAC", whKey, enc.encode(`octodev.${exp}`))))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    const whCookie = `cf_session=octodev.${exp}.${whSig}`;
+
+    const whReq = new Request("https://example.com/api/repos?owner=octodev", { headers: { cookie: whCookie } });
+    const whRes = await handleApiRepos(whReq, webhookOnlyEnv as any, new URL(whReq.url));
+    // Since neither BROKER_CONTROL_KEY nor BROKER_SIGNING_KEY is set, returns 503 (WEBHOOK_SECRET is not accepted)
+    expect(whRes.status).toBe(503);
+
+    // And with BROKER_CONTROL_KEY configured, a WEBHOOK_SECRET-signed cookie is rejected with 401
+    const whReqWithControlKey = new Request("https://example.com/api/repos?owner=octodev", { headers: { cookie: whCookie } });
+    const whResWithControlKey = await handleApiRepos(whReqWithControlKey, { ...env, BROKER_SIGNING_KEY: "real-signing-key" } as any, new URL(whReqWithControlKey.url));
+    expect(whResWithControlKey.status).toBe(401);
   });
 });

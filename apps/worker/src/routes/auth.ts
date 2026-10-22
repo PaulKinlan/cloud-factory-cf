@@ -162,7 +162,7 @@ export async function handleGithubLogin(
   env: Env,
   url: URL,
 ): Promise<Response> {
-  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY ?? env.WEBHOOK_SECRET;
+  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
   if (!signingKey) {
     return Response.json({ ok: false, error: "broker signing key not configured" }, { status: 503 });
   }
@@ -279,7 +279,7 @@ export async function handleGithubCallback(
   env: Env,
   url: URL,
 ): Promise<Response> {
-  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY ?? env.WEBHOOK_SECRET;
+  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
   if (!signingKey) {
     return Response.json({ ok: false, error: "broker signing key not configured" }, { status: 503 });
   }
@@ -732,7 +732,7 @@ export async function handleApiRepos(
   url: URL,
 ): Promise<Response> {
   const controlKey = env.BROKER_CONTROL_KEY;
-  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY ?? env.WEBHOOK_SECRET;
+  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
 
   if (!controlKey && !signingKey) {
     return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
