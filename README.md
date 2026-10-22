@@ -175,3 +175,4 @@ Durable Object alarm, so a crashed runner cannot lose an event. Verification is
 provider-specific — GitHub signs the raw body with HMAC-SHA256
 (`WEBHOOK_SECRET`), GitLab sends `X-Gitlab-Token` (`GITLAB_WEBHOOK_TOKEN`) — and
 a payload naming a different repository than its endpoint is refused with 400.
+<!-- fleet-verified: 2026-10-22T12:30:14Z -->
