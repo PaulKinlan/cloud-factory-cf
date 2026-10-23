@@ -24,8 +24,9 @@ import { readSession } from "../routes/auth";
  * weaker credential. Comparison is case-insensitive because GitHub logins are.
  *
  * A deployment needs *one* of the two credentials configured: a session signing key
- * (`BROKER_SIGNING_KEY`, falling back to `BROKER_CONTROL_KEY`/`WEBHOOK_SECRET`) is
- * enough for browsers, so removing the master control key does not lock the UI out.
+ * (`BROKER_SIGNING_KEY`, falling back to `BROKER_CONTROL_KEY` and nothing else) is enough
+ * for browsers, so removing the master control key does not lock the UI out. A webhook
+ * secret is never a session key — see `sessionSigningKey` below.
  */
 
 /** Who called, and which credential proved it. */
@@ -40,11 +41,16 @@ export type ControlAuthz =
   | { ok: false; reason: ControlDenialReason };
 
 /**
- * The key that signs and verifies `cf_session`. Same precedence `routes/auth.ts` mints
+ * The key that signs and verifies `cf_session` — the same precedence `routes/auth.ts` mints
  * with, so a session minted at login verifies here.
+ *
+ * `WEBHOOK_SECRET` is deliberately **not** in this list (cloud-factory-cf-8e7r): the mint
+ * path stopped accepting it in `owqq`, and a webhook secret is not a session key. Accepting
+ * it on the verification side would be dead code today and a hole the day someone mints
+ * with it, so the two sides state the same rule.
  */
 export function sessionSigningKey(env: Env): string | undefined {
-  return env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY ?? env.WEBHOOK_SECRET;
+  return env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
 }
 
 export interface ControlAuthzOptions {

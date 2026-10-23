@@ -13,4 +13,5 @@ Welcome to the **Cloud Factory CF** architectural and developer documentation.
 
 ## Architecture Decision Records
 - [ADR 003](./adr-003-multi-platform-dev-adapters.md): Universal DevPlatform adapters — one platform-neutral event, one adapter per forge.
+- [ADR 005](./adr-005-oauth-tenant-boundary.md): GitHub OAuth session as the tenant boundary; the master control key becomes a machine credential with a retirement plan.
 - [ADR 006](./adr-006-multi-tenant-accounts.md): Hierarchical multi-tenant accounts — platform owner, customer org admin, end user, and the machine key they replace.

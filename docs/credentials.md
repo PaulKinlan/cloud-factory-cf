@@ -80,8 +80,10 @@ The `:owner` segment **is** the tenant boundary. A valid session for `alice`
 reading `/audit/events/bob/widgets` is refused as another account's tenancy
 rather than retried with a weaker credential; the comparison is
 case-insensitive because GitHub logins are. A session signs with
-`BROKER_SIGNING_KEY` (falling back to `BROKER_CONTROL_KEY`/`WEBHOOK_SECRET`), so
-a deployment can run browsers **without** the master control key — that is the
+`BROKER_SIGNING_KEY`, falling back to `BROKER_CONTROL_KEY` and nothing else —
+`WEBHOOK_SECRET` is not a session key and was dropped from both the mint and the
+verify path (cloud-factory-cf-owqq, -8e7r) — so a deployment can run browsers
+**without** the master control key — that is the
 point of the split: the control key names no tenant, so anything holding it can
 reach every repository, and a browser was never able to hold it securely.
 
