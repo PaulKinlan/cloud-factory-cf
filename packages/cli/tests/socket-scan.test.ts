@@ -76,9 +76,10 @@ test('scanWorkspaceSockets: finds a socket under node_modules (cloud-factory-cf-
   try {
     const result = await scanWorkspaceSockets(root);
     assert.deepEqual(result.sockets, [path.join(deep, 'hidden.sock')]);
-    // The kernel table answers this, so no directory walk was needed at all.
+    // The kernel table answers this, so no directory walk was needed at all. No timing
+    // assertion here on purpose: a load-sensitive bound is a test that reds for whoever
+    // happens to run it on a busy machine (docs/speed.md, tests must be independent).
     assert.equal(result.source, 'proc');
-    assert.ok(result.elapsedMs < 500, `kernel table scan took ${result.elapsedMs}ms`);
   } finally {
     await close();
     await fs.rm(root, { recursive: true, force: true });
@@ -298,5 +299,48 @@ test('scanWorkspaceSockets: an unrelated host socket outside the workspace is le
   } finally {
     await close();
     await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
+
+test('analyseSocketTable: a pathname ending in spaces is kept verbatim, not trimmed (cloud-factory-cf-5vuu)', () => {
+  const table = [
+    HEADER,
+    '0000000000000000: 00000002 00000000 00010000 0001 01 1 /srv/app/host.sock ',
+    '0000000000000000: 00000002 00000000 00010000 0001 01 2 /srv/app/two spaces.sock  ',
+  ].join('\n');
+
+  const analysis = analyseSocketTable(table, '/srv/app');
+  // Trimming would have masked `/srv/app/host.sock` — a path that does not exist — while
+  // leaving the real socket at `/srv/app/host.sock ` open.
+  assert.deepEqual(analysis.sockets, ['/srv/app/host.sock ', '/srv/app/two spaces.sock  ']);
+});
+
+test('scanWorkspaceSockets: a socket whose name ends in a space is masked at that name', async () => {
+  const root = await tempWorkspace('fc-scan-space-');
+  const close = await listenUnixSocket(path.join(root, 'host.sock '));
+  try {
+    const result = await scanWorkspaceSockets(root);
+    assert.equal(result.source, 'proc');
+    assert.deepEqual(result.sockets, [path.join(root, 'host.sock ')]);
+  } finally {
+    await close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('scanWorkspaceSockets: a row the table truncates (newline in the name) falls back to the walk', async () => {
+  const root = await tempWorkspace('fc-scan-newline-');
+  const weird = path.join(root, 'a\nb.sock');
+  const close = await listenUnixSocket(weird);
+  try {
+    const result = await scanWorkspaceSockets(root);
+    // The line-oriented table cannot represent that name: the row names `/root/a`, which
+    // is not a socket, so the scan escalates to the complete walk and finds the real file.
+    assert.equal(result.source, 'walk');
+    assert.deepEqual(result.sockets, [weird]);
+  } finally {
+    await close();
+    await fs.rm(root, { recursive: true, force: true });
   }
 });

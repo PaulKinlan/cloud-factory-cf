@@ -91,8 +91,15 @@ const DEFAULT_CONCURRENCY = 16;
 const FIX_HINT =
   'Refusing to run the command with an unverified socket mask. Narrow the workspace, or raise the budget with createLocalTools({ socketScan: { timeoutMs, maxDirs, maxDepth } }).';
 
-/** `/proc/net/unix` rows: `Num: RefCount Protocol Flags Type St Inode Path`. */
-const SOCKET_TABLE_ROW = /^\s*[0-9a-fA-F]+:\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\d+\s+(.*)$/;
+/**
+ * `/proc/net/unix` rows: `Num: RefCount Protocol Flags Type St Inode Path`.
+ *
+ * The path is captured **verbatim** — exactly one separator space is consumed, and
+ * nothing is trimmed. A pathname may legitimately end in (or consist of) spaces, and
+ * trimming would mask `/ws/host.sock` while the real socket stayed at `/ws/host.sock `
+ * — an escape of the same shape as the earlier ones (cloud-factory-cf-5vuu).
+ */
+const SOCKET_TABLE_ROW = /^\s*[0-9a-fA-F]+:\s+(?:\S+\s+){5}\d+\s(.*)$/;
 
 export interface SocketTableAnalysis {
   /** Sockets the table places inside the workspace, by normalised absolute path. */
@@ -129,7 +136,7 @@ export function analyseSocketTable(table: string, root: string): SocketTableAnal
   for (const line of table.split('\n')) {
     const match = SOCKET_TABLE_ROW.exec(line);
     if (!match) continue;
-    const socketPath = (match[1] ?? '').trim();
+    const socketPath = match[1] ?? '';
     // An abstract socket (@) has no filesystem path, so there is nothing to mask and
     // nothing the sandbox can dial by name.
     if (socketPath.length === 0 || socketPath.startsWith('@')) continue;
@@ -270,7 +277,7 @@ async function socketsReachingWorkspace(root: string, candidates: string[]): Pro
   const prefix = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
   const reaching: string[] = [];
   for (const candidate of candidates) {
-    const real = await realpathOrNull(candidate);
+    const real = await socketRealpathOrNull(candidate);
     // Mask the *real* path, not the name the socket was bound under: the sandbox reaches
     // the file through the workspace (`<root>/host.sock`), so a mount over
     // `/tmp/link/host.sock` would leave the workspace route open — measured with real
@@ -284,7 +291,26 @@ async function realpathOrNull(target: string): Promise<string | null> {
   try {
     return await fs.realpath(target);
   } catch {
-    // A socket that has been closed since the table was read is nothing to mask.
+    return null;
+  }
+}
+
+/**
+ * The real path of `target` when it is a Unix socket, or `null` when it is gone or is
+ * something else. Checking the type matters twice: masking a regular file with
+ * `/dev/null` would empty it inside the sandbox, and a row whose path does not resolve
+ * to a socket means the name in the table is not usable — either stale, or truncated by
+ * the line-oriented table format (a pathname containing a newline).
+ */
+async function socketRealpathOrNull(target: string): Promise<string | null> {
+  try {
+    const real = await fs.realpath(target);
+    // `lstat` is in `node:fs/promises` at runtime; the package's hand-written
+    // `node-env.d.ts` shim declares a subset of the module, and a `.d.ts` edit has no
+    // covering suite (cloud-factory-cf-llyg), so it is reached through a narrow cast.
+    const stat = await (fs as unknown as { lstat(target: string): Promise<{ isSocket(): boolean }> }).lstat(real);
+    return stat.isSocket() ? real : null;
+  } catch {
     return null;
   }
 }
@@ -298,14 +324,28 @@ export async function scanWorkspaceSockets(
   options: SocketScanOptions = {},
 ): Promise<SocketScanResult> {
   const startedAt = Date.now();
+  // Set when the table names something this scan could not pin down (a relative pathname,
+  // or a row that does not resolve to a socket): such a request pays for a complete walk.
+  let unnamedRows = false;
 
   const table = await readHostUnixSocketTable(options.tablePath);
   if (table !== null) {
     const analysis = analyseSocketTable(table, root);
     const linked = await socketsReachingWorkspace(root, analysis.outside);
-    if (!analysis.relativePaths) {
+
+    // Verify the rows the table places inside the workspace: only real sockets are masked,
+    // and a row that does not resolve to one means the name is unusable (stale, or a
+    // pathname the table's line format truncated), which needs the complete walk.
+    const verified: string[] = [];
+    for (const placed of analysis.sockets) {
+      const real = await socketRealpathOrNull(placed);
+      if (real === null) unnamedRows = true;
+      else verified.push(real);
+    }
+
+    if (!analysis.relativePaths && !unnamedRows) {
       return {
-        sockets: [...new Set([...analysis.sockets, ...linked])].sort(),
+        sockets: [...new Set([...verified, ...linked])].sort(),
         source: 'proc',
         dirsScanned: 0,
         elapsedMs: Date.now() - startedAt,
@@ -315,7 +355,7 @@ export async function scanWorkspaceSockets(
     // request pays for a complete walk and unions what it finds. The walk throws rather
     // than returning partial results, so the union is never silently incomplete.
     const walk = await walkWorkspaceSockets(root, options);
-    const sockets = [...new Set([...analysis.sockets, ...linked, ...walk.sockets])].sort();
+    const sockets = [...new Set([...verified, ...linked, ...walk.sockets])].sort();
     return {
       sockets,
       source: 'walk',

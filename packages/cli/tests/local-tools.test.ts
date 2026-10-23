@@ -518,3 +518,35 @@ test('createLocalTools: network-none masks a socket reached through a symlink in
     await fs.rm(base, { recursive: true, force: true });
   }
 });
+
+test('createLocalTools: network-none masks a socket whose name ends in a space (path parsing, 5vuu)', async (t) => {
+  const reason = await bwrapUnavailableReason();
+  if (reason) {
+    t.skip(reason);
+    return;
+  }
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-space-'));
+  // A trailing space is part of the name: trimming the socket-table row would mask
+  // `host.sock` (which does not exist) and leave `host.sock ` reachable.
+  const sockPath = path.join(tmpDir, 'host.sock ');
+  const server = net.createServer((connection) => {
+    connection.write('HOST_SOCKET_REACHED\n');
+    connection.end();
+  });
+  await new Promise<void>((resolve) => server.listen(sockPath, () => resolve()));
+
+  try {
+    const tools = createLocalTools({ cwd: tmpDir, sandboxNetwork: 'none' });
+    const execTool = tools.find((t2) => t2.name === 'exec_command')!;
+    const res = (await execTool.handler({
+      command: `node -e 'const net = require("net"); net.connect(${JSON.stringify(sockPath)}).on("data", () => console.log("HOST_SOCKET_REACHED")).on("error", e => console.log("MASKED_ERR:" + e.code))'`,
+    })) as any;
+    assert.doesNotMatch(res.stdout, /HOST_SOCKET_REACHED/);
+    assert.match(res.stdout, /MASKED_ERR:/);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(sockPath, { force: true }).catch(() => {});
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});

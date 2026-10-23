@@ -136,12 +136,15 @@ every socket in the workspace, and that discovery is a security control:
   of this fix pruned those trees to stay fast and left a reproducible escape — a socket
   in a pruned directory was never masked, cloud-factory-cf-5vuu.)
 - the table names a socket by the path `bind()` was given, which is not the path the
-  sandbox dials, so three shapes are resolved before masking: `..` is normalised
+  sandbox dials, so the name is used **verbatim** (never trimmed: a trailing space is
+  part of the name) and three shapes are resolved before masking: `..` is normalised
   (`bind("/tmp/o/../workspace/x.sock")` is a workspace socket); a row outside the tree is
   `realpath`-checked and, if it reaches into the workspace through a symlinked directory,
   masked **at its real workspace path** (masking the bound name would leave the workspace
   route open — both reproduced with real bubblewrap); and a relative row, which cannot be
-  placed at all, costs one complete walk for that command (cloud-factory-cf-khu9).
+  placed at all, costs one complete walk for that command (cloud-factory-cf-khu9). A row
+  that does not resolve to a socket — stale, or a pathname the line-oriented table
+  truncated, such as one containing a newline — also escalates to the walk.
 - it is **re-run for every command**, so a socket that appears later is still masked
   (a cache would silently unmask it — cloud-factory-cf-vy8o).
 - a table with no such row costs nothing extra — measured on this VM: 0 relative against
