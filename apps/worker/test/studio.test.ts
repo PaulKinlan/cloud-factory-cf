@@ -28,12 +28,18 @@ describe("Prompt-to-Agent Studio Worker API", () => {
     const badKeyRes = await worker.fetch(badKeyReq, env);
     expect(badKeyRes.status).toBe(401);
 
-    // 3. Unconfigured control key -> 503
+    // 3. No control-plane credential configured -> 503. Since cloud-factory-cf-e1ql a
+    // session signing key alone is a working deployment, so this strips every key.
     const unconfigRes = await worker.fetch(
       new Request("https://factory.cloud/studio/PaulKinlan/cloud-factory-cf/agents", {
         headers: { "x-factory-control-key": "test-control-key" },
       }),
-      { ...env, BROKER_CONTROL_KEY: undefined } as any,
+      {
+        ...env,
+        BROKER_CONTROL_KEY: undefined,
+        BROKER_SIGNING_KEY: undefined,
+        WEBHOOK_SECRET: undefined,
+      } as any,
     );
     expect(unconfigRes.status).toBe(503);
   });

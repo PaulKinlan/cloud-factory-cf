@@ -1,6 +1,6 @@
 import type { Env } from "../env";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
-import { sameSecret } from "../secrets";
+import { authorizeControlPlane, authzDenial } from "../auth/tenant";
 import { MAX_TREE_BYTES } from "../git-tree-store";
 import { tarballFiles } from "../git-tarball";
 
@@ -26,15 +26,23 @@ async function readBounded(body: ReadableStream<Uint8Array> | null, limit: numbe
 
 const PATH = /^\/analysis\/([^/]+)\/([^/]+)\/tree(?:\/files\/(.+))?$/;
 
-/** Authenticated, provider-independent tree ingestion; no GitHub API/token is needed. */
+/**
+ * Authenticated, provider-independent tree ingestion; no GitHub API/token is needed.
+ *
+ * Ingestion writes into one repository's coordinator, so the caller needs the control
+ * key (machine) or a browser session for that repository's owner
+ * (cloud-factory-cf-e1ql).
+ */
 export async function handleGitTree(request: Request, env: Env, url: URL): Promise<Response | null> {
   const match = PATH.exec(url.pathname);
   if (!match) return null;
   const [, owner, repo, path] = match;
   if (!owner || !repo) return new Response("not found", { status: 404 });
-  if (!env.BROKER_CONTROL_KEY) return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
-  if (!(await sameSecret(env.BROKER_CONTROL_KEY, request.headers.get("x-factory-control-key")))) {
-    return Response.json({ ok: false, error: "not authorised" }, { status: 401 });
+  const authz = await authorizeControlPlane(request, env, { owner });
+  if (!authz.ok) {
+    return authzDenial(authz, {
+      "cross-tenant": "not authorised to ingest another account's repository tree",
+    });
   }
   if (path ? request.method !== "GET" : !["GET", "POST"].includes(request.method)) {
     return new Response("method not allowed", { status: 405 });

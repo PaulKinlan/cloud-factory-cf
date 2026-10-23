@@ -54,16 +54,24 @@ describe("audit route patterns", () => {
 });
 
 describe("audit route authentication", () => {
-  it("fails closed with 503 when control key is not configured", async () => {
+  it("fails closed with 503 when no control-plane credential is configured", async () => {
+    // Semantics changed with cloud-factory-cf-e1ql: a session signing key alone is a
+    // working deployment (browsers authenticate with `cf_session`), so "unconfigured"
+    // now means neither the machine key nor any session key is set.
     const res = await callAudit(
       "/audit/events/acme/widgets",
       { "x-factory-control-key": controlKey },
-      { ...env, BROKER_CONTROL_KEY: undefined } as never,
+      {
+        ...env,
+        BROKER_CONTROL_KEY: undefined,
+        BROKER_SIGNING_KEY: undefined,
+        WEBHOOK_SECRET: undefined,
+      } as never,
     );
     expect(res.status).toBe(503);
     const body = (await res.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("control key not configured");
+    expect(body.error).toContain("not configured");
   });
 
   it("returns 401 when control key is missing or invalid", async () => {
