@@ -96,6 +96,26 @@ export async function authorizeControlPlane(
   return { ok: false, reason: "unauthorised" };
 }
 
+/**
+ * Whether this principal may address the provider named by a `platform=` hint.
+ *
+ * A session speaks for one provider: a GitHub session acting for `octodev` is the tenant
+ * `github:octodev/*`, and the same `owner/repo` on GitLab or Gitea is a *different*
+ * tenant with a different Durable Object. The machine key names no tenant, so it may
+ * address any provider, which is how non-GitHub tenants are served (ADR 005).
+ *
+ * Without this, an owner-only comparison plus `?platform=gitlab` reads another provider's
+ * data (cloud-factory-cf-tw9d, -fcwm).
+ */
+export function sessionMayAddressPlatform(
+  principal: ControlPrincipal,
+  platform: string | null | undefined,
+): boolean {
+  if (principal.via === "control-key") return true;
+  if (platform === null || platform === undefined) return true;
+  return platform.toLowerCase() === "github";
+}
+
 const DEFAULT_MESSAGES: Record<ControlDenialReason, string> = {
   unconfigured: "control key not configured",
   unauthorised: "not authorised",

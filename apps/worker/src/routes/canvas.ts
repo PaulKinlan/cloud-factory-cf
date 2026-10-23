@@ -1,7 +1,7 @@
 import type { Env } from "../env";
 import { traceSink } from "../events";
 import { runCanvasDocument } from "../canvas-runs";
-import { authorizeControlPlane, authzDenial } from "../auth/tenant";
+import { authorizeControlPlane, authzDenial, sessionMayAddressPlatform } from "../auth/tenant";
 import { sameSecret } from "../secrets";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
 
@@ -81,6 +81,14 @@ export async function routeCanvas(
 
   const url = new URL(request.url);
   const platform = url.searchParams.get("platform");
+  // A platform hint addresses another provider, which is another tenant: a
+  // session may not switch (cloud-factory-cf-fcwm), the machine key may.
+  if (!sessionMayAddressPlatform(authz.principal, platform)) {
+    return authzDenial(
+      { ok: false, reason: "cross-tenant" },
+      { "cross-tenant": "not authorised for another provider's tenancy" },
+    );
+  }
   const stub = getRepoCoordinator(env, `${owner}/${repo}`, platform);
   let docId: string | undefined = id;
   if (id !== undefined) {

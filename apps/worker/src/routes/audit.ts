@@ -1,5 +1,5 @@
 import type { Env } from "../env";
-import { authorizeControlPlane, authzDenial } from "../auth/tenant";
+import { authorizeControlPlane, authzDenial, sessionMayAddressPlatform } from "../auth/tenant";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
 
 export const AUDIT_PATH =
@@ -47,6 +47,14 @@ export async function handleAudit(
 
   const repository = `${owner}/${repo}`;
   const platform = url.searchParams.get("platform");
+  // A platform hint addresses another provider, which is another tenant: a
+  // session may not switch (cloud-factory-cf-fcwm), the machine key may.
+  if (!sessionMayAddressPlatform(authz.principal, platform)) {
+    return authzDenial(
+      { ok: false, reason: "cross-tenant" },
+      { "cross-tenant": "not authorised to read another provider's audit logs" },
+    );
+  }
   const coordinator = getRepoCoordinator(env, repository, platform);
 
   if (domain === "runs") {

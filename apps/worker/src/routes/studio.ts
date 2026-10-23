@@ -1,7 +1,12 @@
 import type { Env } from "../env";
 import { AgentStudio, type AgentManifest } from "@factory-cloud/sdk";
 import { SERVICES } from "../credentials/policy";
-import { authorizeControlPlane, authzDenial } from "../auth/tenant";
+import {
+  authorizeControlPlane,
+  authzDenial,
+  sessionMayAddressPlatform,
+  type ControlPrincipal,
+} from "../auth/tenant";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
 
 export const STUDIO_PATH =
@@ -16,6 +21,7 @@ export async function routeStudio(
   owner: string,
   repo: string,
   operation: string,
+  principal: ControlPrincipal,
   agentName?: string,
 ): Promise<Response> {
   const studio = new AgentStudio();
@@ -80,6 +86,14 @@ export async function routeStudio(
   if (operation === "agents") {
     const url = new URL(request.url);
     const platform = url.searchParams.get("platform");
+    // A platform hint addresses another provider, which is another tenant: a
+    // session may not switch (cloud-factory-cf-fcwm), the machine key may.
+    if (!sessionMayAddressPlatform(principal, platform)) {
+      return authzDenial(
+        { ok: false, reason: "cross-tenant" },
+        { "cross-tenant": "not authorised for another provider's tenancy" },
+      );
+    }
     const stub = getRepoCoordinator(env, `${owner}/${repo}`, platform);
 
     if (request.method === "GET") {
@@ -199,5 +213,5 @@ export async function handleStudio(
     });
   }
 
-  return routeStudio(request, env, owner, repo, operation, agentName);
+  return routeStudio(request, env, owner, repo, operation, authz.principal, agentName);
 }
