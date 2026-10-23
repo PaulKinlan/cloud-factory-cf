@@ -199,6 +199,15 @@ describe("connect evidence", () => {
     expect(forbidden.status).toBe(403);
     const forbiddenJson = (await forbidden.json()) as any;
     expect(forbiddenJson.error).toContain("another account");
+
+    // 3. Case-insensitive owner comparison (cloud-factory-cf-z1ch): "Octodev" matches session "octodev"
+    const caseRes = await handler.fetch(
+      new Request("https://factory.example/trace/Octodev/connect-ping/connect", {
+        headers: { cookie: `cf_session=${token}` },
+      }),
+      testEnv as never,
+    );
+    expect(caseRes.status).toBe(200);
   });
 
   it("rejects cookies signed with WEBHOOK_SECRET on /trace/:owner/:repo/connect (cloud-factory-cf-7suc)", async () => {

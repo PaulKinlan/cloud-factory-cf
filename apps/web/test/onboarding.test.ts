@@ -136,6 +136,8 @@ describe("markup contract", () => {
     const url = /<input[^>]*id="connect-url"[^>]*>/.exec(indexHtml)?.[0] ?? "";
     expect(url).toContain("readonly");
     expect(url).toContain("field__control");
+    expect(url).toContain('aria-label="Webhook URL (payload URL)"');
+    expect(indexHtml).toContain('<label class="field" for="connect-url">');
 
     const owner = /<input[^>]*id="connect-owner"[^>]*>/.exec(indexHtml)?.[0] ?? "";
     expect(owner).toContain("field__control");

@@ -47,7 +47,7 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
     if (signingKey) {
       const session = await readSession(request.headers, signingKey);
       if (session.ok) {
-        if (owner && owner !== session.login) {
+        if (owner && owner.toLowerCase() !== session.login.toLowerCase()) {
           return Response.json(
             { ok: false, error: "not authorised to read another account's connection status" },
             { status: 403 },
