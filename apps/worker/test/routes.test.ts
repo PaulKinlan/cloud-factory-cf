@@ -103,10 +103,20 @@ describe("domain route handlers", () => {
       expect(badKeyRes?.status).toBe(401);
     });
 
-    it("returns 503 when control key is not configured", async () => {
+    it("returns 503 when no credential is configured at all, and 401 when only the caller has none", async () => {
+      // A deployment with a session signing key but no control key is valid — a browser
+      // session can run its own repository (cloud-factory-cf-ec98) — so an anonymous
+      // caller is unauthorised rather than looking at a misconfiguration.
+      const sessionOnly: Env = { ...env, BROKER_CONTROL_KEY: undefined };
+      const anonymous = new Request("https://example.com/runs/acme/widgets", { method: "POST" });
+      const unauthorised = await handleRuns(anonymous, sessionOnly, new URL(anonymous.url));
+      expect(unauthorised?.status).toBe(401);
+
+      // Nothing that could authorise anyone: a configuration error, so 503.
       const unconfiguredEnv: Env = {
         ...env,
         BROKER_CONTROL_KEY: undefined,
+        BROKER_SIGNING_KEY: undefined,
       };
       const req = new Request("https://example.com/runs/acme/widgets", {
         method: "POST",

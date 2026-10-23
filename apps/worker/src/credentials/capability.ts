@@ -20,9 +20,17 @@ export interface CapabilityClaims {
   exp: number;
   /** Unique id, for audit correlation. */
   jti: string;
+  /**
+   * The human the capability was issued for, when a browser session asked for it
+   * (cloud-factory-cf-ec98). Absent for machine callers, so tokens minted before this
+   * existed still verify inside their TTL.
+   */
+  login?: string;
 }
 
-export type CapabilityInput = Pick<CapabilityClaims, "sub" | "repo" | "service" | "action">;
+export type CapabilityInput = Pick<CapabilityClaims, "sub" | "repo" | "service" | "action"> & {
+  login?: string;
+};
 
 export type VerifyResult =
   | { ok: true; claims: CapabilityClaims }
@@ -48,10 +56,11 @@ export async function issueCapability(
     iat: now,
     exp: now + ttl,
     jti: crypto.randomUUID(),
+    ...(input.login === undefined ? {} : { login: input.login }),
   };
 
   const payload = base64UrlEncode(encoder.encode(JSON.stringify(claims)));
-  const signature = await sign(signingKey, payload);
+  const signature = await signSegment(signingKey, payload);
   return `${payload}.${signature}`;
 }
 
@@ -66,7 +75,7 @@ export async function verifyCapability(
   const payloadSegment = token.slice(0, separator);
   const signatureSegment = token.slice(separator + 1);
 
-  const valid = await verifySignature(signingKey, payloadSegment, signatureSegment);
+  const valid = await verifySegment(signingKey, payloadSegment, signatureSegment);
   if (!valid) return { ok: false, reason: "signature" };
 
   const payloadBytes = base64UrlDecode(payloadSegment);
@@ -104,7 +113,8 @@ function clampTtl(ttlSeconds: number | undefined): number {
   return Math.min(Math.max(Math.trunc(ttlSeconds), 1), MAX_CAPABILITY_TTL_SECONDS);
 }
 
-async function sign(signingKey: string, payload: string): Promise<string> {
+/** HMAC-SHA256 over a payload segment, base64url. Shared with session delegations. */
+export async function signSegment(signingKey: string, payload: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
     encoder.encode(signingKey),
@@ -116,7 +126,8 @@ async function sign(signingKey: string, payload: string): Promise<string> {
   return base64UrlEncode(new Uint8Array(signature));
 }
 
-async function verifySignature(
+/** Constant-time-ish comparison of a payload segment's signature. Shared with delegations. */
+export async function verifySegment(
   signingKey: string,
   payload: string,
   signatureSegment: string,

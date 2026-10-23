@@ -12,6 +12,8 @@
     <link rel="stylesheet" href="/src/styles.css" />
     <style>
       .admin-layout {
+        flex: 1;
+        min-height: 0;
         max-width: 960px;
         margin: 0 auto;
         padding: 24px 20px 80px;
@@ -105,15 +107,15 @@
         <div class="admin-grid">
           <label class="field">
             <span>Owner / Organization</span>
-            <input id="admin-owner" type="text" placeholder="e.g. PaulKinlan" autocomplete="off" />
+            <input id="admin-owner" class="field__control" type="text" placeholder="e.g. PaulKinlan" autocomplete="off" />
           </label>
           <label class="field">
             <span>Repository Name</span>
-            <input id="admin-repo" type="text" placeholder="e.g. cloud-factory-cf" autocomplete="off" />
+            <input id="admin-repo" class="field__control" type="text" placeholder="e.g. cloud-factory-cf" autocomplete="off" />
           </label>
           <label class="field admin-grid--full">
-            <span>Broker Control Key (never saved to browser storage)</span>
-            <input id="admin-key" type="password" placeholder="control-plane key matching BROKER_CONTROL_KEY" autocomplete="off" />
+            <span>Broker Control Key (optional if signed in via GitHub)</span>
+            <input id="admin-key" class="field__control" type="password" placeholder="control-plane key matching BROKER_CONTROL_KEY (optional with active session)" autocomplete="off" />
           </label>
         </div>
         <div class="admin-actions">
@@ -128,23 +130,23 @@
         <div class="admin-grid">
           <label class="field">
             <span>App ID</span>
-            <input id="github-app-id" type="text" placeholder="e.g. 123456" autocomplete="off" />
+            <input id="github-app-id" class="field__control" type="text" placeholder="e.g. 123456" autocomplete="off" />
           </label>
           <label class="field">
             <span>Client ID</span>
-            <input id="github-client-id" type="text" placeholder="e.g. Iv1.abcdef123456" autocomplete="off" />
+            <input id="github-client-id" class="field__control" type="text" placeholder="e.g. Iv1.abcdef123456" autocomplete="off" />
           </label>
           <label class="field admin-grid--full">
             <span>Client Secret (Masked)</span>
-            <input id="github-client-secret" type="password" placeholder="Client secret (stored securely in DO)" autocomplete="off" />
+            <input id="github-client-secret" class="field__control" type="password" placeholder="Client secret (stored securely in DO)" autocomplete="off" />
           </label>
           <div class="field admin-grid--full">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
               <span>Private Key (.pem file or raw text)</span>
               <span id="pem-status" class="pem-badge"></span>
             </div>
-            <input type="file" id="github-pem-file" accept=".pem" style="margin-bottom:8px; font-size:0.85rem;" />
-            <textarea id="github-pem-text" placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----" spellcheck="false"></textarea>
+            <input type="file" id="github-pem-file" class="field__control" accept=".pem" style="margin-bottom:8px; font-size:0.85rem;" />
+            <textarea id="github-pem-text" class="field__control" placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----" spellcheck="false"></textarea>
           </div>
         </div>
       </section>
@@ -156,11 +158,11 @@
         <div class="admin-grid">
           <label class="field admin-grid--full">
             <span>Webhook Delivery URL</span>
-            <input id="webhook-url" type="text" readonly style="font-family:var(--mono);" />
+            <input id="webhook-url" class="field__control" type="text" readonly style="font-family:var(--mono);" />
           </label>
           <label class="field admin-grid--full">
             <span>Webhook Secret (Masked)</span>
-            <input id="webhook-secret" type="password" placeholder="Webhook HMAC secret" autocomplete="off" />
+            <input id="webhook-secret" class="field__control" type="password" placeholder="Webhook HMAC secret" autocomplete="off" />
           </label>
         </div>
         <div style="display:flex; align-items:center; justify-content:space-between; margin-top:16px;">
@@ -179,55 +181,62 @@
           <!-- Anthropic -->
           <label class="field">
             <span>Anthropic Claude API Key</span>
-            <input id="anthropic-key" type="password" placeholder="sk-ant-..." autocomplete="off" />
+            <input id="anthropic-key" class="field__control" type="password" placeholder="sk-ant-..." autocomplete="off" />
           </label>
           <label class="field">
-            <span>Preferred Claude Model</span>
-            <select id="anthropic-model" class="field__control">
+            <span>Preferred Claude Model (curated or custom)</span>
+            <input id="anthropic-model" class="field__control" list="anthropic-model-list" placeholder="e.g. claude-sonnet-5-5 or custom" autocomplete="off" />
+            <datalist id="anthropic-model-list">
+              <option value="claude-opus-5-5">Claude Opus 5.5 (Flagship Frontier & Architecture)</option>
+              <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (Balanced Performance & Coding)</option>
+              <option value="claude-haiku-5-5">Claude Haiku 5.5 (Fast & Low Latency)</option>
               <option value="claude-3-7-sonnet-20250219">Claude 3.7 Sonnet (Hybrid Reasoning)</option>
-              <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet (Default)</option>
-              <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku (Fast)</option>
-            </select>
+            </datalist>
           </label>
 
           <!-- OpenAI -->
           <label class="field">
             <span>OpenAI API Key</span>
-            <input id="openai-key" type="password" placeholder="sk-..." autocomplete="off" />
+            <input id="openai-key" class="field__control" type="password" placeholder="sk-..." autocomplete="off" />
           </label>
           <label class="field">
-            <span>Preferred OpenAI Model</span>
-            <select id="openai-model" class="field__control">
-              <option value="gpt-4o">GPT-4o (Omni Multimodal)</option>
-              <option value="gpt-4o-mini">GPT-4o Mini (Fast)</option>
-              <option value="o3-mini">o3-mini (Reasoning)</option>
-            </select>
+            <span>Preferred OpenAI Model (curated or custom)</span>
+            <input id="openai-model" class="field__control" list="openai-model-list" placeholder="e.g. gpt-6-astra or custom" autocomplete="off" />
+            <datalist id="openai-model-list">
+              <option value="gpt-6-astra">GPT-6 Astra (State of the Art & Agentic)</option>
+              <option value="gpt-6-sol">GPT-6 Sol (Cost-Optimized High Intelligence)</option>
+              <option value="gpt-5">GPT-5 (Omni Multimodal)</option>
+              <option value="o3-mini">o3-mini (Math & Logic Reasoning)</option>
+            </datalist>
           </label>
 
           <!-- DeepSeek -->
           <label class="field">
             <span>DeepSeek API Key</span>
-            <input id="deepseek-key" type="password" placeholder="sk-..." autocomplete="off" />
+            <input id="deepseek-key" class="field__control" type="password" placeholder="sk-..." autocomplete="off" />
           </label>
           <label class="field">
-            <span>Preferred DeepSeek Model</span>
-            <select id="deepseek-model" class="field__control">
-              <option value="deepseek-chat">DeepSeek-V3 (Chat)</option>
-              <option value="deepseek-reasoner">DeepSeek-R1 (Reasoner)</option>
-            </select>
+            <span>Preferred DeepSeek Model (curated or custom)</span>
+            <input id="deepseek-model" class="field__control" list="deepseek-model-list" placeholder="e.g. deepseek-chat or custom" autocomplete="off" />
+            <datalist id="deepseek-model-list">
+              <option value="deepseek-chat">DeepSeek-V4.1-Flash (Chat / Code)</option>
+              <option value="deepseek-reasoner">DeepSeek-V4-Pro (Deep Chain-of-Thought)</option>
+            </datalist>
           </label>
 
           <!-- Gemini -->
           <label class="field">
             <span>Google Gemini API Key</span>
-            <input id="gemini-key" type="password" placeholder="AIza..." autocomplete="off" />
+            <input id="gemini-key" class="field__control" type="password" placeholder="AIza..." autocomplete="off" />
           </label>
           <label class="field">
-            <span>Preferred Gemini Model</span>
-            <select id="gemini-model" class="field__control">
-              <option value="gemini-2.0-flash">Gemini 2.0 Flash (Fast & Capable)</option>
-              <option value="gemini-1.5-pro">Gemini 1.5 Pro (Deep Context)</option>
-            </select>
+            <span>Preferred Gemini Model (curated or custom)</span>
+            <input id="gemini-model" class="field__control" list="gemini-model-list" placeholder="e.g. gemini-3.8-flash or custom" autocomplete="off" />
+            <datalist id="gemini-model-list">
+              <option value="gemini-3.8-flash">Gemini 3.8 Flash (High-Speed Multimodal & Coding)</option>
+              <option value="gemini-3.1-pro">Gemini 3.1 Pro (Deep Context & Complex Reasoning)</option>
+              <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+            </datalist>
           </label>
         </div>
       </section>

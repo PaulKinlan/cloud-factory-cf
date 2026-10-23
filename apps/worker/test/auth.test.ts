@@ -899,6 +899,76 @@ describe("GitHub OAuth & App Install Flow", () => {
     }
   });
 
+  it("/auth/github/login: falls back to CredentialBroker or OrgCoordinator when env.GITHUB_CLIENT_ID is unset (cloud-factory-cf-1wnf)", async () => {
+    const origId = env.GITHUB_CLIENT_ID;
+    try {
+      (env as any).GITHUB_CLIENT_ID = "";
+
+      // 1. Fall back to CredentialBroker for ?owner=acme&repo=widget
+      const controlKey = env.BROKER_CONTROL_KEY ?? "test-broker-control-key";
+      const brokerStub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("acme/widget"));
+      await brokerStub.fetch("https://credential-broker.internal/settings", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-factory-control-key": controlKey,
+        },
+        body: JSON.stringify({
+          githubApp: { clientId: "broker-saved-client-id-123" },
+        }),
+      });
+
+      const brokerLoginRes = await SELF.fetch(
+        "https://example.com/auth/github/login?owner=acme&repo=widget",
+        { redirect: "manual" },
+      );
+      expect(brokerLoginRes.status).toBe(302);
+      const brokerLocation = brokerLoginRes.headers.get("location");
+      expect(brokerLocation).toContain("client_id=broker-saved-client-id-123");
+
+      // 2. Fall back to default broker when no owner/org is in URL
+      const defaultBrokerStub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
+      await defaultBrokerStub.fetch("https://credential-broker.internal/settings", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-factory-control-key": controlKey,
+        },
+        body: JSON.stringify({
+          githubApp: { clientId: "default-broker-client-id-456" },
+        }),
+      });
+
+      const defaultLoginRes = await SELF.fetch(
+        "https://example.com/auth/github/login",
+        { redirect: "manual" },
+      );
+      expect(defaultLoginRes.status).toBe(302);
+      const defaultLocation = defaultLoginRes.headers.get("location");
+      expect(defaultLocation).toContain("client_id=default-broker-client-id-456");
+
+      // 3. Fall back to OrgCoordinator for ?org=octo-org when repo broker has no key
+      if (env.ORG_COORDINATOR) {
+        const orgStub = env.ORG_COORDINATOR.get(env.ORG_COORDINATOR.idFromName("octo-org"));
+        await orgStub.fetch("https://org-coordinator.internal/memory", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ key: "github.client_id", value: "org-saved-client-id-789" }),
+        });
+
+        const orgLoginRes = await SELF.fetch(
+          "https://example.com/auth/github/login?org=octo-org",
+          { redirect: "manual" },
+        );
+        expect(orgLoginRes.status).toBe(302);
+        const orgLocation = orgLoginRes.headers.get("location");
+        expect(orgLocation).toContain("client_id=org-saved-client-id-789");
+      }
+    } finally {
+      (env as any).GITHUB_CLIENT_ID = origId;
+    }
+  });
+
   it("flow=install: rejects PAT with explicit error on App installation endpoints (cloud-factory-cf-egp6, cloud-factory-cf-kgr3)", async () => {
     const installId = 555;
     const intent = await beginOAuthIntent();

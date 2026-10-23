@@ -20,6 +20,7 @@
         <button type="button" data-add="source" class="button button--source">+ Event source</button>
         <button type="button" data-add="memory" class="button button--memory">+ Memory hub</button>
         <button type="button" data-add="sink" class="button button--sink">+ Action sink</button>
+        <button type="button" id="studio-open" class="button button--agent">Agent Studio</button>
         <button type="button" id="connect-toggle" class="button button--ghost" aria-pressed="false">Connect</button>
         <button type="button" id="export" class="button button--ghost">Export config</button>
         <button type="button" id="share" class="button button--ghost">Share…</button>
@@ -79,7 +80,7 @@
         <form id="inspector-form" hidden>
           <label class="field">
             <span>Name</span>
-            <input id="field-label" type="text" maxlength="80" autocomplete="off" />
+            <input id="field-label" class="field__control" type="text" maxlength="80" autocomplete="off" />
           </label>
           <div id="field-list" class="field-list"></div>
           <div class="inspector-actions">
@@ -183,7 +184,7 @@
       </section>
     </main>
 
-    <dialog id="connect-dialog" class="export-dialog connect-dialog" aria-label="Connect a GitHub repository">
+    <dialog id="connect-dialog" class="export-dialog connect-dialog" closedby="any" aria-label="Connect a GitHub repository">
       <h2>Connect GitHub</h2>
       <p class="muted">
         A repository is connected when its webhook reaches the factory. Install the app, then point the
@@ -217,6 +218,7 @@
       </label>
       <div class="dialog-actions connect-actions">
         <a id="connect-install" class="button button--agent" href="https://github.com/apps/cloud-agent-factory/installations/new" target="_blank" rel="noopener noreferrer">Install GitHub App</a>
+        <button type="button" id="connect-test-ping" class="button button--ghost">Send test ping</button>
         <button type="button" id="connect-check" class="button button--ghost">Check connection</button>
         <button type="button" id="connect-close" class="button button--ghost">Close</button>
       </div>
@@ -224,7 +226,7 @@
       <span id="connect-announcer" class="sr-only" aria-live="polite"></span>
     </dialog>
 
-    <dialog id="share-dialog" class="export-dialog share-dialog" aria-label="Store this canvas with a repository">
+    <dialog id="share-dialog" class="export-dialog share-dialog" closedby="any" aria-label="Store this canvas with a repository">
       <h2>Repository documents</h2>
       <p class="muted">
         Saving stores the layout with the repository through the control-key API. Nothing leaves this page until you click Save.
@@ -232,19 +234,20 @@
       <div class="share-form">
         <label class="field">
           <span>Repository</span>
-          <input id="share-repository" type="text" placeholder="owner/repo" autocomplete="off" />
+          <input id="share-repository" class="field__control" type="text" placeholder="owner/repo" autocomplete="off" />
         </label>
         <label class="field">
           <span>Control key</span>
-          <input id="share-key" type="password" autocomplete="off" placeholder="not stored on this device" />
+          <input id="share-key" class="field__control" type="password" autocomplete="off" placeholder="not stored on this device" />
         </label>
         <label class="field">
           <span>Document name</span>
-          <input id="share-name" type="text" maxlength="120" autocomplete="off" value="Untitled canvas" />
+          <input id="share-name" class="field__control" type="text" maxlength="120" autocomplete="off" value="Untitled canvas" />
         </label>
       </div>
       <div class="dialog-actions share-actions">
         <button type="button" id="share-save" class="button">Save to repository</button>
+        <button type="button" id="share-run" class="button button--agent">Run workflow</button>
         <button type="button" id="share-refresh" class="button button--ghost">Refresh list</button>
         <button type="button" id="share-close" class="button button--ghost">Close</button>
       </div>
@@ -252,7 +255,7 @@
       <ul id="share-list" class="share-list" aria-label="Stored documents"></ul>
     </dialog>
 
-    <dialog id="export-dialog" class="export-dialog" aria-label="Exported agent configuration">
+    <dialog id="export-dialog" class="export-dialog" closedby="any" aria-label="Exported agent configuration">
       <h2>Agent configuration</h2>
       <p class="muted">This is what the control plane consumes — edges collapsed into the agent they belong to.</p>
       <pre id="export-json"></pre>
@@ -261,6 +264,48 @@
         <button type="button" id="export-download" class="button button--ghost">Download .json</button>
         <button type="button" id="export-close" class="button">Close</button>
       </div>
+    </dialog>
+
+    <dialog id="studio-dialog" class="export-dialog studio-dialog" closedby="any" aria-label="Agent Studio & Starter Templates">
+      <h2>Agent Studio &amp; Starter Workflows</h2>
+      <p class="muted">
+        Load pre-built SDLC agent workflows or author custom agent behaviors using natural language prompts.
+      </p>
+
+      <h3>Starter Workflows</h3>
+      <div class="studio-grid">
+        <button type="button" class="studio-card" data-template="pr-review">
+          <h4>🔍 Pull Request Reviewer</h4>
+          <p>Wired PR opened trigger → PR Reviewer agent → Repo conventions memory → PR comment sink.</p>
+        </button>
+        <button type="button" class="studio-card" data-template="issue-triage">
+          <h4>📋 Issue Triage &amp; Planner</h4>
+          <p>Issue opened trigger → Triager agent → Org context memory → Issue comment &amp; Beads task sinks.</p>
+        </button>
+        <button type="button" class="studio-card" data-template="security-audit">
+          <h4>🛡️ Security &amp; Audit</h4>
+          <p>Push trigger → Secret &amp; socket scanner agent → Audit memory → Telemetry sink.</p>
+        </button>
+        <button type="button" class="studio-card" data-template="full-sdlc">
+          <h4>🚀 Full Autonomous SDLC</h4>
+          <p>Multi-agent pipeline connecting PR reviews, issue planning, testing, and telemetry.</p>
+        </button>
+      </div>
+
+      <h3>Prompt-to-Agent Authoring</h3>
+      <div class="share-form">
+        <label class="field">
+          <span>Agent Prompt &amp; Goal</span>
+          <textarea id="studio-prompt" class="field__control" rows="3" placeholder="e.g. You are a senior security engineer. Scan uncommitted diffs for hardcoded tokens and report findings."></textarea>
+        </label>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" id="studio-author" class="button button--agent">Compile Agent</button>
+        <button type="button" id="studio-simulate" class="button button--ghost">Dry-Run Simulate</button>
+        <button type="button" id="studio-apply" class="button button--source">Add to Canvas</button>
+        <button type="button" id="studio-close" class="button button--ghost">Close</button>
+      </div>
+      <pre id="studio-output" class="studio-output" hidden></pre>
     </dialog>
 
     <p id="status" class="sr-only" role="status" aria-live="polite"></p>

@@ -159,7 +159,126 @@ export async function handleAuth(
     return handleApiRepos(request, env, url);
   }
 
+  if (url.pathname === "/api/auth/session") {
+    const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
+    const session = signingKey ? await readSession(request.headers, signingKey) : { ok: false as const };
+    const creds = await resolveGithubCredentials(env);
+    return Response.json({
+      ok: true,
+      authenticated: session.ok,
+      login: session.ok ? session.login : null,
+      githubConfigured: Boolean(creds.clientId && creds.clientSecret),
+    });
+  }
+
   return null;
+}
+
+export interface ResolvedGithubCredentials {
+  clientId?: string;
+  clientSecret?: string;
+  appId?: string;
+  privateKey?: string;
+}
+
+/**
+ * Resolves GitHub credentials from Worker environment, then falls back to
+ * CredentialBroker (for repo/org/default) or OrgCoordinator (cloud-factory-cf-1wnf).
+ */
+export async function resolveGithubCredentials(
+  env: Env,
+  scope?: { owner?: string | null; repo?: string | null },
+): Promise<ResolvedGithubCredentials> {
+  const result: ResolvedGithubCredentials = {
+    clientId: env.GITHUB_CLIENT_ID?.trim() || undefined,
+    clientSecret: env.GITHUB_CLIENT_SECRET?.trim() || undefined,
+    appId: env.GITHUB_APP_ID?.trim() || undefined,
+    privateKey: (env.GITHUB_APP_PRIVATE_KEY ?? env.GITHUB_PRIVATE_KEY)?.trim() || undefined,
+  };
+
+  const owner = scope?.owner?.trim() || undefined;
+  const repo = scope?.repo?.trim() || undefined;
+
+  // 1. Check CredentialBroker candidates
+  if (env.CREDENTIAL_BROKER) {
+    const candidates: string[] = [];
+    if (owner && repo) candidates.push(`${owner}/${repo}`);
+    if (owner) candidates.push(owner);
+    candidates.push("default", "global");
+
+    for (const name of candidates) {
+      if (result.clientId && result.clientSecret && result.appId && result.privateKey) {
+        break;
+      }
+      try {
+        const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(name));
+        // First try the internal effective endpoint (no control key needed)
+        const res = await broker.fetch("https://credential-broker.internal/effective-github-app");
+        if (res.ok) {
+          const data = (await res.json().catch(() => null)) as {
+            appId?: string | null;
+            clientId?: string | null;
+            clientSecret?: string | null;
+            privateKey?: string | null;
+          } | null;
+          if (!result.clientId && data?.clientId?.trim()) result.clientId = data.clientId.trim();
+          if (!result.clientSecret && data?.clientSecret?.trim()) result.clientSecret = data.clientSecret.trim();
+          if (!result.appId && data?.appId?.trim()) result.appId = data.appId.trim();
+          if (!result.privateKey && data?.privateKey?.trim()) result.privateKey = data.privateKey.trim();
+        } else if (env.BROKER_CONTROL_KEY) {
+          // Fallback to /settings with control key if present
+          const settingsRes = await broker.fetch("https://credential-broker.internal/settings", {
+            headers: { "x-factory-control-key": env.BROKER_CONTROL_KEY },
+          });
+          if (settingsRes.ok) {
+            const data = (await settingsRes.json().catch(() => null)) as {
+              githubApp?: { clientId?: string; appId?: string };
+            } | null;
+            if (!result.clientId && data?.githubApp?.clientId?.trim()) {
+              result.clientId = data.githubApp.clientId.trim();
+            }
+            if (!result.appId && data?.githubApp?.appId?.trim()) {
+              result.appId = data.githubApp.appId.trim();
+            }
+          }
+        }
+      } catch {
+        // Continue checking candidates
+      }
+    }
+  }
+
+  // 2. Check OrgCoordinator if owner is specified
+  if ((!result.clientId || !result.clientSecret) && owner && env.ORG_COORDINATOR) {
+    try {
+      const org = env.ORG_COORDINATOR.get(env.ORG_COORDINATOR.idFromName(owner));
+      const res = await org.fetch("https://org-coordinator.internal/memory/github.client_id");
+      if (res.ok) {
+        const data = (await res.json().catch(() => null)) as { value?: unknown } | null;
+        const val =
+          typeof data?.value === "string"
+            ? data.value.trim()
+            : typeof data === "string"
+              ? (data as string).trim()
+              : undefined;
+        if (!result.clientId && val) result.clientId = val;
+      }
+    } catch {
+      // Ignore OrgCoordinator errors
+    }
+  }
+
+  return result;
+}
+
+export async function resolveGithubClientId(
+  env: Env,
+  url: URL,
+): Promise<string | undefined> {
+  const owner = url.searchParams.get("owner") ?? url.searchParams.get("org");
+  const repo = url.searchParams.get("repo");
+  const creds = await resolveGithubCredentials(env, { owner, repo });
+  return creds.clientId;
 }
 
 export async function handleGithubLogin(
@@ -172,13 +291,20 @@ export async function handleGithubLogin(
     return Response.json({ ok: false, error: "broker signing key not configured" }, { status: 503 });
   }
 
-  const clientId = env.GITHUB_CLIENT_ID;
+  const owner = url.searchParams.get("owner") ?? url.searchParams.get("org");
+  const repo = url.searchParams.get("repo");
+  const creds = await resolveGithubCredentials(env, { owner, repo });
+  const clientId = creds.clientId;
   const appSlug = url.searchParams.get("app_slug") ?? env.GITHUB_APP_SLUG;
   const stateNonce = crypto.randomUUID().replace(/-/g, "");
   const redirectUri = url.searchParams.get("redirect_uri");
 
   const exp = Math.floor(Date.now() / 1000) + 600; // 10 minutes
-  const dataToSign = `${stateNonce}.${exp}`;
+  const scopeObj = owner || repo ? { owner: owner ?? undefined, repo: repo ?? undefined } : null;
+  const scopeSegment = scopeObj
+    ? btoa(JSON.stringify(scopeObj)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+    : "";
+  const dataToSign = scopeSegment ? `${stateNonce}.${exp}.${scopeSegment}` : `${stateNonce}.${exp}`;
   const sig = await signHmacSha256(signingKey, dataToSign);
   const cookieVal = `${dataToSign}.${sig}`;
 
@@ -259,24 +385,44 @@ async function verifyOAuthState(
   request: Request,
   state: string | null,
   signingKey: string,
-): Promise<{ ok: true } | { ok: false; reason: StateFailure }> {
+): Promise<{ ok: true; scope?: { owner?: string; repo?: string } } | { ok: false; reason: StateFailure }> {
   if (!state) return { ok: false, reason: "missing-state" };
 
   const cookieVal = getCookie(request.headers, "cf_oauth_state");
   if (!cookieVal) return { ok: false, reason: "missing-cookie" };
 
   const parts = cookieVal.split(".");
-  if (parts.length !== 3) return { ok: false, reason: "malformed-cookie" };
+  if (parts.length !== 3 && parts.length !== 4) return { ok: false, reason: "malformed-cookie" };
 
-  const [cookieNonce, expStr, sig] = parts as [string, string, string];
-  const expectedSig = await signHmacSha256(signingKey, `${cookieNonce}.${expStr}`);
-  if (!(await sameSecret(expectedSig, sig))) return { ok: false, reason: "bad-signature" };
+  let cookieNonce: string;
+  let expStr: string;
+  let sig: string;
+  let scope: { owner?: string; repo?: string } | undefined;
+
+  if (parts.length === 3) {
+    [cookieNonce, expStr, sig] = parts as [string, string, string];
+    const expectedSig = await signHmacSha256(signingKey, `${cookieNonce}.${expStr}`);
+    if (!(await sameSecret(expectedSig, sig))) return { ok: false, reason: "bad-signature" };
+  } else {
+    const [noncePart, expPart, scopePart, sigPart] = parts as [string, string, string, string];
+    cookieNonce = noncePart;
+    expStr = expPart;
+    sig = sigPart;
+    const expectedSig = await signHmacSha256(signingKey, `${noncePart}.${expPart}.${scopePart}`);
+    if (!(await sameSecret(expectedSig, sig))) return { ok: false, reason: "bad-signature" };
+    try {
+      const decoded = atob(scopePart.replace(/-/g, "+").replace(/_/g, "/"));
+      scope = JSON.parse(decoded) as { owner?: string; repo?: string };
+    } catch {
+      // Ignore scope decoding error
+    }
+  }
 
   const exp = parseInt(expStr, 10);
   if (isNaN(exp) || Math.floor(Date.now() / 1000) > exp) return { ok: false, reason: "expired" };
 
   if (!(await sameSecret(cookieNonce, state))) return { ok: false, reason: "mismatch" };
-  return { ok: true };
+  return { ok: true, scope };
 }
 
 export async function handleGithubCallback(
@@ -340,8 +486,13 @@ export async function handleGithubCallback(
     });
   }
 
-  const clientId = env.GITHUB_CLIENT_ID;
-  const clientSecret = env.GITHUB_CLIENT_SECRET;
+  const scope = (stateCheck.ok ? stateCheck.scope : undefined) ?? {
+    owner: url.searchParams.get("owner") ?? url.searchParams.get("org"),
+    repo: url.searchParams.get("repo"),
+  };
+  const resolvedCreds = await resolveGithubCredentials(env, scope);
+  const clientId = resolvedCreds.clientId;
+  const clientSecret = resolvedCreds.clientSecret;
   let accessToken: string | null = null;
 
   // 1. Exchange code for user access token if code is present
@@ -476,10 +627,13 @@ export async function handleGithubCallback(
     let appJwt: string | null = null;
     let installationToken: string | null = null;
 
-    if (env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY) {
+    const effectiveAppId = resolvedCreds.appId ?? env.GITHUB_APP_ID;
+    const effectivePrivateKey =
+      resolvedCreds.privateKey ?? env.GITHUB_APP_PRIVATE_KEY ?? env.GITHUB_PRIVATE_KEY;
+    if (effectiveAppId && effectivePrivateKey) {
       try {
-        const key = await importAppPrivateKey(env.GITHUB_APP_PRIVATE_KEY);
-        appJwt = await mintAppJwt(env.GITHUB_APP_ID, key);
+        const key = await importAppPrivateKey(effectivePrivateKey);
+        appJwt = await mintAppJwt(effectiveAppId, key);
       } catch (err) {
         return Response.json(
           { ok: false, error: `Failed to sign GitHub App JWT: ${String(err)}` },

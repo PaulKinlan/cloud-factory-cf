@@ -229,22 +229,29 @@ describe("urls", () => {
     );
   });
 
-  it("builds the three endpoints and encodes the key", () => {
+  it("builds the endpoints and ticket parameter, without key in the socket URL", () => {
     const urls = traceUrls("https://factory.example/", "acme", "widget", "a b");
     expect(urls.trace).toBe("https://factory.example/trace/acme/widget?limit=50");
     expect(urls.usage).toBe("https://factory.example/trace/acme/widget/usage");
-    expect(urls.socket).toBe("wss://factory.example/trace/acme/widget/socket?key=a%20b&limit=50");
+    expect(urls.ticket).toBe("https://factory.example/trace/acme/widget/ticket");
+    expect(urls.socket).toBe("wss://factory.example/trace/acme/widget/socket?ticket=a%20b&limit=50");
+    expect(urls.socket).not.toContain("key=");
     expect(traceUrls("https://factory.example", "acme", "widget", "k", 12).socket).toContain("&limit=12");
+    expect(traceUrls("https://factory.example", "acme", "widget", "k", 12).socket).not.toContain("key=");
   });
 });
 
 describe("session", () => {
   it("loads usage and trace, then streams steps over the socket", async () => {
     const socket = fakeSocket();
+    let socketOpenedUrl = "";
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/usage")) {
         return jsonResponse({ ok: true, usage: { runs: 1, succeeded: 0, failed: 0, skipped: 1, actions: 0, tokensIn: 5, tokensOut: 1, estimated: true } });
+      }
+      if (url.endsWith("/ticket")) {
+        return jsonResponse({ ok: true, ticket: "test-ticket-xyz" });
       }
       return jsonResponse({ ok: true, count: 1, steps: [step({ id: "seed" })] });
     });
@@ -254,19 +261,25 @@ describe("session", () => {
       repo: "widget",
       key: "k",
       fetchImpl: fetchImpl as unknown as typeof fetch,
-      socketFactory: () => socket,
+      socketFactory: (url: string) => {
+        socketOpenedUrl = url;
+        return socket;
+      },
       pollMs: 5,
     });
 
     await session.connect();
     expect(session.state.usage?.runs).toBe(1);
     expect(session.state.steps.map((entry) => entry.id)).toEqual(["seed"]);
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    // Both requests carried the control key in a header, never in the URL.
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    // All three requests carried the control key in a header, never in the URL.
     for (const call of fetchImpl.mock.calls) {
       expect(String(call[0])).not.toContain("key=k");
       expect((call[1] as RequestInit).headers).toEqual({ "x-factory-control-key": "k" });
     }
+    // Socket was opened with the freshly minted ticket in query string, never key=
+    expect(socketOpenedUrl).toContain("ticket=test-ticket-xyz");
+    expect(socketOpenedUrl).not.toContain("key=");
 
     socket.emit("open");
     expect(session.state.status).toBe("live");
@@ -401,11 +414,16 @@ describe("session", () => {
         owner: "acme",
         repo: "widget",
         key: "k",
-        fetchImpl: (async () => jsonResponse({ ok: true, usage: null, steps: [] })) as unknown as typeof fetch,
+        fetchImpl: (async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.endsWith("/ticket")) return jsonResponse({ ok: true, ticket: "k-ticket" });
+          return jsonResponse({ ok: true, usage: null, steps: [] });
+        }) as unknown as typeof fetch,
         pollMs: 100000,
       });
       await session.connect();
-      expect(opened).toEqual(["wss://factory.example/trace/acme/widget/socket?key=k&limit=50"]);
+      expect(opened).toEqual(["wss://factory.example/trace/acme/widget/socket?ticket=k-ticket&limit=50"]);
+      expect(opened[0]).not.toContain("key=");
       expect(session.polling).toBe(false);
       socket.emit("open");
       expect(session.state.status).toBe("live");

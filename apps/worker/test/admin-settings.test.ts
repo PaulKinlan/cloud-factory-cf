@@ -158,6 +158,29 @@ describe("Admin Dashboard & Settings API", () => {
 
     expect(settings.aiProviders.deepseek.configured).toBe(true);
     expect(settings.aiProviders.gemini.configured).toBe(true);
+
+    // Empty model string falls back to default and does not overwrite with blank (cloud-factory-cf-q83o)
+    const blankRepo = "acme/blank-model-repo";
+    await SELF.fetch(`https://example.com/api/admin/settings/${blankRepo}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-factory-control-key": CONTROL_KEY,
+      },
+      body: JSON.stringify({
+        aiProviders: {
+          anthropic: { model: "" },
+          openai: { model: "   " },
+        },
+      }),
+    });
+    const blankRes = await SELF.fetch(`https://example.com/api/admin/settings/${blankRepo}`, {
+      method: "GET",
+      headers: { "x-factory-control-key": CONTROL_KEY },
+    });
+    const blankSettings = (await blankRes.json()) as any;
+    expect(blankSettings.aiProviders.anthropic.model).toBe("claude-sonnet-5-5");
+    expect(blankSettings.aiProviders.openai.model).toBe("gpt-6-astra");
   });
 
   it("triggers test ping webhook and returns delivery confirmation with custom secret", async () => {

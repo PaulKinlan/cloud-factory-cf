@@ -1,6 +1,7 @@
 import type { Env } from "../env";
-import { sameSecret } from "../secrets";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
+import { authorizeControlPlane, authzDenial } from "../auth/tenant";
+import { mintDelegation } from "../auth/delegation";
 
 export const ADMIN_SETTINGS_PATH = /^\/api\/admin\/settings\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
 export const ADMIN_PING_PATH = /^\/api\/admin\/test-ping\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
@@ -45,17 +46,59 @@ export async function routeAdminSettings(
   repo: string,
   search = "",
 ): Promise<Response> {
+  const authz = await authorizeControlPlane(request, env, { owner });
+  if (!authz.ok) {
+    return authzDenial(authz, {
+      unauthorised: "not authorised to manage settings",
+      "cross-tenant": "not authorised to manage settings for another account",
+    });
+  }
+
   const repository = `${owner}/${repo}`;
   const stub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository));
 
   const headers = new Headers({ "content-type": "application/json" });
   const controlKey = request.headers.get("x-factory-control-key");
-  if (controlKey !== null) headers.set("x-factory-control-key", controlKey);
+  if (controlKey !== null) {
+    headers.set("x-factory-control-key", controlKey);
+  } else if (authz.principal.via === "session") {
+    const delegation = await mintDelegation(env, { repository, login: authz.principal.login });
+    if (delegation) headers.set("x-factory-delegation", delegation);
+  }
+
+  let bodyText: string | undefined = undefined;
+  if (request.method === "POST" || request.method === "DELETE") {
+    bodyText = await request.text();
+  }
+
+  // If saving GitHub App settings, also mirror githubApp to default broker so 1-click OAuth works
+  if (request.method === "POST" && bodyText) {
+    try {
+      const parsed = JSON.parse(bodyText) as { githubApp?: unknown };
+      if (parsed.githubApp && typeof parsed.githubApp === "object" && env.CREDENTIAL_BROKER) {
+        const defaultStub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
+        const defaultHeaders = new Headers({ "content-type": "application/json" });
+        if (env.BROKER_CONTROL_KEY) {
+          defaultHeaders.set("x-factory-control-key", env.BROKER_CONTROL_KEY);
+        } else if (authz.principal.via === "session") {
+          const defaultDelegation = await mintDelegation(env, { repository: "default", login: authz.principal.login });
+          if (defaultDelegation) defaultHeaders.set("x-factory-delegation", defaultDelegation);
+        }
+        await defaultStub.fetch("https://credential-broker.internal/settings", {
+          method: "POST",
+          headers: defaultHeaders,
+          body: JSON.stringify({ githubApp: parsed.githubApp }),
+        }).catch(() => null);
+      }
+    } catch {
+      // Ignore JSON parse errors for mirror; primary DO will validate
+    }
+  }
 
   const forwarded = new Request(`https://credential-broker.internal/settings${search}`, {
     method: request.method,
     headers,
-    body: request.method === "POST" || request.method === "DELETE" ? await request.text() : undefined,
+    body: bodyText,
   });
 
   return stub.fetch(forwarded);
@@ -71,13 +114,12 @@ export async function routeAdminTestPing(
     return new Response("method not allowed", { status: 405 });
   }
 
-  const controlKey = env.BROKER_CONTROL_KEY;
-  if (!controlKey) {
-    return Response.json({ ok: false, error: "broker control key not configured" }, { status: 503 });
-  }
-  const presented = request.headers.get("x-factory-control-key");
-  if (!(await sameSecret(controlKey, presented))) {
-    return Response.json({ ok: false, error: "not authorised to trigger test ping" }, { status: 401 });
+  const authz = await authorizeControlPlane(request, env, { owner });
+  if (!authz.ok) {
+    return authzDenial(authz, {
+      unauthorised: "not authorised to trigger test ping",
+      "cross-tenant": "not authorised to trigger test ping for another account",
+    });
   }
 
   const repository = `${owner}/${repo}`;

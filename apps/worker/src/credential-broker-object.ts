@@ -9,6 +9,7 @@ import {
 import { executeSignedRequest, type BrokerExecution } from "./credentials/broker";
 import { credentialEnvFor, hasPermission, isApprovedCredentialBinding } from "./credentials/policy";
 import { sameSecret } from "./secrets";
+import { verifyDelegation } from "./auth/delegation";
 
 /**
  * Per-repository credential broker.
@@ -98,6 +99,21 @@ export class CredentialBroker extends DurableObject<Env> {
       }
       return Response.json({ ok: true, secret: effective });
     }
+    if (url.pathname === "/effective-github-app") {
+      const appId = this.getSetting("github.app_id") || this.env.GITHUB_APP_ID || null;
+      const clientId = this.getSetting("github.client_id") || this.env.GITHUB_CLIENT_ID || null;
+      const clientSecret = this.getSetting("github.client_secret") || this.env.GITHUB_CLIENT_SECRET || null;
+      const privateKey = this.getSetting("github.private_key") || this.env.GITHUB_PRIVATE_KEY || null;
+      const webhookSecret = this.getSetting("webhook.secret") || this.env.WEBHOOK_SECRET || null;
+      return Response.json({
+        ok: true,
+        appId,
+        clientId,
+        clientSecret,
+        privateKey,
+        webhookSecret,
+      });
+    }
     if (request.method === "POST" && url.pathname === "/proxy") {
       return this.proxy(request);
     }
@@ -183,17 +199,32 @@ export class CredentialBroker extends DurableObject<Env> {
 
   // ------------------------------------------------------------- issuance
 
+  /** The delegation on this request, verified against this object's own repository. */
+  private async verifyDelegationHeader(
+    request: Request,
+  ): Promise<{ ok: true; claims: { login: string; repo: string; exp: number; jti: string } } | { ok: false }> {
+    const signingKey = this.env.BROKER_SIGNING_KEY ?? this.env.BROKER_CONTROL_KEY;
+    const token = request.headers.get("x-factory-delegation");
+    if (!signingKey || !token) return { ok: false };
+    const result = await verifyDelegation(signingKey, token, { repository: this.repository });
+    return result.ok ? { ok: true, claims: result.claims } : { ok: false };
+  }
+
   private async issue(request: Request): Promise<Response> {
     const provisioningKey = this.env.BROKER_CONTROL_KEY;
-    if (!provisioningKey) {
+    const signingKeyConfigured = this.env.BROKER_SIGNING_KEY !== undefined;
+    if (!provisioningKey && !signingKeyConfigured) {
       return Response.json({ ok: false, error: "broker control key not configured" }, { status: 503 });
     }
     const presented = request.headers.get("x-factory-control-key");
-    const authorised = await sameSecret(provisioningKey, presented);
+    const delegated = await this.verifyDelegationHeader(request);
+    const authorised =
+      delegated.ok || (provisioningKey !== undefined && (await sameSecret(provisioningKey, presented)));
     if (!authorised) {
       await this.record({ agent: DEFAULT_CLIENT, service: "-", action: "-", outcome: "denied", detail: "bad control key" });
       return Response.json({ ok: false, error: "not authorised to issue capabilities" }, { status: 401 });
     }
+    const delegatedLogin = delegated.ok ? delegated.claims.login : undefined;
 
     const signingKey = this.env.BROKER_SIGNING_KEY;
     if (!signingKey) {
@@ -245,6 +276,7 @@ export class CredentialBroker extends DurableObject<Env> {
       repo: this.repository,
       service,
       action,
+      ...(delegatedLogin === undefined ? {} : { login: delegatedLogin }),
     }, { ttlSeconds });
 
     const verified = await verifyCapability(signingKey, capability);
@@ -789,11 +821,14 @@ export class CredentialBroker extends DurableObject<Env> {
 
   private async handleSettings(request: Request): Promise<Response> {
     const provisioningKey = this.env.BROKER_CONTROL_KEY;
-    if (!provisioningKey) {
+    const signingKeyConfigured = this.env.BROKER_SIGNING_KEY !== undefined;
+    if (!provisioningKey && !signingKeyConfigured) {
       return Response.json({ ok: false, error: "broker control key not configured" }, { status: 503 });
     }
     const presented = request.headers.get("x-factory-control-key");
-    const authorised = await sameSecret(provisioningKey, presented);
+    const delegated = await this.verifyDelegationHeader(request);
+    const authorised =
+      delegated.ok || (provisioningKey !== undefined && (await sameSecret(provisioningKey, presented)));
     if (!authorised) {
       return Response.json({ ok: false, error: "not authorised to manage settings" }, { status: 401 });
     }
@@ -843,22 +878,22 @@ export class CredentialBroker extends DurableObject<Env> {
           anthropic: {
             configured: anthropicKey.length > 0,
             maskedKey: maskSecret(anthropicKey),
-            model: settingsMap.get("ai.anthropic_model") ?? "claude-3-7-sonnet-20250219",
+            model: settingsMap.get("ai.anthropic_model") || "claude-sonnet-5-5",
           },
           openai: {
             configured: openaiKey.length > 0,
             maskedKey: maskSecret(openaiKey),
-            model: settingsMap.get("ai.openai_model") ?? "gpt-4o",
+            model: settingsMap.get("ai.openai_model") || "gpt-6-astra",
           },
           deepseek: {
             configured: deepseekKey.length > 0,
             maskedKey: maskSecret(deepseekKey),
-            model: settingsMap.get("ai.deepseek_model") ?? "deepseek-chat",
+            model: settingsMap.get("ai.deepseek_model") || "deepseek-chat",
           },
           gemini: {
             configured: geminiKey.length > 0,
             maskedKey: maskSecret(geminiKey),
-            model: settingsMap.get("ai.gemini_model") ?? "gemini-2.0-flash",
+            model: settingsMap.get("ai.gemini_model") || "gemini-3.8-flash",
           },
         },
         webhook: {
@@ -922,7 +957,7 @@ export class CredentialBroker extends DurableObject<Env> {
           this.setSetting("ai.anthropic_key", anthropic.key.trim(), now);
           updatedKeys.push("ai.anthropic_key");
         }
-        if (typeof anthropic?.model === "string") {
+        if (typeof anthropic?.model === "string" && anthropic.model.trim().length > 0) {
           this.setSetting("ai.anthropic_model", anthropic.model.trim(), now);
           updatedKeys.push("ai.anthropic_model");
         }
@@ -936,7 +971,7 @@ export class CredentialBroker extends DurableObject<Env> {
           this.setSetting("ai.openai_key", openai.key.trim(), now);
           updatedKeys.push("ai.openai_key");
         }
-        if (typeof openai?.model === "string") {
+        if (typeof openai?.model === "string" && openai.model.trim().length > 0) {
           this.setSetting("ai.openai_model", openai.model.trim(), now);
           updatedKeys.push("ai.openai_model");
         }
@@ -950,7 +985,7 @@ export class CredentialBroker extends DurableObject<Env> {
           this.setSetting("ai.deepseek_key", deepseek.key.trim(), now);
           updatedKeys.push("ai.deepseek_key");
         }
-        if (typeof deepseek?.model === "string") {
+        if (typeof deepseek?.model === "string" && deepseek.model.trim().length > 0) {
           this.setSetting("ai.deepseek_model", deepseek.model.trim(), now);
           updatedKeys.push("ai.deepseek_model");
         }
@@ -964,7 +999,7 @@ export class CredentialBroker extends DurableObject<Env> {
           this.setSetting("ai.gemini_key", gemini.key.trim(), now);
           updatedKeys.push("ai.gemini_key");
         }
-        if (typeof gemini?.model === "string") {
+        if (typeof gemini?.model === "string" && gemini.model.trim().length > 0) {
           this.setSetting("ai.gemini_model", gemini.model.trim(), now);
           updatedKeys.push("ai.gemini_model");
         }

@@ -160,8 +160,13 @@ describe("connect evidence", () => {
         workerEnv as never,
       );
 
-    // Fails closed with no key configured, and refuses a caller without one.
-    expect((await guarded({ ...env, BROKER_CONTROL_KEY: undefined })).status).toBe(503);
+    // No control key but a session signing key: the deployment is valid (a browser can
+    // read its own connection state), so an anonymous caller is unauthorised, not a
+    // misconfiguration. With nothing configured at all it is a 503, as before.
+    expect((await guarded({ ...env, BROKER_CONTROL_KEY: undefined })).status).toBe(401);
+    expect(
+      (await guarded({ ...env, BROKER_CONTROL_KEY: undefined, BROKER_SIGNING_KEY: undefined })).status,
+    ).toBe(503);
     expect((await guarded({ ...env, BROKER_CONTROL_KEY: controlKey })).status).toBe(401);
     expect(
       (await guarded({ ...env, BROKER_CONTROL_KEY: controlKey }, { "x-factory-control-key": controlKey })).status,

@@ -2,15 +2,18 @@ import type { Env } from "../env";
 import { createDefaultExecutionFn, drainRepository } from "../pipeline";
 import { reviewRuntime } from "../review/model";
 import { traceSink } from "../events";
-import { sameSecret } from "../secrets";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
+import { authorizeControlPlane, authzDenial } from "../auth/tenant";
+import { mintDelegation } from "../auth/delegation";
 
 export const RUN_PATH = /^\/runs\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
 
 /**
  * Drains the repository's event queue through one agent run per event. This is
- * control-plane work: it issues the capabilities the run uses, so it needs the
- * control key. A scheduled handler can call the same function later.
+ * control-plane work for one tenant: it issues the capabilities the run uses.
+ * The machine key keeps its any-tenant contract; a browser session may run its
+ * own repository, and presents a short-lived delegation to the broker instead
+ * of a key that names every tenant (cloud-factory-cf-ec98).
  */
 export async function routeRun(
   request: Request,
@@ -18,18 +21,25 @@ export async function routeRun(
   owner: string,
   repo: string,
 ): Promise<Response> {
-  const controlKey = env.BROKER_CONTROL_KEY;
-  if (!controlKey) {
-    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
-  }
-  if (!(await sameSecret(controlKey, request.headers.get("x-factory-control-key")))) {
-    return Response.json({ ok: false, error: "not authorised to run agents" }, { status: 401 });
+  const url = new URL(request.url);
+  const platform = url.searchParams.get("platform");
+  const authz = await authorizeControlPlane(request, env, { owner, platform });
+  if (!authz.ok) {
+    return authzDenial(authz, { unauthorised: "not authorised to run agents" });
   }
   if (request.method !== "POST") {
     return new Response("method not allowed", { status: 405 });
   }
 
   const repository = `${owner}/${repo}`;
+  const sessionLogin = authz.principal.via === "session" ? authz.principal.login : undefined;
+  const delegation =
+    sessionLogin === undefined
+      ? undefined
+      : await mintDelegation(env, { repository, login: sessionLogin });
+  if (delegation === undefined && sessionLogin !== undefined) {
+    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
+  }
   const body = (await request.json().catch(() => ({}))) as {
     limit?: unknown;
     reviewer?: unknown;
@@ -39,7 +49,6 @@ export async function routeRun(
   const limit = typeof body.limit === "number" && Number.isFinite(body.limit) ? Math.trunc(body.limit) : undefined;
   const agentPrompt = typeof body.agentPrompt === "string" ? body.agentPrompt : undefined;
   const agentId = typeof body.agentId === "string" ? body.agentId : undefined;
-  const url = new URL(request.url);
   const reviewerParam = url.searchParams.get("reviewer");
   const useCoreReviewer =
     body.reviewer === "llm" ||
@@ -51,12 +60,13 @@ export async function routeRun(
     // and the manual lever behave the same way (cloud-factory-cf-7or graft).
     reviewRuntime(env) !== undefined;
 
-  const platform = url.searchParams.get("platform");
   const coordinator = getRepoCoordinator(env, repository, platform);
   const report = await drainRepository(
     {
       repository,
-      controlKey,
+      ...(delegation === undefined
+        ? { controlKey: env.BROKER_CONTROL_KEY as string }
+        : { delegation }),
       coordinator,
       broker: env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository)),
       onStep: traceSink(coordinator),

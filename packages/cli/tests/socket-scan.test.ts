@@ -27,7 +27,18 @@ async function tempWorkspace(prefix: string): Promise<string> {
 /** A listening Unix socket at `socketPath`, closed by the returned function. */
 async function listenUnixSocket(socketPath: string): Promise<() => Promise<void>> {
   const server = net.createServer((connection) => connection.end());
-  await new Promise<void>((resolve) => server.listen(socketPath, () => resolve()));
+  const dir = path.dirname(socketPath);
+  const base = path.basename(socketPath);
+  const previous = process.cwd();
+  try {
+    process.chdir(dir);
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(base, () => resolve());
+    });
+  } finally {
+    process.chdir(previous);
+  }
   return async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await fs.rm(socketPath, { force: true }).catch(() => {});
@@ -333,7 +344,7 @@ test('scanWorkspaceSockets: a non-ASCII socket name is found exactly (cloud-fact
   }
 });
 
-test('scanWorkspaceSockets: refuses when a socket name is not valid UTF-8 (cloud-factory-cf-sd2y)', async () => {
+test('scanWorkspaceSockets: refuses when a socket name is not valid UTF-8 (cloud-factory-cf-sd2y)', async (t) => {
   const root = await tempWorkspace('fc-scan-nonutf8-');
   const ascii = path.join(root, 'plain.sock');
   const close = await listenUnixSocket(ascii);
@@ -345,7 +356,15 @@ test('scanWorkspaceSockets: refuses when a socket name is not valid UTF-8 (cloud
     BufferCtor.from('.sock'),
   ]);
   try {
-    await fs.rename(ascii, nonUtf8 as unknown as string);
+    try {
+      await fs.rename(ascii, nonUtf8 as unknown as string);
+    } catch (err: unknown) {
+      if ((err as { code?: string }).code === 'EILSEQ') {
+        t.skip('APFS rejects non-UTF-8 filenames at the kernel boundary');
+        return;
+      }
+      throw err;
+    }
 
     // Both discovery paths must refuse rather than mask a U+FFFD path.
     await assert.rejects(
@@ -362,7 +381,7 @@ test('scanWorkspaceSockets: refuses when a socket name is not valid UTF-8 (cloud
   }
 });
 
-test('walkWorkspaceSockets: an undecodable regular file does not block the scan (cloud-factory-cf-sd2y)', async () => {
+test('walkWorkspaceSockets: an undecodable regular file does not block the scan (cloud-factory-cf-sd2y)', async (t) => {
   const root = await tempWorkspace('fc-walk-nonutf8-file-');
   const weird = BufferCtor.concat([
     BufferCtor.from(`${root}/`),
@@ -370,7 +389,15 @@ test('walkWorkspaceSockets: an undecodable regular file does not block the scan 
     BufferCtor.from('.txt'),
   ]);
   try {
-    await fs.writeFile(weird as unknown as string, 'harmless');
+    try {
+      await fs.writeFile(weird as unknown as string, 'harmless');
+    } catch (err: unknown) {
+      if ((err as { code?: string }).code === 'EILSEQ') {
+        t.skip('APFS rejects non-UTF-8 filenames at the kernel boundary');
+        return;
+      }
+      throw err;
+    }
     const close = await listenUnixSocket(path.join(root, 'real.sock'));
     try {
       // Only dialable entries matter: a file with an unrepresentable name cannot be a host
@@ -386,7 +413,7 @@ test('walkWorkspaceSockets: an undecodable regular file does not block the scan 
 });
 
 
-test('both discovery paths refuse when an undecodable DIRECTORY hides a socket (rev-sandbox-4 finding)', async () => {
+test('both discovery paths refuse when an undecodable DIRECTORY hides a socket (rev-sandbox-4 finding)', async (t) => {
   const root = await tempWorkspace('fc-scan-nonutf8-dir-');
   // A directory whose name is not valid UTF-8, holding a perfectly ordinary socket: if the
   // scan skips the directory it never sees the socket, and the byte path still connects.
@@ -398,7 +425,15 @@ test('both discovery paths refuse when an undecodable DIRECTORY hides a socket (
     BufferCtor.from([0x62, 0x61, 0x64, 0xff]),
   ]);
   try {
-    await fs.rename(plainDir, weirdDir as unknown as string);
+    try {
+      await fs.rename(plainDir, weirdDir as unknown as string);
+    } catch (err: unknown) {
+      if ((err as { code?: string }).code === 'EILSEQ') {
+        t.skip('APFS rejects non-UTF-8 filenames at the kernel boundary');
+        return;
+      }
+      throw err;
+    }
 
     await assert.rejects(
       () => scanWorkspaceSockets(root),

@@ -130,8 +130,15 @@ export interface PipelineDeps {
   repository: string;
   coordinator: CoordinatorStub;
   broker: CoordinatorStub;
-  /** Control key: issues the capability each run uses to act. */
-  controlKey: string;
+  /**
+   * Credential presented to the broker to issue each run's capability. A machine caller
+   * (CI, alarms, the CLI) passes `controlKey`; a browser session passes `delegation`
+   * instead, so the run never needs a key that names every tenant
+   * (cloud-factory-cf-ec98). Exactly one is required.
+   */
+  controlKey?: string;
+  /** Short-lived tenant delegation, see `auth/delegation.ts`. */
+  delegation?: string;
   /** Seam for a model / `@cloudflare/computer` runtime. */
   executionFn?: AgentExecutionFn;
   /** Sinks for a run; defaults to the sinks the layout wired. */
@@ -153,12 +160,15 @@ export interface PipelineDeps {
  */
 export class BrokerCredentialBroker implements CredentialBroker {
   private readonly capabilities = new Map<string, { token: string; expiresAt: number }>();
+  private readonly credential: { controlKey?: string; delegation?: string };
 
   constructor(
     private readonly broker: CoordinatorStub,
-    private readonly controlKey: string,
+    credential: string | { controlKey?: string; delegation?: string },
     private readonly repository: string,
-  ) {}
+  ) {
+    this.credential = typeof credential === "string" ? { controlKey: credential } : credential;
+  }
 
   async hasPermission(service: string, action: string): Promise<boolean> {
     const response = await this.broker.fetch(
@@ -221,7 +231,12 @@ export class BrokerCredentialBroker implements CredentialBroker {
 
     const response = await this.broker.fetch("https://credential-broker.internal/capabilities", {
       method: "POST",
-      headers: { "content-type": "application/json", "x-factory-control-key": this.controlKey },
+      headers: {
+        "content-type": "application/json",
+        ...(this.credential.delegation === undefined
+          ? { "x-factory-control-key": this.credential.controlKey ?? "" }
+          : { "x-factory-delegation": this.credential.delegation }),
+      },
       body: JSON.stringify({ agent: agentIdFor(this.repository), service, action }),
     });
     const payload = (await response.json().catch(() => ({}))) as {
@@ -548,7 +563,14 @@ export function buildContext(
     org: { id: owner ?? "" },
     actor: { type: facts.actor === null ? "system" : "user", id: facts.actor ?? "cloud-factory" },
     memory: new CoordinatorMemoryStore(deps.coordinator),
-    credentials: new BrokerCredentialBroker(deps.broker, deps.controlKey, deps.repository),
+    credentials: new BrokerCredentialBroker(
+      deps.broker,
+      {
+        ...(deps.controlKey === undefined ? {} : { controlKey: deps.controlKey }),
+        ...(deps.delegation === undefined ? {} : { delegation: deps.delegation }),
+      },
+      deps.repository,
+    ),
     sinks: runtime.sinks,
     state: {
       event: facts,

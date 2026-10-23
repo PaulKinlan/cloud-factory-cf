@@ -54,6 +54,7 @@ export function clampLimit(limit: number): number {
 export interface TraceUrls {
   trace: string;
   usage: string;
+  ticket?: string;
   socket: string;
 }
 
@@ -135,13 +136,15 @@ export function actionRows(usage: Usage | null): HudRow[] {
     .map(([action, count]) => ({ label: action, value: String(count) }));
 }
 
-export function traceUrls(base: string, owner: string, repo: string, key: string, limit = DEFAULT_LIMIT): TraceUrls {
+export function traceUrls(base: string, owner: string, repo: string, ticket = "", limit = DEFAULT_LIMIT): TraceUrls {
   const root = `${base.replace(/\/+$/, "")}/trace/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   const socketBase = root.replace(/^http/, "ws");
+  const ticketParam = ticket ? `ticket=${encodeURIComponent(ticket)}&` : "";
   return {
     trace: `${root}?limit=${clampLimit(limit)}`,
     usage: `${root}/usage`,
-    socket: `${socketBase}/socket?key=${encodeURIComponent(key)}&limit=${clampLimit(limit)}`,
+    ticket: `${root}/ticket`,
+    socket: `${socketBase}/socket?${ticketParam}limit=${clampLimit(limit)}`,
   };
 }
 
@@ -197,6 +200,7 @@ export interface SessionOptions {
   owner: string;
   repo: string;
   key: string;
+  ticket?: string;
   fetchImpl?: typeof fetch;
   socketFactory?: (url: string) => SocketLike;
   onUpdate?: (state: SessionState) => void;
@@ -298,8 +302,8 @@ export class ObservabilitySession {
       error: null,
       nextRetryAt: null,
     });
-    const urls = traceUrls(this.options.base, this.options.owner, this.options.repo, this.options.key, this.options.limit);
-    const headers = { "x-factory-control-key": this.options.key };
+    const urls = traceUrls(this.options.base, this.options.owner, this.options.repo, this.options.ticket ?? "", this.options.limit);
+    const headers: Record<string, string> = this.options.key ? { "x-factory-control-key": this.options.key } : {};
     try {
       const [usageResponse, traceResponse] = await Promise.all([
         this.fetchImpl(urls.usage, { headers }),
@@ -331,7 +335,30 @@ export class ObservabilitySession {
       return;
     }
 
-    this.openSocket(urls.socket);
+    let socketTicket = this.options.ticket ?? "";
+    if (!socketTicket && urls.ticket && this.socketFactory() !== null) {
+      try {
+        const ticketResponse = await this.fetchImpl(urls.ticket, { method: "POST", headers });
+        if (!this.desired) return;
+        if (ticketResponse.status === 401) {
+          this.desired = false;
+          this.stopPolling();
+          this.update({ status: "error", error: "control key rejected (401)", nextRetryAt: null });
+          return;
+        }
+        if (ticketResponse.ok) {
+          const body = (await ticketResponse.json()) as { ticket?: string };
+          if (body?.ticket) {
+            socketTicket = body.ticket;
+          }
+        }
+      } catch {
+        // A network error minting the ticket will let openSocket attempt or retry.
+      }
+    }
+
+    const socketUrl = traceUrls(this.options.base, this.options.owner, this.options.repo, socketTicket, this.options.limit).socket;
+    this.openSocket(socketUrl);
   }
 
   /** The injected factory, or the browser's WebSocket; null means poll instead. */
@@ -556,9 +583,10 @@ export class ObservabilitySession {
 
   /** Re-read the usage aggregates without disturbing the stream. */
   async refreshUsage(): Promise<void> {
-    const urls = traceUrls(this.options.base, this.options.owner, this.options.repo, this.options.key, this.options.limit);
+    const urls = traceUrls(this.options.base, this.options.owner, this.options.repo, this.options.ticket ?? "", this.options.limit);
     try {
-      const response = await this.fetchImpl(urls.usage, { headers: { "x-factory-control-key": this.options.key } });
+      const headers: Record<string, string> = this.options.key ? { "x-factory-control-key": this.options.key } : {};
+      const response = await this.fetchImpl(urls.usage, { headers });
       if (!response.ok) return;
       const body = (await response.json()) as { usage?: Usage };
       this.update({ usage: body.usage ?? null });
@@ -579,8 +607,8 @@ export class ObservabilitySession {
   startPolling(): void {
     if (this.pollTimer !== null) return;
     this.update({ status: "polling" });
-    const urls = traceUrls(this.options.base, this.options.owner, this.options.repo, this.options.key, this.options.limit);
-    const headers = { "x-factory-control-key": this.options.key };
+    const urls = traceUrls(this.options.base, this.options.owner, this.options.repo, this.options.ticket ?? "", this.options.limit);
+    const headers: Record<string, string> = this.options.key ? { "x-factory-control-key": this.options.key } : {};
     const tick = async (): Promise<void> => {
       try {
         const [traceResponse, usageResponse] = await Promise.all([

@@ -132,6 +132,8 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
   const copyButton = $<HTMLButtonElement>("#connect-copy");
   const installLink = $<HTMLAnchorElement>("#connect-install");
   const checkButton = $<HTMLButtonElement>("#connect-check");
+  const testPingButton = $<HTMLButtonElement>("#connect-test-ping");
+  const oauthLink = $<HTMLAnchorElement>("#connect-oauth");
   const statusNode = $<HTMLParagraphElement>("#connect-status");
   const announcer = $<HTMLSpanElement>("#connect-announcer");
   const repoSelect = $<HTMLSelectElement>("#connect-repo-select");
@@ -170,8 +172,16 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     if (urlInput !== null) {
       urlInput.value = scope === null ? "" : webhookUrl(base, scope.owner, scope.repo);
     }
+    if (oauthLink !== null) {
+      oauthLink.href =
+        scope === null
+          ? "/auth/github/login"
+          : `/auth/github/login?owner=${encodeURIComponent(scope.owner)}&repo=${encodeURIComponent(scope.repo)}`;
+    }
     if (installLink !== null) {
-      installLink.href = installUrl(options.appSlug ?? "cloud-agent-factory", scope === null ? "" : `${scope.owner}/${scope.repo}`);
+      installLink.href = options.appSlug
+        ? installUrl(options.appSlug, scope === null ? "" : `${scope.owner}/${scope.repo}`)
+        : `${base}/auth/github/login?flow=install${scope ? `&owner=${encodeURIComponent(scope.owner)}&repo=${encodeURIComponent(scope.repo)}` : ""}`;
     }
   }
 
@@ -281,6 +291,31 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     );
   });
   checkButton?.addEventListener("click", () => void check().catch(() => {}));
+  testPingButton?.addEventListener("click", async () => {
+    if (scope === null) {
+      setStatus("Specify owner and repo to test ping", "warn");
+      return;
+    }
+    try {
+      setStatus("Sending test ping...", "muted");
+      const headers: Record<string, string> = {};
+      const key = keyInput?.value.trim() ?? "";
+      if (key.length > 0) headers["x-factory-control-key"] = key;
+      const res = await (options.fetchImpl ?? fetch)(
+        `${base}/api/admin/test-ping/${encodeURIComponent(scope.owner)}/${encodeURIComponent(scope.repo)}`,
+        { method: "POST", headers, credentials: "same-origin" },
+      );
+      if (res.ok) {
+        setStatus("Test ping accepted! Checking connection...", "ok");
+        await check();
+      } else {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        setStatus(body.error ?? `Test ping failed (HTTP ${res.status})`, "warn");
+      }
+    } catch (err: unknown) {
+      setStatus(`Test ping error: ${err instanceof Error ? err.message : String(err)}`, "warn");
+    }
+  });
 
   // A hidden tab has no business polling; the state is re-read on return.
   if (typeof document !== "undefined") {

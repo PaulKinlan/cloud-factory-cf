@@ -197,9 +197,14 @@ interface FindRun {
   missing: boolean;
 }
 
-function runFind(findBinary: string, root: string, timeoutMs: number): Promise<FindRun> {
+function runFind(
+  findBinary: string,
+  root: string,
+  timeoutMs: number,
+  args: string[] = [root, ...FIND_EXPRESSION],
+): Promise<FindRun> {
   return new Promise((resolve) => {
-    const child = spawn(findBinary, [root, ...FIND_EXPRESSION], {
+    const child = spawn(findBinary, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       // No shell: the workspace path is data, not code.
       shell: false,
@@ -438,7 +443,10 @@ export async function scanWorkspaceSockets(
     };
   }
 
-  const result = await runFind(findBinary, root, timeoutMs);
+  let result = await runFind(findBinary, root, timeoutMs);
+  if (!result.missing && !result.timedOut && result.code !== 0 && result.stderr.includes('-xtype')) {
+    result = await runFind(findBinary, root, timeoutMs, ['-L', root, '-type', 's', '-print0']);
+  }
 
   if (result.missing) {
     // No `find` on this host: fall back to the complete-or-refuse walk.

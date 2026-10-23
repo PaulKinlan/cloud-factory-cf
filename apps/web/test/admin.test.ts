@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import viteConfig from "../vite.config";
 import {
@@ -77,5 +79,43 @@ describe("Admin Dashboard Frontend Utilities", () => {
   it("vite.config: configures multi-page inputs for main and admin", () => {
     expect((viteConfig.build?.rollupOptions?.input as any)?.admin).toBe("admin.html");
     expect((viteConfig.build?.rollupOptions?.input as any)?.main).toBe("index.html");
+  });
+
+  it("admin.html: styles all inputs and textareas with field__control and includes 2026 BYOK models as dynamic comboboxes (cloud-factory-cf-8g83, cloud-factory-cf-omuh)", () => {
+    const adminHtml = readFileSync(resolve(import.meta.dirname, "../admin.html"), "utf-8");
+
+    // Every input and textarea must have field__control
+    const inputs = [...adminHtml.matchAll(/<input[^>]+>/g)].map((m) => m[0]);
+    expect(inputs.length).toBeGreaterThanOrEqual(17);
+    for (const input of inputs) {
+      expect(input).toContain("field__control");
+    }
+    const textareas = [...adminHtml.matchAll(/<textarea[^>]+>/g)].map((m) => m[0]);
+    expect(textareas.length).toBeGreaterThanOrEqual(1);
+    for (const textarea of textareas) {
+      expect(textarea).toContain("field__control");
+    }
+
+    // Model selection is dynamic input with datalist (zero-redeploy architecture)
+    expect(adminHtml).toContain('<input id="anthropic-model" class="field__control" list="anthropic-model-list"');
+    expect(adminHtml).toContain('<input id="openai-model" class="field__control" list="openai-model-list"');
+    expect(adminHtml).toContain('<input id="deepseek-model" class="field__control" list="deepseek-model-list"');
+    expect(adminHtml).toContain('<input id="gemini-model" class="field__control" list="gemini-model-list"');
+    expect(adminHtml).toContain('<datalist id="anthropic-model-list">');
+    expect(adminHtml).toContain('<datalist id="openai-model-list">');
+    expect(adminHtml).toContain('<datalist id="deepseek-model-list">');
+    expect(adminHtml).toContain('<datalist id="gemini-model-list">');
+
+    // BYOK 2026 models
+    expect(adminHtml).toContain('value="claude-opus-5-5"');
+    expect(adminHtml).toContain('value="claude-sonnet-5-5"');
+    expect(adminHtml).toContain('value="claude-haiku-5-5"');
+    expect(adminHtml).toContain('value="gpt-6-astra"');
+    expect(adminHtml).toContain('value="gpt-6-sol"');
+    expect(adminHtml).toContain('value="gpt-5"');
+    expect(adminHtml).toContain('value="gemini-3.8-flash"');
+    expect(adminHtml).toContain('value="gemini-3.1-pro"');
+    expect(adminHtml).toContain("DeepSeek-V4.1-Flash");
+    expect(adminHtml).toContain("DeepSeek-V4-Pro");
   });
 });

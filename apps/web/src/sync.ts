@@ -9,7 +9,7 @@ const REPOSITORY_PATTERN = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/;
 
 export interface ShareTarget {
   repository: string;
-  controlKey: string;
+  controlKey?: string;
 }
 
 export interface StoredDocumentSummary {
@@ -39,7 +39,7 @@ export function saveRequest(
   options: { id?: string; name?: string } = {},
 ): ShareRequest | { error: string } {
   if (!isValidRepository(target.repository)) return { error: "repository must look like owner/name" };
-  if (target.controlKey.length === 0) return { error: "a control key is required" };
+  if (target.controlKey !== undefined && target.controlKey.length === 0) return { error: "a control key is required" };
 
   const base = `${origin.replace(/\/+$/, "")}/canvas/${target.repository.trim()}/documents`;
   const url = options.id ? `${base}/${encodeURIComponent(options.id)}` : base;
@@ -49,8 +49,9 @@ export function saveRequest(
       method: "PUT",
       headers: {
         "content-type": "application/json",
-        "x-factory-control-key": target.controlKey,
+        ...(target.controlKey !== undefined ? { "x-factory-control-key": target.controlKey } : {}),
       },
+      credentials: "same-origin",
       body: JSON.stringify({
         name: options.name?.trim() || "Untitled canvas",
         // The stored document is exactly what the canvas exported.
@@ -62,25 +63,27 @@ export function saveRequest(
 
 export function listRequest(origin: string, target: ShareTarget): ShareRequest | { error: string } {
   if (!isValidRepository(target.repository)) return { error: "repository must look like owner/name" };
-  if (target.controlKey.length === 0) return { error: "a control key is required" };
+  if (target.controlKey !== undefined && target.controlKey.length === 0) return { error: "a control key is required" };
   return {
     url: `${origin.replace(/\/+$/, "")}/canvas/${target.repository.trim()}/documents`,
     init: {
       method: "GET",
-      headers: { "x-factory-control-key": target.controlKey },
+      headers: target.controlKey !== undefined ? { "x-factory-control-key": target.controlKey } : {},
+      credentials: "same-origin",
     },
   };
 }
 
 export function documentRequest(origin: string, target: ShareTarget, id: string): ShareRequest | { error: string } {
   if (!isValidRepository(target.repository)) return { error: "repository must look like owner/name" };
-  if (target.controlKey.length === 0) return { error: "a control key is required" };
+  if (target.controlKey !== undefined && target.controlKey.length === 0) return { error: "a control key is required" };
   if (id.length === 0) return { error: "a document id is required" };
   return {
     url: `${origin.replace(/\/+$/, "")}/canvas/${target.repository.trim()}/documents/${encodeURIComponent(id)}`,
     init: {
       method: "GET",
-      headers: { "x-factory-control-key": target.controlKey },
+      headers: target.controlKey !== undefined ? { "x-factory-control-key": target.controlKey } : {},
+      credentials: "same-origin",
     },
   };
 }

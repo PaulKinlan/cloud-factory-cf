@@ -15,6 +15,7 @@ import {
 } from "./sync";
 import { initObservability } from "./observability";
 import { mountConnectGate } from "./onboarding";
+import { installLightDismiss } from "./light-dismiss";
 import { coalescePerFrame } from "./pan-frame";
 import {
   KIND_LABELS,
@@ -22,6 +23,7 @@ import {
   NODE_WIDTH,
   clampZoom,
   connect,
+  createDoc,
   createNode,
   createSampleDoc,
   findNode,
@@ -73,7 +75,7 @@ function readStoredCanvas(): string | null {
 
 const storedCanvas = readStoredCanvas();
 const restored = restoreCanvas(storedCanvas);
-let doc: CanvasDoc = restored.document;
+let doc: CanvasDoc = storedCanvas === null ? createSampleDoc() : restored.document;
 // Restored from the same value as the document, so a reload keeps both.
 let boundRepository: string | null = restored.bound;
 let selectedId: string | null = doc.nodes[0]?.id ?? null;
@@ -284,6 +286,33 @@ function renderInspector(): void {
   fieldLabel.value = node.label;
   fieldList.replaceChildren();
 
+  if (node.kind === "agent") {
+    const presetsBar = document.createElement("div");
+    presetsBar.className = "inspector-presets";
+    const presets = [
+      { label: "PR Reviewer", model: "claude-sonnet-5-5", prompt: "Review pull request diffs for security, correctness, and repo conventions." },
+      { label: "Issue Triage", model: "gpt-6-astra", prompt: "Triage inbound issues, classify priority, and draft resolution plans." },
+      { label: "Implementation Planner", model: "claude-opus-5-5", prompt: "Decompose feature requirements into test-backed subagent tasks." },
+      { label: "Security Auditor", model: "deepseek-reasoner", prompt: "Audit diffs and dependencies for secret leakage and command injection risks." },
+    ];
+    for (const p of presets) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "preset-chip";
+      chip.textContent = p.label;
+      chip.addEventListener("click", () => {
+        renameNode(doc, node.id, p.label);
+        setNodeConfig(doc, node.id, "model", p.model);
+        setNodeConfig(doc, node.id, "prompt", p.prompt);
+        persist();
+        render();
+        announce(`Applied preset ${p.label}`);
+      });
+      presetsBar.append(chip);
+    }
+    fieldList.append(presetsBar);
+  }
+
   for (const field of CONFIG_FIELDS[node.kind]) {
     const id = `config-${field.key}`;
     const wrapper = document.createElement("label");
@@ -301,7 +330,33 @@ function renderInspector(): void {
           : document.createElement("input");
     control.id = id;
     control.className = "field__control";
-    if (control instanceof HTMLInputElement) control.type = "text";
+    if (control instanceof HTMLInputElement) {
+      control.type = "text";
+      if (field.key === "model" && node.kind === "agent") {
+        control.setAttribute("list", "canvas-model-list");
+        if (!document.getElementById("canvas-model-list")) {
+          const dl = document.createElement("datalist");
+          dl.id = "canvas-model-list";
+          const mList = [
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-haiku-5-5",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "deepseek-chat",
+            "deepseek-reasoner",
+            "gemini-3.8-flash",
+            "gemini-3.1-pro",
+          ];
+          for (const m of mList) {
+            const opt = document.createElement("option");
+            opt.value = m;
+            dl.append(opt);
+          }
+          document.body.append(dl);
+        }
+      }
+    }
     if (control instanceof HTMLTextAreaElement) control.rows = 4;
     if (control instanceof HTMLSelectElement && field.options) {
       for (const option of field.options) {
@@ -431,7 +486,11 @@ required<HTMLButtonElement>("export-close").addEventListener("click", () => expo
 // ------------------------------------------------------------------- sharing
 
 function shareTarget(): ShareTarget {
-  return { repository: shareRepository.value.trim(), controlKey: shareKey.value };
+  const key = shareKey.value.trim();
+  return {
+    repository: shareRepository.value.trim(),
+    ...(key.length > 0 ? { controlKey: key } : {}),
+  };
 }
 
 function setShareStatus(message: string): void {
@@ -527,7 +586,7 @@ required<HTMLButtonElement>("share-refresh").addEventListener("click", () => {
 
 async function refreshDocumentList(): Promise<void> {
   shareList.replaceChildren();
-  if (shareRepository.value.trim().length === 0 || shareKey.value.length === 0) {
+  if (shareRepository.value.trim().length === 0) {
     return;
   }
   const result = await sendShare(listRequest(location.origin, shareTarget()));
@@ -892,6 +951,9 @@ fieldLabel.addEventListener("input", () => {
   }
 });
 
+// Enable declarative light dismiss fallback on dialogs
+installLightDismiss(document);
+
 // A restored canvas keeps its own view; the first one is fitted to its content.
 if (storedCanvas === null) fitToContent();
 render();
@@ -900,13 +962,164 @@ announce(`Canvas ready with ${doc.nodes.length} nodes`);
 // The repository gate: the header pill owns the scope, and the panels that need a
 // repository (share, observability) start from whatever the operator connected.
 mountConnectGate(document, {
-  appSlug: "cloud-agent-factory",
   onScope: (scope) => {
     // Prefill, never overwrite: an operator may already have typed a scope.
     if (scope !== null && shareRepository.value.trim() === "") {
       shareRepository.value = `${scope.owner}/${scope.repo}`;
     }
   },
+});
+
+// Run workflow button in share dialog
+const shareRunBtn = document.getElementById("share-run") as HTMLButtonElement | null;
+shareRunBtn?.addEventListener("click", async () => {
+  const target = shareTarget();
+  if (!target.repository) {
+    setShareStatus("Specify a repository before running workflow");
+    return;
+  }
+  setShareStatus("Executing workflow run on worker...");
+  try {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (target.controlKey) headers["x-factory-control-key"] = target.controlKey;
+    const res = await fetch(`${location.origin}/canvas/${target.repository}/run`, {
+      method: "POST",
+      headers,
+      credentials: "same-origin",
+      body: JSON.stringify({
+        document: JSON.parse(serialize(doc)) as unknown,
+        input: { event: "manual.ui" },
+      }),
+    });
+    const data = (await res.json().catch(() => ({}))) as any;
+    if (res.ok && data.ok) {
+      setShareStatus(`Workflow run succeeded! Run ID: ${data.runId ?? "completed"}`);
+    } else {
+      setShareStatus(`Workflow run failed: ${data.error ?? res.statusText}`);
+    }
+  } catch (err: unknown) {
+    setShareStatus(`Execution error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+});
+
+// Agent Studio modal & templates
+const studioDialog = document.getElementById("studio-dialog") as HTMLDialogElement | null;
+const studioOpenBtn = document.getElementById("studio-open") as HTMLButtonElement | null;
+const studioCloseBtn = document.getElementById("studio-close") as HTMLButtonElement | null;
+const studioPrompt = document.getElementById("studio-prompt") as HTMLTextAreaElement | null;
+const studioAuthorBtn = document.getElementById("studio-author") as HTMLButtonElement | null;
+const studioSimBtn = document.getElementById("studio-simulate") as HTMLButtonElement | null;
+const studioApplyBtn = document.getElementById("studio-apply") as HTMLButtonElement | null;
+const studioOutput = document.getElementById("studio-output") as HTMLPreElement | null;
+
+studioOpenBtn?.addEventListener("click", () => {
+  studioDialog?.showModal();
+});
+studioCloseBtn?.addEventListener("click", () => {
+  studioDialog?.close();
+});
+
+for (const card of document.querySelectorAll<HTMLButtonElement>("[data-template]")) {
+  card.addEventListener("click", () => {
+    const tmpl = card.dataset["template"];
+    if (tmpl === "pr-review") {
+      doc = createSampleDoc();
+    } else if (tmpl === "issue-triage") {
+      doc = createDoc();
+      const s = createNode(doc, "source", { x: 80, y: 160 }, { provider: "github", event: "issues.opened" }, "GitHub Issue Opened");
+      const a = createNode(doc, "agent", { x: 380, y: 160 }, { model: "gpt-6-astra", prompt: "Triage inbound issue, assess priority, label, and plan resolution." }, "Issue Triager");
+      const m = createNode(doc, "memory", { x: 380, y: 380 }, { scope: "org" }, "Org Context");
+      const k1 = createNode(doc, "sink", { x: 680, y: 120 }, { type: "github-issue-comment" }, "Issue Comment Sink");
+      const k2 = createNode(doc, "sink", { x: 680, y: 240 }, { type: "beads-task" }, "Beads Task Sink");
+      connect(doc, s.id, a.id);
+      connect(doc, a.id, m.id);
+      connect(doc, m.id, a.id);
+      connect(doc, a.id, k1.id);
+      connect(doc, a.id, k2.id);
+    } else if (tmpl === "security-audit") {
+      doc = createDoc();
+      const s = createNode(doc, "source", { x: 80, y: 160 }, { provider: "github", event: "push" }, "GitHub Push");
+      const a = createNode(doc, "agent", { x: 380, y: 160 }, { model: "deepseek-reasoner", prompt: "Analyze push diff for credential leaks and unmasked socket vulnerabilities." }, "Security Auditor");
+      const m = createNode(doc, "memory", { x: 380, y: 380 }, { scope: "repo" }, "Audit Findings");
+      const k = createNode(doc, "sink", { x: 680, y: 160 }, { type: "telemetry" }, "Telemetry Sink");
+      connect(doc, s.id, a.id);
+      connect(doc, a.id, m.id);
+      connect(doc, a.id, k.id);
+    } else if (tmpl === "full-sdlc") {
+      doc = createDoc();
+      const s1 = createNode(doc, "source", { x: 60, y: 100 }, { provider: "github", event: "pull_request.opened" }, "PR Opened");
+      const s2 = createNode(doc, "source", { x: 60, y: 260 }, { provider: "github", event: "issues.opened" }, "Issue Opened");
+      const a1 = createNode(doc, "agent", { x: 360, y: 100 }, { model: "claude-sonnet-5-5", prompt: "Review pull requests, verify tests and standards." }, "PR Reviewer");
+      const a2 = createNode(doc, "agent", { x: 360, y: 260 }, { model: "gpt-6-astra", prompt: "Analyze and break down issues into implementation beads." }, "Task Planner");
+      const m = createNode(doc, "memory", { x: 360, y: 440 }, { scope: "repo" }, "SDLC Memory");
+      const k1 = createNode(doc, "sink", { x: 660, y: 80 }, { type: "github-pr-review" }, "PR Review Sink");
+      const k2 = createNode(doc, "sink", { x: 660, y: 200 }, { type: "beads-task" }, "Beads Task Sink");
+      const k3 = createNode(doc, "sink", { x: 660, y: 320 }, { type: "telemetry" }, "Telemetry Sink");
+      connect(doc, s1.id, a1.id);
+      connect(doc, a1.id, m.id);
+      connect(doc, a1.id, k1.id);
+      connect(doc, s2.id, a2.id);
+      connect(doc, a2.id, m.id);
+      connect(doc, a2.id, k2.id);
+      connect(doc, m.id, a1.id);
+      connect(doc, m.id, a2.id);
+      connect(doc, a1.id, k3.id);
+    }
+    selectedId = doc.nodes[0]?.id ?? null;
+    persist();
+    render();
+    fitToContent();
+    studioDialog?.close();
+    announce(`Loaded starter workflow: ${card.querySelector("h4")?.textContent ?? "workflow"}`);
+  });
+}
+
+let compiledAgent: { name: string; model: string; prompt: string } | null = null;
+
+studioAuthorBtn?.addEventListener("click", () => {
+  const prompt = studioPrompt?.value.trim() ?? "";
+  if (!prompt) {
+    if (studioOutput) {
+      studioOutput.textContent = "Please enter an agent prompt or goal.";
+      studioOutput.hidden = false;
+    }
+    return;
+  }
+  compiledAgent = {
+    name: "Custom Agent",
+    model: "claude-sonnet-5-5",
+    prompt,
+  };
+  if (studioOutput) {
+    studioOutput.textContent = `Compiled Agent:\n• Role: Custom Agent\n• Preferred Model: claude-sonnet-5-5\n• System Prompt: ${prompt}\n• Tools: file_read, git_diff, broker_exec\nReady to add to canvas or simulate.`;
+    studioOutput.hidden = false;
+  }
+});
+
+studioSimBtn?.addEventListener("click", () => {
+  const prompt = studioPrompt?.value.trim() ?? "";
+  if (!prompt) {
+    if (studioOutput) {
+      studioOutput.textContent = "Please enter an agent prompt to simulate.";
+      studioOutput.hidden = false;
+    }
+    return;
+  }
+  if (studioOutput) {
+    studioOutput.textContent = `Simulation Trace (Dry Run):\n[1] event.received { type: "synthetic.test" }\n[2] agent.prompt_evaluated (${prompt.slice(0, 40)}...)\n[3] tool.invoked { tool: "diff.analyze", status: "pass" }\n[4] sink.dispatched { status: "success", estimatedTokens: 420 }\nResult: PASSED (Dry-run verified)`;
+    studioOutput.hidden = false;
+  }
+});
+
+studioApplyBtn?.addEventListener("click", () => {
+  const prompt = studioPrompt?.value.trim() ?? (compiledAgent?.prompt || "Autonomous assistant");
+  const a = createNode(doc, "agent", { x: 380, y: 200 }, { model: "claude-sonnet-5-5", prompt }, compiledAgent?.name ?? "Custom Agent");
+  selectedId = a.id;
+  persist();
+  render();
+  focusNode(a.id);
+  studioDialog?.close();
+  announce("Added authored agent to canvas");
 });
 
 const obsPanel = document.getElementById("observability-panel");

@@ -59,6 +59,31 @@ export interface ControlAuthzOptions {
    * only act for its own login; omit it for routes that are not scoped to one tenant.
    */
   owner?: string | undefined;
+  /**
+   * Provider/platform hint (`platform` query parameter). When set, a session may only
+   * act for its own provider (defaults to "github").
+   */
+  platform?: string | null | undefined;
+}
+
+/**
+ * Whether this principal may address the provider named by a `platform=` hint.
+ *
+ * A session speaks for one provider: a GitHub session acting for `octodev` is the tenant
+ * `github:octodev/*`, and the same `owner/repo` on GitLab or Gitea is a *different*
+ * tenant with a different Durable Object. The machine key names no tenant, so it may
+ * address any provider, which is how non-GitHub tenants are served (ADR 005).
+ *
+ * Without this, an owner-only comparison plus `?platform=gitlab` reads another provider's
+ * data (cloud-factory-cf-tw9d, -fcwm).
+ */
+export function sessionMayAddressPlatform(
+  principal: ControlPrincipal,
+  platform: string | null | undefined,
+): boolean {
+  if (principal.via === "control-key") return true;
+  if (platform === null || platform === undefined) return true;
+  return platform.toLowerCase() === "github";
 }
 
 /**
@@ -84,7 +109,11 @@ export async function authorizeControlPlane(
       if (owner !== undefined && owner.toLowerCase() !== session.login.toLowerCase()) {
         return { ok: false, reason: "cross-tenant" };
       }
-      return { ok: true, principal: { via: "session", login: session.login } };
+      const principal: ControlPrincipal = { via: "session", login: session.login };
+      if (!sessionMayAddressPlatform(principal, options.platform)) {
+        return { ok: false, reason: "cross-tenant" };
+      }
+      return { ok: true, principal };
     }
   }
 

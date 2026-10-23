@@ -127,13 +127,13 @@ export function initAdminDashboard(): void {
 
   // AI Provider elements
   const anthropicKeyInput = document.getElementById('anthropic-key') as HTMLInputElement | null;
-  const anthropicModelInput = document.getElementById('anthropic-model') as HTMLSelectElement | null;
+  const anthropicModelInput = document.getElementById('anthropic-model') as HTMLInputElement | null;
   const openaiKeyInput = document.getElementById('openai-key') as HTMLInputElement | null;
-  const openaiModelInput = document.getElementById('openai-model') as HTMLSelectElement | null;
+  const openaiModelInput = document.getElementById('openai-model') as HTMLInputElement | null;
   const deepseekKeyInput = document.getElementById('deepseek-key') as HTMLInputElement | null;
-  const deepseekModelInput = document.getElementById('deepseek-model') as HTMLSelectElement | null;
+  const deepseekModelInput = document.getElementById('deepseek-model') as HTMLInputElement | null;
   const geminiKeyInput = document.getElementById('gemini-key') as HTMLInputElement | null;
-  const geminiModelInput = document.getElementById('gemini-model') as HTMLSelectElement | null;
+  const geminiModelInput = document.getElementById('gemini-model') as HTMLInputElement | null;
 
   const showStatus = (msg: string, isError = false) => {
     if (!statusAlert) return;
@@ -208,15 +208,14 @@ export function initAdminDashboard(): void {
       showStatus('Please specify owner and repo', true);
       return;
     }
-    if (!key) {
-      showStatus('Please supply the control key', true);
-      return;
-    }
 
     try {
       showStatus('Loading settings...');
+      const headers: Record<string, string> = {};
+      if (key) headers['x-factory-control-key'] = key;
       const res = await fetch(`/api/admin/settings/${owner}/${repo}`, {
-        headers: { 'x-factory-control-key': key },
+        headers,
+        credentials: 'same-origin',
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as any;
@@ -263,10 +262,6 @@ export function initAdminDashboard(): void {
     const { owner, repo, key } = getScope();
     if (!owner || !repo) {
       showStatus('Please specify owner and repo', true);
-      return;
-    }
-    if (!key) {
-      showStatus('Please supply the control key', true);
       return;
     }
 
@@ -350,12 +345,14 @@ export function initAdminDashboard(): void {
 
     try {
       showStatus('Saving settings...');
+      const headers: Record<string, string> = {
+        'content-type': 'application/json',
+      };
+      if (key) headers['x-factory-control-key'] = key;
       const res = await fetch(`/api/admin/settings/${owner}/${repo}`, {
         method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-factory-control-key': key,
-        },
+        headers,
+        credentials: 'same-origin',
         body: JSON.stringify(payload),
       });
 
@@ -376,8 +373,8 @@ export function initAdminDashboard(): void {
   // Test Ping trigger
   btnPing?.addEventListener('click', async () => {
     const { owner, repo, key } = getScope();
-    if (!owner || !repo || !key) {
-      showStatus('Supply owner, repo, and control key to trigger test ping', true);
+    if (!owner || !repo) {
+      showStatus('Supply owner and repo to trigger test ping', true);
       return;
     }
 
@@ -387,9 +384,12 @@ export function initAdminDashboard(): void {
     }
 
     try {
+      const headers: Record<string, string> = {};
+      if (key) headers['x-factory-control-key'] = key;
       const res = await fetch(`/api/admin/test-ping/${owner}/${repo}`, {
         method: 'POST',
-        headers: { 'x-factory-control-key': key },
+        headers,
+        credentials: 'same-origin',
       });
       const data = (await res.json().catch(() => ({}))) as any;
       if (res.ok && data.ok) {
