@@ -127,22 +127,25 @@ precisely because it is easy to over-read (cloud-factory-cf-5vuu):
 | No IP egress with `sandboxNetwork: 'none'` | `--unshare-net`, and `/etc/resolv.conf` is not mounted in that mode |
 | No host Unix-socket relay with `sandboxNetwork: 'none'` | every socket found in the workspace is masked with `--ro-bind /dev/null` |
 
-Unix sockets are **not** namespaced, so the third row is the one that needs a scan of
-the workspace, and that scan is a security control:
+Unix sockets are **not** namespaced, so the third row is the one that needs to know
+every socket in the workspace, and that discovery is a security control:
 
+- it reads the **kernel's bound-socket table** (`/proc/net/unix`), so it is complete and
+  costs ~1ms regardless of workspace size. It does **not** prune directories: a socket
+  under `node_modules`, `.git` or `target` is masked like any other. (The first version
+  of this fix pruned those trees to stay fast and left a reproducible escape — a socket
+  in a pruned directory was never masked, cloud-factory-cf-5vuu.)
 - it is **re-run for every command**, so a socket that appears later is still masked
-  (a cache would silently unmask it — cloud-factory-cf-vy8o);
-- it is **bounded** (`socketScan: { maxDirs = 4096, maxDepth = 12, timeoutMs = 5000 }`)
-  and skips dependency/build trees (`node_modules`, `.git`, `target`, `venv`, `vendor`,
-  `dist`, …), so a normal workspace costs tens of directories;
-- if it cannot finish — budget exceeded, unreadable directory, too deep — the command
-  is **refused**, not run with an unverified mask. Raise the budget with
-  `createLocalTools({ socketScan: { maxDirs, maxDepth, timeoutMs } })` rather than
-  removing the check.
+  (a cache would silently unmask it — cloud-factory-cf-vy8o).
+- on a host with no socket table it falls back to a **complete-or-refuse** directory
+  walk (`socketScan: { timeoutMs = 5000, maxDirs = 20000, maxDepth = 32 }`). If the
+  walk cannot finish — budget, unreadable directory, too deep — the command is
+  **refused**, not run with an unverified mask; raise the budget rather than removing
+  the check.
 
 Not covered: a socket the sandbox's own command creates and then dials *within the same
-command* (that traffic never leaves the sandbox), and anything under a skipped
-directory — which is why the skip list is visible and the refusal is loud.
+command* — that traffic never reaches the host, and the next command's scan masks the
+socket before it can be dialled from outside.
 
 ---
 

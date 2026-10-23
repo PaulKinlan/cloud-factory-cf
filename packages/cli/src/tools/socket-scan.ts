@@ -2,32 +2,33 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 /**
- * Bounded discovery of host Unix domain sockets inside a workspace
- * (cloud-factory-cf-5vuu, cloud-factory-cf-6rne, cloud-factory-cf-vy8o,
- * cloud-factory-cf-bcra).
+ * Discovery of host Unix domain sockets inside a workspace (cloud-factory-cf-5vuu,
+ * -6rne, -vy8o, -bcra).
  *
  * The `network-none` sandbox unshares the IP namespace, but Unix domain sockets are
  * **not** namespaced: a socket a host process left inside the workspace is still a
- * door to the host network. The sandbox therefore masks every socket it can find
+ * door to the host network. The sandbox therefore masks every socket it finds
  * (`--ro-bind /dev/null <path>`).
  *
- * That makes the scan a security control, so it is written to fail **closed**:
+ * Discovery must be complete *and* cheap, and those two pull against each other:
  *
- * - it never silently skips a subtree it cannot read — it throws;
- * - it never silently skips a subtree because the budget ran out — it throws;
- * - it is bounded (`maxDirs`, `maxDepth`, `timeoutMs`) so a large workspace cannot
- *   make every command slow;
- * - it is re-run for every command, so a socket that appears later is still masked
- *   (no cache — a stale snapshot silently unmasks).
+ * - a bounded directory walk that prunes `node_modules`/`target`/… is cheap but
+ *   **bypassable** — a socket under a pruned directory is never masked (that was a
+ *   reproducible escape on the first version of this fix);
+ * - a complete walk is honest but costs ~1ms per directory, so a 20k-directory
+ *   workspace pays seconds on *every* command.
  *
- * The skip list keeps the common case cheap: build and dependency directories are
- * not descended into. A subtree that is skipped is *not* verified, which is why the
- * operators' escape hatch is an explicit option rather than an assumption.
+ * So the primary source is not a walk at all: the kernel already publishes every
+ * bound Unix socket in `/proc/net/unix`, path included. Reading that table is
+ * O(number of sockets) — well under a millisecond — and it cannot be bypassed by
+ * putting the socket somewhere inconvenient. The directory walk remains only as a
+ * degraded fallback for hosts without `/proc`, and it **prunes nothing**: complete
+ * or refused, never partial. Every incomplete scan throws
+ * (`SocketScanError`), because a partial answer means an unmasked socket.
  */
 
-/** Directory names never descended into. */
-export const SKIPPED_DIRS: ReadonlySet<string> = new Set([
-  // Dependencies and build output
+/** Directory names the degraded walk used to prune. Kept only so the docs can say why it does not. */
+export const FORMERLY_SKIPPED_DIRS: ReadonlySet<string> = new Set([
   'node_modules',
   'vendor',
   'dist',
@@ -35,45 +36,33 @@ export const SKIPPED_DIRS: ReadonlySet<string> = new Set([
   'out',
   'target',
   'coverage',
-  '.next',
-  '.nuxt',
-  '.svelte-kit',
-  '.turbo',
-  '.parcel-cache',
-  '.pnpm-store',
-  '.yarn',
-  '.output',
-  // VCS and caches
   '.git',
   '.cache',
-  // Language toolchains and virtualenvs
-  '.venv',
-  'venv',
-  '__pycache__',
-  '.pytest_cache',
-  '.tox',
-  '.cargo',
-  '.rustup',
-  '.gradle',
-  '.m2',
-  '.terraform',
 ]);
 
 export interface SocketScanOptions {
-  /** Directory budget for one scan. Default 4096. */
+  /** Directory budget for the degraded walk. Default 20000. */
   maxDirs?: number;
-  /** Nesting budget for one scan. Default 12. */
+  /** Nesting budget for the degraded walk. Default 32. */
   maxDepth?: number;
-  /** Wall-clock budget for one scan. Default 5000ms. */
+  /** Wall-clock budget for the degraded walk. Default 5000ms. */
   timeoutMs?: number;
-  /** Directories read in parallel. Default 8. */
+  /** Directories read in parallel by the degraded walk. Default 16. */
   concurrency?: number;
+  /**
+   * Where to read the kernel socket table from. Default `/proc/net/unix`. This only
+   * relocates the source — it never skips verification — so a host that mounts `/proc`
+   * elsewhere can still use the cheap path, and the degraded walk can be exercised.
+   */
+  tablePath?: string;
 }
 
 export interface SocketScanResult {
   /** Absolute paths of every Unix socket found, sorted. */
   sockets: string[];
-  /** Directories actually read. */
+  /** Which source answered: the kernel's socket table, or the fallback walk. */
+  source: 'proc' | 'walk';
+  /** Directories read (0 for the socket table). */
   dirsScanned: number;
   /** Wall time spent scanning. */
   elapsedMs: number;
@@ -90,42 +79,67 @@ export class SocketScanError extends Error {
   }
 }
 
-/**
- * `Dirent` here comes from this package's hand-written `node-env.d.ts` shim, which
- * declares only `isFile`/`isDirectory`; Node provides `isSocket` at runtime. Casting
- * keeps the shim untouched: a `.d.ts` edit has no covering suite, and the fast gate
- * refuses unmapped source (cloud-factory-cf-llyg).
- */
-type SocketDirent = { isSocket(): boolean };
-
-const DEFAULT_MAX_DIRS = 4096;
-const DEFAULT_MAX_DEPTH = 12;
+const DEFAULT_MAX_DIRS = 20000;
+const DEFAULT_MAX_DEPTH = 32;
 const DEFAULT_TIMEOUT_MS = 5000;
-const DEFAULT_CONCURRENCY = 8;
+const DEFAULT_CONCURRENCY = 16;
 
 const FIX_HINT =
-  'Refusing to run the command with an unverified socket mask. Narrow the workspace, add the directory to the skip list, or raise the budget with createLocalTools({ socketScan: { maxDirs, maxDepth, timeoutMs } }).';
+  'Refusing to run the command with an unverified socket mask. Narrow the workspace, or raise the budget with createLocalTools({ socketScan: { timeoutMs, maxDirs, maxDepth } }).';
+
+/** `/proc/net/unix` rows: `Num: RefCount Protocol Flags Type St Inode Path`. */
+const SOCKET_TABLE_ROW = /^\s*[0-9a-fA-F]+:\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\d+\s+(.*)$/;
 
 /**
- * Finds every Unix domain socket inside `root`, bounded by the options, and throws
- * `SocketScanError` rather than return a partial answer.
+ * Filters a `/proc/net/unix` table down to the sockets inside `root`.
+ *
+ * The Path column is free-form (it may contain spaces) and abstract sockets appear
+ * as `@name`, so the path is everything after the inode column rather than a
+ * whitespace-split field. Exported for tests: parsing a table is pure.
  */
-export async function scanWorkspaceSockets(
+export function socketsUnderRoot(table: string, root: string): string[] {
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+  const found: string[] = [];
+  for (const line of table.split('\n')) {
+    const match = SOCKET_TABLE_ROW.exec(line);
+    if (!match) continue;
+    const socketPath = (match[1] ?? '').trim();
+    // Bind-mountable paths only: an abstract socket (@) has no filesystem path, so
+    // there is nothing to mask and nothing the sandbox can dial by name.
+    if (!socketPath.startsWith(path.sep)) continue;
+    if (socketPath.startsWith(prefix)) found.push(socketPath);
+  }
+  return found;
+}
+
+/** The kernel's bound-socket table, or `null` when this host does not publish one. */
+export async function readHostUnixSocketTable(
+  tablePath = '/proc/net/unix',
+): Promise<string | null> {
+  try {
+    return await fs.readFile(tablePath, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Complete-or-refuse directory walk, used only when `/proc/net/unix` is missing.
+ * It prunes nothing: a socket under `node_modules` is exactly the escape this
+ * function exists to prevent.
+ */
+export async function walkWorkspaceSockets(
   root: string,
   options: SocketScanOptions = {},
-): Promise<SocketScanResult> {
+): Promise<{ sockets: string[]; dirsScanned: number }> {
   const maxDirs = options.maxDirs ?? DEFAULT_MAX_DIRS;
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
 
-  const startedAt = Date.now();
-  const deadline = startedAt + timeoutMs;
+  const deadline = Date.now() + timeoutMs;
   const sockets: string[] = [];
   let dirsScanned = 0;
-  // Counted when a directory is *discovered*, not when it is read: the budget must
-  // refuse before spending the time it is trying to bound (a 5k-directory tree is
-  // refused after reading its parents, not after reading all 5k).
   let dirsDiscovered = 1;
 
   let frontier: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
@@ -159,13 +173,11 @@ export async function scanWorkspaceSockets(
         const next: Array<{ dir: string; depth: number }> = [];
         for (const entry of entries) {
           const full = path.join(dir, entry.name);
-          if ((entry as unknown as SocketDirent).isSocket()) {
+          if (isSocketEntry(entry)) {
             found.push(full);
-          } else if (entry.isDirectory() && !SKIPPED_DIRS.has(entry.name)) {
-            // `readdir({withFileTypes:true})` reports lstat semantics, so a symlink to a
-            // directory is `isSymbolicLink()` and *not* `isDirectory()`: links are never
-            // followed. The sandbox mounts only the workspace, so a link could not reach
-            // outside it anyway, and following links reintroduces loops.
+          } else if (entry.isDirectory()) {
+            // `readdir({withFileTypes:true})` reports lstat semantics, so a symlink to
+            // a directory is not `isDirectory()`: links are never followed.
             dirsDiscovered += 1;
             if (dirsDiscovered > maxDirs) {
               throw new SocketScanError(
@@ -183,6 +195,42 @@ export async function scanWorkspaceSockets(
     for (const r of results) sockets.push(...r.found);
   }
 
-  sockets.sort();
-  return { sockets, dirsScanned, elapsedMs: Date.now() - startedAt };
+  return { sockets: sockets.sort(), dirsScanned };
+}
+
+/**
+ * `Dirent` here comes from this package's hand-written `node-env.d.ts` shim, which
+ * declares only `isFile`/`isDirectory`; Node provides `isSocket` at runtime. Casting
+ * keeps the shim untouched: a `.d.ts` edit has no covering suite, and the fast gate
+ * refuses unmapped source (cloud-factory-cf-llyg).
+ */
+type SocketDirent = { isSocket(): boolean };
+
+function isSocketEntry(entry: unknown): boolean {
+  return (entry as SocketDirent).isSocket();
+}
+
+/**
+ * Every Unix socket inside `root`, from the cheapest complete source available.
+ * Throws `SocketScanError` rather than return a partial answer.
+ */
+export async function scanWorkspaceSockets(
+  root: string,
+  options: SocketScanOptions = {},
+): Promise<SocketScanResult> {
+  const startedAt = Date.now();
+
+  const table = await readHostUnixSocketTable(options.tablePath);
+  if (table !== null) {
+    const sockets = socketsUnderRoot(table, root).sort();
+    return { sockets, source: 'proc', dirsScanned: 0, elapsedMs: Date.now() - startedAt };
+  }
+
+  const walk = await walkWorkspaceSockets(root, options);
+  return {
+    sockets: walk.sockets,
+    source: 'walk',
+    dirsScanned: walk.dirsScanned,
+    elapsedMs: Date.now() - startedAt,
+  };
 }

@@ -341,8 +341,9 @@ test('createLocalTools: an incomplete socket scan refuses the command instead of
     const tools = createLocalTools({
       cwd: tmpDir,
       sandboxNetwork: 'none',
-      // Deliberately too small for this tree.
-      socketScan: { maxDirs: 1 },
+      // Point at a table that does not exist so the degraded walk runs, then make its
+      // budget too small for this tree. The point is that an incomplete scan refuses.
+      socketScan: { maxDirs: 1, tablePath: path.join(tmpDir, 'no-such-unix-table') },
     });
     const execTool = tools.find((t2) => t2.name === 'exec_command')!;
 
@@ -355,11 +356,49 @@ test('createLocalTools: an incomplete socket scan refuses the command instead of
       },
     );
 
-    // The same tree is fine with the default budget: the refusal is a bounded
-    // security control, not a hard workspace-size limit.
+    // The same tree is fine with the default budget (and fine immediately when the
+    // kernel table answers): the refusal is a bounded security control, not a hard
+    // workspace-size limit.
     const permissive = createLocalTools({ cwd: tmpDir, sandboxNetwork: 'none' });
     const okRes = (await permissive.find((t2) => t2.name === 'exec_command')!.handler({ command: 'true' })) as any;
     assert.equal(okRes.exitCode, 0);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('createLocalTools: network-none masks a host socket inside node_modules too (cloud-factory-cf-5vuu)', async (t) => {
+  const reason = await bwrapUnavailableReason();
+  if (reason) {
+    t.skip(reason);
+    return;
+  }
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-pruned-'));
+  try {
+    // The escape a pruning scan left open: a socket under a directory the scan used
+    // to skip was never masked, so it stayed reachable from inside `--unshare-net`.
+    const hiddenDir = path.join(tmpDir, 'node_modules', 'pkg', 'dist');
+    await fs.mkdir(hiddenDir, { recursive: true });
+    const sockPath = path.join(hiddenDir, 'host.sock');
+    const server = net.createServer((connection) => {
+      connection.write('HOST_SOCKET_REACHED\n');
+      connection.end();
+    });
+    await new Promise<void>((resolve) => server.listen(sockPath, () => resolve()));
+
+    try {
+      const tools = createLocalTools({ cwd: tmpDir, sandboxNetwork: 'none' });
+      const execTool = tools.find((t2) => t2.name === 'exec_command')!;
+      const res = (await execTool.handler({
+        command: `node -e 'const net = require("net"); net.connect("${sockPath}").on("data", () => console.log("HOST_SOCKET_REACHED")).on("error", e => console.log("MASKED_ERR:" + e.code))'`,
+      })) as any;
+      assert.match(res.stdout, /MASKED_ERR:/);
+      assert.doesNotMatch(res.stdout, /HOST_SOCKET_REACHED/);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await fs.rm(sockPath, { force: true }).catch(() => {});
+    }
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }

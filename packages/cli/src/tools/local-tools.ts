@@ -174,7 +174,7 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
   const execCommandTool: ToolDefinition = {
     name: 'exec_command',
     description:
-      'Execute a shell command within the local workspace directory. Under sandbox mode (default: bubblewrap), confines the filesystem to the workspace and isolates network namespaces (sandboxNetwork: "host" | "none"). With sandboxNetwork: "none" the IP namespace is unshared (--unshare-net: no loopback, LAN or metadata egress) and host Unix domain sockets found inside the workspace are masked with /dev/null. The socket scan is bounded and re-run per command; if it cannot complete within its budget the command is refused rather than run with an unverified mask, so a socket that appears after the last command is still masked.',
+      'Execute a shell command within the local workspace directory. Under sandbox mode (default: bubblewrap), confines the filesystem to the workspace and isolates network namespaces (sandboxNetwork: "host" | "none"). With sandboxNetwork: "none" the IP namespace is unshared (--unshare-net: no loopback, LAN or metadata egress) and host Unix domain sockets found inside the workspace are masked with /dev/null. Masking reads the kernel bound-socket table (/proc/net/unix) and is re-run for every command, so every host socket in the workspace is masked - including ones under node_modules/.git/target - and a socket that appears after an earlier command is still masked. With no usable socket table the fallback walk refuses rather than run with an unverified mask.',
     parameters: {
       type: 'object',
       properties: {
