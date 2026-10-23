@@ -265,4 +265,21 @@ describe("connect evidence", () => {
     const body2 = (await read2.json()) as ConnectBody;
     expect(body2.connect.pings).toBe(1);
   });
+
+  it("migrates mixed-case GitLab RepoCoordinator state through ensureMigrated (cloud-factory-cf-xorj)", async () => {
+    const mixedStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("gitlab:Acme/Repo"));
+    await runInDurableObject(mixedStub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES ('default', '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', 'ping', 3, '2026-10-20T00:00:00Z')",
+      );
+    });
+
+    const res = await SELF.fetch("https://factory.example/trace/Acme/Repo/connect?platform=gitlab", {
+      headers: { "x-factory-control-key": controlKey },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ConnectBody;
+    expect(body.ok).toBe(true);
+    expect(body.connect.pings).toBe(3);
+  });
 });

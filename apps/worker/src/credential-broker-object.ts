@@ -93,11 +93,11 @@ export class CredentialBroker extends DurableObject<Env> {
     }
     if (url.pathname === "/export-settings") {
       const provisioningKey = this.env.BROKER_CONTROL_KEY;
-      if (provisioningKey) {
-        const presented = request.headers.get("x-factory-control-key");
-        if (!(await sameSecret(provisioningKey, presented))) {
-          return Response.json({ ok: false, error: "not authorised to export settings" }, { status: 401 });
-        }
+      const authorised =
+        provisioningKey !== undefined &&
+        (await sameSecret(provisioningKey, request.headers.get("x-factory-control-key")));
+      if (!authorised) {
+        return Response.json({ ok: false, error: "not authorised to export settings" }, { status: 401 });
       }
       const rows = this.sql
         .exec<{ key: string; value: string; updated_at: string }>(
