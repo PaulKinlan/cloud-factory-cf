@@ -1,6 +1,8 @@
 import type { Env } from "../env";
 import { sameSecret } from "../secrets";
 import { importAppPrivateKey, mintAppJwt } from "../github-app";
+import { isRootLogin, ROOT_SESSION_LOGIN } from "../auth/tenant";
+import { handlePasskeyRoute } from "../auth/passkey";
 
 export const AUTH_LOGIN_PATH = "/auth/github/login";
 export const AUTH_CALLBACK_PATH = "/auth/github/callback";
@@ -145,8 +147,12 @@ export function sanitizeReturnTo(target: string | null | undefined, origin: stri
 export async function handleAuth(
   request: Request,
   env: Env,
-  url: URL,
+  url: URL = new URL(request.url),
 ): Promise<Response | null> {
+  if (url.pathname.startsWith("/api/auth/passkey")) {
+    return handlePasskeyRoute(request, env, url);
+  }
+
   if (url.pathname === AUTH_LOGIN_PATH) {
     return handleGithubLogin(request, env, url);
   }
@@ -159,15 +165,60 @@ export async function handleAuth(
     return handleApiRepos(request, env, url);
   }
 
+  if (url.pathname === "/api/auth/root-login" && request.method === "POST") {
+    const controlKey = env.BROKER_CONTROL_KEY;
+    if (!controlKey) {
+      return Response.json({ ok: false, error: "Root broker control key not configured on server" }, { status: 503 });
+    }
+    const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
+    if (!signingKey) {
+      return Response.json({ ok: false, error: "Signing key not configured" }, { status: 503 });
+    }
+
+    let presented = request.headers.get("x-factory-control-key");
+    if (!presented) {
+      try {
+        const body = (await request.json()) as { controlKey?: string; key?: string };
+        presented = body.controlKey ?? body.key ?? null;
+      } catch {
+        // empty body
+      }
+    }
+
+    if (!presented || !(await sameSecret(controlKey, presented))) {
+      return Response.json({ ok: false, error: "Invalid root bootstrap password / control key" }, { status: 401 });
+    }
+
+    const token = await mintSessionToken(signingKey, ROOT_SESSION_LOGIN);
+    const isSecure = url.protocol === "https:";
+    const sessionCookieHeader = `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}`;
+
+    return Response.json(
+      { ok: true, login: ROOT_SESSION_LOGIN, isRootAdmin: true },
+      { headers: { "set-cookie": sessionCookieHeader } },
+    );
+  }
+
+  if (url.pathname === "/api/auth/logout" && request.method === "POST") {
+    const isSecure = url.protocol === "https:";
+    const clearSession = `${SESSION_COOKIE}=; Path=/; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=0`;
+    return Response.json({ ok: true }, { headers: { "set-cookie": clearSession } });
+  }
+
   if (url.pathname === "/api/auth/session") {
     const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
     const session = signingKey ? await readSession(request.headers, signingKey) : { ok: false as const };
     const creds = await resolveGithubCredentials(env);
+    const isRootAdmin = Boolean(session.ok && (isRootLogin(session.login, env) || session.login === ROOT_SESSION_LOGIN));
     return Response.json({
       ok: true,
       authenticated: session.ok,
       login: session.ok ? session.login : null,
+      isRootAdmin,
       githubConfigured: Boolean(creds.clientId && creds.clientSecret),
+      appSlug: creds.appSlug ?? env.GITHUB_APP_SLUG ?? null,
+      hasControlKey: Boolean(env.BROKER_CONTROL_KEY),
+      signingConfigured: Boolean(signingKey),
     });
   }
 
@@ -178,6 +229,7 @@ export interface ResolvedGithubCredentials {
   clientId?: string;
   clientSecret?: string;
   appId?: string;
+  appSlug?: string;
   privateKey?: string;
 }
 
@@ -193,6 +245,7 @@ export async function resolveGithubCredentials(
     clientId: env.GITHUB_CLIENT_ID?.trim() || undefined,
     clientSecret: env.GITHUB_CLIENT_SECRET?.trim() || undefined,
     appId: env.GITHUB_APP_ID?.trim() || undefined,
+    appSlug: env.GITHUB_APP_SLUG?.trim() || undefined,
     privateKey: (env.GITHUB_APP_PRIVATE_KEY ?? env.GITHUB_PRIVATE_KEY)?.trim() || undefined,
   };
 
@@ -217,6 +270,7 @@ export async function resolveGithubCredentials(
         if (res.ok) {
           const data = (await res.json().catch(() => null)) as {
             appId?: string | null;
+            appSlug?: string | null;
             clientId?: string | null;
             clientSecret?: string | null;
             privateKey?: string | null;
@@ -224,6 +278,7 @@ export async function resolveGithubCredentials(
           if (!result.clientId && data?.clientId?.trim()) result.clientId = data.clientId.trim();
           if (!result.clientSecret && data?.clientSecret?.trim()) result.clientSecret = data.clientSecret.trim();
           if (!result.appId && data?.appId?.trim()) result.appId = data.appId.trim();
+          if (!result.appSlug && data?.appSlug?.trim()) result.appSlug = data.appSlug.trim();
           if (!result.privateKey && data?.privateKey?.trim()) result.privateKey = data.privateKey.trim();
         } else if (env.BROKER_CONTROL_KEY) {
           // Fallback to /settings with control key if present
@@ -232,13 +287,16 @@ export async function resolveGithubCredentials(
           });
           if (settingsRes.ok) {
             const data = (await settingsRes.json().catch(() => null)) as {
-              githubApp?: { clientId?: string; appId?: string };
+              githubApp?: { clientId?: string; appId?: string; appSlug?: string };
             } | null;
             if (!result.clientId && data?.githubApp?.clientId?.trim()) {
               result.clientId = data.githubApp.clientId.trim();
             }
             if (!result.appId && data?.githubApp?.appId?.trim()) {
               result.appId = data.githubApp.appId.trim();
+            }
+            if (!result.appSlug && data?.githubApp?.appSlug?.trim()) {
+              result.appSlug = data.githubApp.appSlug.trim();
             }
           }
         }
@@ -909,17 +967,23 @@ export async function handleApiRepos(
   if (!authorised && signingKey) {
     const session = await readSession(request.headers, signingKey);
     if (session.ok) {
-      // A browser session speaks for its own login and nobody else's: asking for another
-      // account's list is refused rather than silently answered, and an omitted owner
-      // means "my repositories" — which is the 1-click path after an OAuth return.
-      if (owner && owner.toLowerCase() !== session.login.toLowerCase()) {
-        return Response.json(
-          { ok: false, error: "not authorised to read another account's repositories" },
-          { status: 403 },
-        );
+      const isRoot = isRootLogin(session.login, env) || session.login === ROOT_SESSION_LOGIN;
+      if (isRoot) {
+        if (!owner) owner = ROOT_SESSION_LOGIN;
+        authorised = true;
+      } else {
+        // A browser session speaks for its own login and nobody else's: asking for another
+        // account's list is refused rather than silently answered, and an omitted owner
+        // means "my repositories" — which is the 1-click path after an OAuth return.
+        if (owner && owner.toLowerCase() !== session.login.toLowerCase()) {
+          return Response.json(
+            { ok: false, error: "not authorised to read another account's repositories" },
+            { status: 403 },
+          );
+        }
+        owner = session.login;
+        authorised = true;
       }
-      owner = session.login;
-      authorised = true;
     }
   }
 
@@ -928,6 +992,45 @@ export async function handleApiRepos(
       return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
     }
     return Response.json({ ok: false, error: "not authorised to access repository metadata" }, { status: 401 });
+  }
+
+  if (request.method === "POST") {
+    let body: Record<string, any> = {};
+    try {
+      body = (await request.json()) as Record<string, any>;
+    } catch {
+      return Response.json({ ok: false, error: "invalid json" }, { status: 400 });
+    }
+    const fullName = String(body.fullName || (body.name ? `${owner}/${body.name}` : "")).trim();
+    if (!fullName || !fullName.includes("/")) {
+      return Response.json({ ok: false, error: "fullName or name is required (e.g. owner/repo)" }, { status: 400 });
+    }
+    const parts = fullName.split("/");
+    const repoOwner = parts[0]!;
+    const repoName = parts[1]!;
+    const targetOrg = owner === ROOT_SESSION_LOGIN ? repoOwner : (owner || repoOwner);
+    if (!env.ORG_COORDINATOR) {
+      return Response.json({ ok: false, error: "OrgCoordinator is not configured" }, { status: 503 });
+    }
+    const org = env.ORG_COORDINATOR.get(env.ORG_COORDINATOR.idFromName(targetOrg));
+    const addRes = await org.fetch("https://org-coordinator.internal/installations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountLogin: targetOrg,
+        repos: [
+          {
+            fullName,
+            owner: repoOwner,
+            name: repoName,
+            private: Boolean(body.private ?? body.isPrivate),
+            defaultBranch: body.defaultBranch || "main",
+          },
+        ],
+      }),
+    });
+    const addData = await addRes.json();
+    return Response.json(addData, { status: addRes.status });
   }
 
   if (request.method !== "GET") {
@@ -941,13 +1044,26 @@ export async function handleApiRepos(
     );
   }
 
+  if (owner === ROOT_SESSION_LOGIN) {
+    return Response.json({ ok: true, org: ROOT_SESSION_LOGIN, count: 0, repositories: [] });
+  }
+
   if (!env.ORG_COORDINATOR) {
     return Response.json({ ok: false, error: "OrgCoordinator is not configured" }, { status: 503 });
   }
 
   const orgCoordinator = env.ORG_COORDINATOR.get(env.ORG_COORDINATOR.idFromName(owner));
   const reposRes = await orgCoordinator.fetch("https://org-coordinator.internal/repos");
-  const data = await reposRes.json();
+  const data = (await reposRes.json().catch(() => ({}))) as { ok?: boolean; count?: number; repositories?: unknown[] };
+
+  if ((!data.repositories || data.repositories.length === 0) && owner !== owner.toLowerCase()) {
+    const lowerOrgCoordinator = env.ORG_COORDINATOR.get(env.ORG_COORDINATOR.idFromName(owner.toLowerCase()));
+    const lowerRes = await lowerOrgCoordinator.fetch("https://org-coordinator.internal/repos");
+    const lowerData = (await lowerRes.json().catch(() => ({}))) as { ok?: boolean; count?: number; repositories?: unknown[] };
+    if (lowerData.repositories && lowerData.repositories.length > 0) {
+      return Response.json(lowerData, { status: lowerRes.status });
+    }
+  }
 
   return Response.json(data, { status: reposRes.status });
 }

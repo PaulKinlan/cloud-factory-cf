@@ -1,10 +1,14 @@
 import type { Env } from "../env";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
-import { authorizeControlPlane, authzDenial } from "../auth/tenant";
+import { authorizeControlPlane, authzDenial, ROOT_SESSION_LOGIN, isRootLogin } from "../auth/tenant";
 import { mintDelegation } from "../auth/delegation";
+import { readSession } from "./auth";
 
 export const ADMIN_SETTINGS_PATH = /^\/api\/admin\/settings\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
 export const ADMIN_PING_PATH = /^\/api\/admin\/test-ping\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
+export const ADMIN_USER_SETTINGS_PATH = /^\/api\/admin\/user-settings(?:\/(?<owner>[^/]+))?$/;
+export const ADMIN_SYSTEM_PATH = "/api/admin/system";
+export const ADMIN_SYSTEM_PING_PATH = "/api/admin/system/test-ping";
 
 export async function handleAdmin(
   request: Request,
@@ -22,14 +26,31 @@ export async function handleAdmin(
     return env.ASSETS.fetch(assetReq);
   }
 
-  // 2. /api/admin/settings/:owner/:repo
+  // 2. /api/admin/system (Root System Settings)
+  if (url.pathname === ADMIN_SYSTEM_PATH) {
+    return routeAdminSystem(request, env);
+  }
+
+  // 3. /api/admin/system/test-ping (Root System Webhook Ping)
+  if (url.pathname === ADMIN_SYSTEM_PING_PATH) {
+    return routeAdminSystemTestPing(request, env, url);
+  }
+
+  // 4. /api/admin/user-settings and /api/admin/user-settings/:owner
+  const userSettingsMatch = ADMIN_USER_SETTINGS_PATH.exec(url.pathname);
+  if (userSettingsMatch) {
+    const owner = userSettingsMatch.groups?.owner ?? url.searchParams.get("owner");
+    return routeAdminUserSettings(request, env, owner, url.search);
+  }
+
+  // 5. /api/admin/settings/:owner/:repo
   const settingsMatch = ADMIN_SETTINGS_PATH.exec(url.pathname);
   if (settingsMatch?.groups) {
     const { owner, repo } = settingsMatch.groups as { owner: string; repo: string };
     return routeAdminSettings(request, env, owner, repo, url.search);
   }
 
-  // 3. /api/admin/test-ping/:owner/:repo
+  // 6. /api/admin/test-ping/:owner/:repo
   const pingMatch = ADMIN_PING_PATH.exec(url.pathname);
   if (pingMatch?.groups) {
     const { owner, repo } = pingMatch.groups as { owner: string; repo: string };
@@ -200,6 +221,233 @@ export async function routeAdminTestPing(
     repository,
     message: ok ? "Test ping delivered and verified by RepoCoordinator" : "Test ping rejected by RepoCoordinator",
   });
+}
+
+export async function routeAdminSystem(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const authz = await authorizeControlPlane(request, env);
+  let isRoot = authz.ok && authz.principal.via === "control-key";
+
+  if (authz.ok && authz.principal.via === "session") {
+    const login = authz.principal.login;
+    if (login === ROOT_SESSION_LOGIN || isRootLogin(login, env)) {
+      isRoot = true;
+    } else if (env.CREDENTIAL_BROKER) {
+      // Check if session login is in default broker's platform.owners setting
+      try {
+        const defaultStub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
+        const settingRes = await defaultStub.fetch("https://credential-broker.internal/internal-setting?key=platform.owners");
+        if (settingRes.ok) {
+          const data = (await settingRes.json().catch(() => null)) as { ok?: boolean; value?: string | null } | null;
+          const owners = (data?.value || "")
+            .split(",")
+            .map((s) => s.trim().toLowerCase())
+            .filter(Boolean);
+          if (owners.includes(login.toLowerCase())) {
+            isRoot = true;
+          }
+        }
+      } catch {
+        // ignore check failure
+      }
+    }
+  }
+
+  if (!isRoot) {
+    return authzDenial(
+      { ok: false, reason: "cross-tenant" },
+      { "cross-tenant": "Root administrator privileges required" },
+    );
+  }
+
+  if (!env.CREDENTIAL_BROKER) {
+    return Response.json({ ok: false, error: "CredentialBroker is not configured" }, { status: 503 });
+  }
+
+  const defaultStub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
+  const headers = new Headers({ "content-type": "application/json" });
+  if (env.BROKER_CONTROL_KEY) {
+    headers.set("x-factory-control-key", env.BROKER_CONTROL_KEY);
+  } else if (authz.ok && authz.principal.via === "session") {
+    const delegation = await mintDelegation(env, { repository: "default", login: authz.principal.login });
+    if (delegation) headers.set("x-factory-delegation", delegation);
+  }
+
+  let bodyText: string | undefined = undefined;
+  if (request.method === "POST" || request.method === "DELETE") {
+    bodyText = await request.text();
+  }
+
+  const forwarded = new Request(`https://credential-broker.internal/settings`, {
+    method: request.method,
+    headers,
+    body: bodyText,
+  });
+
+  return defaultStub.fetch(forwarded);
+}
+
+export async function routeAdminSystemTestPing(
+  request: Request,
+  env: Env,
+  url: URL,
+): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("method not allowed", { status: 405 });
+  }
+
+  const authz = await authorizeControlPlane(request, env);
+  let isRoot = authz.ok && authz.principal.via === "control-key";
+  if (authz.ok && authz.principal.via === "session") {
+    const login = authz.principal.login;
+    if (login === ROOT_SESSION_LOGIN || isRootLogin(login, env)) isRoot = true;
+  }
+
+  if (!isRoot) {
+    return authzDenial(
+      { ok: false, reason: "cross-tenant" },
+      { "cross-tenant": "Root administrator privileges required" },
+    );
+  }
+
+  let secret: string | undefined = undefined;
+  if (env.CREDENTIAL_BROKER) {
+    try {
+      const defaultStub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
+      const res = await defaultStub.fetch("https://credential-broker.internal/effective-webhook-secret");
+      if (res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { secret?: string };
+        if (typeof data.secret === "string" && data.secret.length > 0) secret = data.secret;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!secret) secret = env.WEBHOOK_SECRET;
+
+  if (!secret) {
+    return Response.json(
+      { ok: false, error: "System webhook secret is not configured" },
+      { status: 503 },
+    );
+  }
+
+  const deliveryId = `sys-ping-${crypto.randomUUID().slice(0, 8)}`;
+  const payload = JSON.stringify({
+    zen: "Encourage kindness and clear boundaries.",
+    hook_id: 99999999,
+    hook: {
+      type: "App",
+      id: 99999999,
+      name: "system-webhook",
+      active: true,
+      events: ["ping", "push", "pull_request"],
+      config: {
+        content_type: "json",
+        url: `${url.origin}/webhooks/github`,
+        insecure_ssl: "0",
+      },
+    },
+    sender: { login: "root-admin" },
+  });
+
+  const signature = await signHmacSha256(secret, payload);
+  const coordinator = getRepoCoordinator(env, "system/health", "github");
+  const webhookReq = new Request("https://repo-coordinator.internal/events?provider=github", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-factory-repository": "system/health",
+      "x-github-event": "ping",
+      "x-github-delivery": deliveryId,
+      "x-hub-signature-256": signature,
+    },
+    body: payload,
+  });
+
+  const webhookRes = await coordinator.fetch(webhookReq);
+  const ok = webhookRes.ok || webhookRes.status === 202;
+
+  return Response.json({
+    ok,
+    status: webhookRes.status,
+    deliveryId,
+    message: ok ? "System webhook test ping verified by RepoCoordinator" : "System webhook test ping rejected",
+  });
+}
+
+export async function routeAdminUserSettings(
+  request: Request,
+  env: Env,
+  ownerParam?: string | null,
+  search = "",
+): Promise<Response> {
+  let owner = ownerParam?.trim();
+  if (!owner) {
+    const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
+    if (signingKey) {
+      const session = await readSession(request.headers, signingKey);
+      if (session.ok) owner = session.login;
+    }
+  }
+
+  if (!owner) {
+    return Response.json({ ok: false, error: "owner / account parameter or active session required" }, { status: 400 });
+  }
+
+  const authz = await authorizeControlPlane(request, env, { owner });
+  if (!authz.ok) {
+    return authzDenial(authz, {
+      unauthorised: "not authorised to manage user settings",
+      "cross-tenant": "not authorised to manage settings for another user",
+    });
+  }
+
+  if (!env.CREDENTIAL_BROKER) {
+    return Response.json({ ok: false, error: "CredentialBroker is not configured" }, { status: 503 });
+  }
+
+  const targetRepo = owner.toLowerCase();
+  const brokerStub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(targetRepo));
+  const headers = new Headers({ "content-type": "application/json" });
+
+  const controlKey = request.headers.get("x-factory-control-key");
+  if (controlKey !== null) {
+    headers.set("x-factory-control-key", controlKey);
+  } else if (authz.principal.via === "session") {
+    const delegation = await mintDelegation(env, { repository: targetRepo, login: authz.principal.login });
+    if (delegation) headers.set("x-factory-delegation", delegation);
+  }
+
+  let bodyText: string | undefined = undefined;
+  if (request.method === "POST" || request.method === "DELETE") {
+    bodyText = await request.text();
+  }
+
+  // Mirror to canonical casing broker if casing differs
+  if (request.method === "POST" && bodyText && targetRepo !== owner) {
+    try {
+      const canonicalStub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(owner));
+      await canonicalStub.fetch("https://credential-broker.internal/settings", {
+        method: "POST",
+        headers,
+        body: bodyText,
+      }).catch(() => null);
+    } catch {
+      // ignore
+    }
+  }
+
+  const forwarded = new Request(`https://credential-broker.internal/settings${search}`, {
+    method: request.method,
+    headers,
+    body: bodyText,
+  });
+
+  return brokerStub.fetch(forwarded);
 }
 
 async function signHmacSha256(secret: string, body: string): Promise<string> {

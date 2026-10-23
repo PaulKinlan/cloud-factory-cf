@@ -91,23 +91,104 @@ export class CredentialBroker extends DurableObject<Env> {
     if (url.pathname === "/settings") {
       return this.handleSettings(request);
     }
+    if (request.method === "GET" && url.pathname === "/internal-setting") {
+      const key = url.searchParams.get("key");
+      return Response.json({ ok: true, value: key ? this.getSetting(key) : null });
+    }
+    if (request.method === "GET" && url.pathname === "/passkeys") {
+      const id = url.searchParams.get("id");
+      const subject = url.searchParams.get("subject");
+      let query = "SELECT credential_id, subject, role, public_key_spki, algorithm, label, created_at, last_used_at FROM passkey_credentials";
+      const params: string[] = [];
+      if (id) {
+        query += " WHERE credential_id = ?";
+        params.push(id);
+      } else if (subject) {
+        query += " WHERE subject = ?";
+        params.push(subject);
+      }
+      query += " ORDER BY created_at DESC";
+      const rows = this.sql.exec<any>(query, ...params).toArray();
+      return Response.json({
+        ok: true,
+        count: rows.length,
+        passkeys: rows.map((r) => ({
+          credentialId: r.credential_id,
+          subject: r.subject,
+          role: r.role,
+          publicKeySpki: r.public_key_spki,
+          algorithm: Number(r.algorithm),
+          label: r.label,
+          createdAt: r.created_at,
+          lastUsedAt: r.last_used_at,
+        })),
+      });
+    }
+    if (request.method === "POST" && url.pathname === "/passkeys") {
+      const body = (await readJson(request)) as Record<string, any>;
+      const { credentialId, subject, role, publicKeySpki, algorithm, label } = body;
+      if (!credentialId || !subject || !publicKeySpki) {
+        return Response.json({ ok: false, error: "missing required passkey fields" }, { status: 400 });
+      }
+      const now = new Date().toISOString();
+      this.sql.exec(
+        `INSERT INTO passkey_credentials (credential_id, subject, role, public_key_spki, algorithm, label, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (credential_id) DO UPDATE SET
+           subject = excluded.subject,
+           role = excluded.role,
+           public_key_spki = excluded.public_key_spki,
+           algorithm = excluded.algorithm,
+           label = excluded.label`,
+        String(credentialId),
+        String(subject),
+        String(role ?? "user"),
+        String(publicKeySpki),
+        Number(algorithm ?? -7),
+        String(label ?? "Passkey"),
+        now,
+      );
+      return Response.json({ ok: true, credentialId });
+    }
+    if (request.method === "POST" && url.pathname === "/passkeys/touch") {
+      const body = (await readJson(request)) as Record<string, any>;
+      const id = String(body?.credentialId ?? "");
+      if (id) {
+        this.sql.exec(`UPDATE passkey_credentials SET last_used_at = ? WHERE credential_id = ?`, new Date().toISOString(), id);
+      }
+      return Response.json({ ok: true });
+    }
+    if (request.method === "DELETE" && url.pathname === "/passkeys") {
+      const id = url.searchParams.get("id");
+      const subject = url.searchParams.get("subject");
+      if (id) {
+        if (subject) {
+          this.sql.exec(`DELETE FROM passkey_credentials WHERE credential_id = ? AND subject = ?`, id, subject);
+        } else {
+          this.sql.exec(`DELETE FROM passkey_credentials WHERE credential_id = ?`, id);
+        }
+        return Response.json({ ok: true, deleted: id });
+      }
+      return Response.json({ ok: false, error: "missing id" }, { status: 400 });
+    }
     if (url.pathname === "/effective-webhook-secret") {
-      const stored = this.getSetting("webhook.secret");
-      const effective = stored ?? this.env.WEBHOOK_SECRET ?? null;
+      const effective = (await this.resolveEffectiveSetting("webhook.secret")) ?? this.env.WEBHOOK_SECRET ?? null;
       if (!effective) {
         return Response.json({ ok: false, error: "no webhook secret configured" }, { status: 503 });
       }
       return Response.json({ ok: true, secret: effective });
     }
     if (url.pathname === "/effective-github-app") {
-      const appId = this.getSetting("github.app_id") || this.env.GITHUB_APP_ID || null;
-      const clientId = this.getSetting("github.client_id") || this.env.GITHUB_CLIENT_ID || null;
-      const clientSecret = this.getSetting("github.client_secret") || this.env.GITHUB_CLIENT_SECRET || null;
-      const privateKey = this.getSetting("github.private_key") || this.env.GITHUB_PRIVATE_KEY || null;
-      const webhookSecret = this.getSetting("webhook.secret") || this.env.WEBHOOK_SECRET || null;
+      const appId = (await this.resolveEffectiveSetting("github.app_id")) || this.env.GITHUB_APP_ID || null;
+      const appSlug = (await this.resolveEffectiveSetting("github.app_slug")) || this.env.GITHUB_APP_SLUG || null;
+      const clientId = (await this.resolveEffectiveSetting("github.client_id")) || this.env.GITHUB_CLIENT_ID || null;
+      const clientSecret = (await this.resolveEffectiveSetting("github.client_secret")) || this.env.GITHUB_CLIENT_SECRET || null;
+      const privateKey = (await this.resolveEffectiveSetting("github.private_key")) || this.env.GITHUB_PRIVATE_KEY || null;
+      const webhookSecret = (await this.resolveEffectiveSetting("webhook.secret")) || this.env.WEBHOOK_SECRET || null;
       return Response.json({
         ok: true,
         appId,
+        appSlug,
         clientId,
         clientSecret,
         privateKey,
@@ -194,6 +275,22 @@ export class CredentialBroker extends DurableObject<Env> {
         value TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+    `);
+    // WebAuthn Passkeys registered for Root Admin and Users
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS passkey_credentials (
+        credential_id TEXT PRIMARY KEY,
+        subject TEXT NOT NULL,
+        role TEXT NOT NULL,
+        public_key_spki TEXT NOT NULL,
+        algorithm INTEGER NOT NULL,
+        label TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+      );
+    `);
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS passkey_subject_idx ON passkey_credentials (subject);
     `);
   }
 
@@ -370,11 +467,25 @@ export class CredentialBroker extends DurableObject<Env> {
         ? (body.params as Record<string, unknown>)
         : undefined;
 
+    // Pre-resolve credentials for the target service before executing signed request (repo -> user -> default -> env)
+    const envForService = credentialEnvFor(service);
+    let resolvedCredentialValue: string | undefined = undefined;
+    if (envForService) {
+      const settingKey = this.settingKeyForEnv(envForService);
+      if (settingKey) {
+        const val = await this.resolveEffectiveSetting(settingKey);
+        if (val) resolvedCredentialValue = val;
+      }
+    }
+
     const outcome = await executeSignedRequest(
       { service, action, repository: this.repository, params },
       {
         fetchImpl: fetch,
         readCredential: (envName) => {
+          if (envForService && envName === envForService && resolvedCredentialValue) {
+            return resolvedCredentialValue;
+          }
           const settingKey = this.settingKeyForEnv(envName);
           if (settingKey) {
             const stored = this.getSetting(settingKey);
@@ -868,11 +979,23 @@ export class CredentialBroker extends DurableObject<Env> {
         repository: this.repository,
         githubApp: {
           appId,
+          appSlug: settingsMap.get("github.app_slug") || this.env.GITHUB_APP_SLUG || "",
           clientId,
           hasClientSecret: clientSecret.length > 0,
           clientSecretMasked: maskSecret(clientSecret),
           hasPrivateKey: privateKey.length > 0,
           privateKeyFingerprint: privateKey ? await computePemFingerprint(privateKey) : null,
+        },
+        customers: {
+          allowAllGithubUsers: settingsMap.get("customers.allow_all") === "true",
+          allowedUsers: (settingsMap.get("customers.allowed_users") || "")
+            .split(",")
+            .map((s: string) => s.trim())
+            .filter(Boolean),
+          platformOwners: (settingsMap.get("platform.owners") || this.env.PLATFORM_OWNERS || "")
+            .split(",")
+            .map((s: string) => s.trim())
+            .filter(Boolean),
         },
         aiProviders: {
           anthropic: {
@@ -911,10 +1034,14 @@ export class CredentialBroker extends DurableObject<Env> {
       const updatedKeys: string[] = [];
 
       if (body.githubApp && typeof body.githubApp === "object") {
-        const { appId, clientId, clientSecret, privateKey } = body.githubApp;
+        const { appId, appSlug, clientId, clientSecret, privateKey } = body.githubApp;
         if (typeof appId === "string") {
           this.setSetting("github.app_id", appId.trim(), now);
           updatedKeys.push("github.app_id");
+        }
+        if (typeof appSlug === "string") {
+          this.setSetting("github.app_slug", appSlug.trim(), now);
+          updatedKeys.push("github.app_slug");
         }
         if (typeof clientId === "string") {
           this.setSetting("github.client_id", clientId.trim(), now);
@@ -1013,6 +1140,23 @@ export class CredentialBroker extends DurableObject<Env> {
         updatedKeys.push("webhook.secret");
       }
 
+      if (body.customers && typeof body.customers === "object") {
+        if (typeof body.customers.allowAllGithubUsers === "boolean") {
+          this.setSetting("customers.allow_all", String(body.customers.allowAllGithubUsers), now);
+          updatedKeys.push("customers.allow_all");
+        }
+        if (Array.isArray(body.customers.allowedUsers)) {
+          const list = body.customers.allowedUsers.map((u: unknown) => String(u).trim()).filter(Boolean);
+          this.setSetting("customers.allowed_users", list.join(","), now);
+          updatedKeys.push("customers.allowed_users");
+        }
+        if (Array.isArray(body.customers.platformOwners)) {
+          const owners = body.customers.platformOwners.map((o: unknown) => String(o).trim()).filter(Boolean);
+          this.setSetting("platform.owners", owners.join(","), now);
+          updatedKeys.push("platform.owners");
+        }
+      }
+
       return Response.json({ ok: true, updated: updatedKeys });
     }
 
@@ -1062,6 +1206,48 @@ export class CredentialBroker extends DurableObject<Env> {
       .exec<{ value: string }>(`SELECT value FROM repo_settings WHERE key = ?`, key)
       .toArray();
     return rows.length > 0 && rows[0] ? rows[0].value : null;
+  }
+
+  private async resolveEffectiveSetting(key: string): Promise<string | null> {
+    const direct = this.getSetting(key);
+    if (direct !== null && direct.length > 0) return direct;
+
+    const repoStr = this.repository;
+    const cleanRepo = repoStr.includes(":") ? repoStr.split(":")[1]! : repoStr;
+    if (cleanRepo && cleanRepo.includes("/")) {
+      const owner = cleanRepo.split("/")[0]!;
+      if (owner && this.env.CREDENTIAL_BROKER) {
+        try {
+          const ownerStub = this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(owner.toLowerCase()));
+          const res = await ownerStub.fetch(`https://credential-broker.internal/internal-setting?key=${encodeURIComponent(key)}`);
+          if (res.ok) {
+            const data = (await res.json().catch(() => null)) as { ok?: boolean; value?: string | null } | null;
+            if (data?.ok && typeof data.value === "string" && data.value.length > 0) {
+              return data.value;
+            }
+          }
+        } catch {
+          // ignore lookup failure
+        }
+      }
+    }
+
+    if (repoStr !== "default" && this.env.CREDENTIAL_BROKER) {
+      try {
+        const defaultStub = this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName("default"));
+        const res = await defaultStub.fetch(`https://credential-broker.internal/internal-setting?key=${encodeURIComponent(key)}`);
+        if (res.ok) {
+          const data = (await res.json().catch(() => null)) as { ok?: boolean; value?: string | null } | null;
+          if (data?.ok && typeof data.value === "string" && data.value.length > 0) {
+            return data.value;
+          }
+        }
+      } catch {
+        // ignore lookup failure
+      }
+    }
+
+    return null;
   }
 }
 

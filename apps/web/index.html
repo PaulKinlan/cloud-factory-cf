@@ -191,9 +191,13 @@
         repository's webhook at the URL below — GitHub sends a ping the moment the hook is created.
       </p>
       <div class="share-form">
-        <div class="connect-oauth-row">
+        <div class="connect-oauth-row" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
           <a id="connect-oauth" class="button button--agent" href="/auth/github/login">Connect with GitHub (1-Click)</a>
-          <select id="connect-repo-select" class="field__control" hidden>
+          <button type="button" id="connect-passkey" class="button button--ghost">🔑 Sign in with Passkey</button>
+        </div>
+        <div class="connect-filter-row" style="margin-top:10px;">
+          <input id="connect-repo-filter" class="field__control" type="text" placeholder="Filter repositories by name or org..." />
+          <select id="connect-repo-select" class="field__control" style="margin-top:6px;" hidden>
             <option value="">-- Choose an authorized repository --</option>
           </select>
         </div>

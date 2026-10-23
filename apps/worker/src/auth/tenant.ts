@@ -86,6 +86,19 @@ export function sessionMayAddressPlatform(
   return platform.toLowerCase() === "github";
 }
 
+export const ROOT_SESSION_LOGIN = "__root__";
+
+export function isRootLogin(login: string, env: Env): boolean {
+  if (login.toLowerCase() === ROOT_SESSION_LOGIN) return true;
+  const rawOwners = env.PLATFORM_OWNERS ?? (env as unknown as { ROOT_ADMIN_LOGINS?: string }).ROOT_ADMIN_LOGINS;
+  if (!rawOwners) return false;
+  const owners = rawOwners
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return owners.includes(login.toLowerCase());
+}
+
 /**
  * Authorises a control-plane request. The machine key is checked first so its contract
  * (any tenant) is unchanged; a session is only consulted when that fails.
@@ -105,6 +118,9 @@ export async function authorizeControlPlane(
   if (signingKey) {
     const session = await readSession(request.headers, signingKey);
     if (session.ok) {
+      if (isRootLogin(session.login, env)) {
+        return { ok: true, principal: { via: "control-key" } };
+      }
       const owner = options.owner;
       if (owner !== undefined && owner.toLowerCase() !== session.login.toLowerCase()) {
         return { ok: false, reason: "cross-tenant" };

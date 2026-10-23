@@ -137,6 +137,8 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
   const statusNode = $<HTMLParagraphElement>("#connect-status");
   const announcer = $<HTMLSpanElement>("#connect-announcer");
   const repoSelect = $<HTMLSelectElement>("#connect-repo-select");
+  const repoFilterInput = $<HTMLInputElement>("#connect-repo-filter");
+  const passkeyButton = $<HTMLButtonElement>("#connect-passkey");
   if (pill === null || dialog === null) return null;
 
   const base = options.base ?? (typeof window === "undefined" ? "" : window.location.origin);
@@ -222,6 +224,21 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     pill?.setAttribute("aria-expanded", "true");
     dialog?.showModal();
     ownerInput?.focus();
+    const currentOwner = ownerInput?.value.trim() ?? "";
+    if (currentOwner && loadedRepos.length === 0) {
+      void loadAuthorizedRepos(currentOwner);
+    } else if (!currentOwner) {
+      void (options.fetchImpl ?? fetch)(`${base}/api/auth/session`, { credentials: "same-origin" })
+        .then((r) => (r.ok ? (r.json() as Promise<{ authenticated?: boolean; login?: string }>) : null))
+        .then((s) => {
+          if (s?.authenticated && s.login && s.login !== "__root__" && ownerInput && !ownerInput.value.trim()) {
+            ownerInput.value = s.login;
+            applyScope(readScope());
+            void loadAuthorizedRepos(s.login);
+          }
+        })
+        .catch(() => {});
+    }
     // The check decides whether polling may run: a refused key must not leave a
     // timer behind, so start only once the answer is in (and it was not a 401).
     void poller.check().finally(() => {
@@ -325,6 +342,127 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
   applyScope(readScope());
   setStatus("Not checked yet", "muted");
 
+  let loadedRepos: Array<{ fullName: string; owner: string; name: string }> = [];
+
+  function renderRepoSelectOptions(): void {
+    if (repoSelect === null) return;
+    const filter = repoFilterInput?.value.trim().toLowerCase() ?? "";
+    const filtered = filter
+      ? loadedRepos.filter((r) => r.fullName.toLowerCase().includes(filter))
+      : loadedRepos;
+    repoSelect.innerHTML = '<option value="">-- Choose an authorized repository --</option>';
+    const doc = (root as Document).createElement ? (root as Document) : (root.ownerDocument ?? (typeof document !== "undefined" ? document : null));
+    for (const r of filtered) {
+      const opt = doc ? doc.createElement("option") : document.createElement("option");
+      opt.value = r.fullName;
+      opt.textContent = r.fullName;
+      repoSelect.appendChild(opt);
+    }
+    repoSelect.hidden = false;
+  }
+
+  repoFilterInput?.addEventListener("input", () => {
+    renderRepoSelectOptions();
+  });
+
+  function bufferToBase64url(buffer: ArrayBuffer): string {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  function base64urlToBuffer(base64url: string): ArrayBuffer {
+    const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = base64.length % 4 ? "=".repeat(4 - (base64.length % 4)) : "";
+    const binary = atob(base64 + pad);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+  }
+
+  passkeyButton?.addEventListener("click", async () => {
+    if (typeof navigator === "undefined" || !navigator.credentials) {
+      setStatus("Passkeys not supported in this browser", "warn");
+      return;
+    }
+    try {
+      setStatus("Requesting passkey assertion...", "muted");
+      const login = ownerInput?.value.trim() || undefined;
+      const optRes = await (options.fetchImpl ?? fetch)(`${base}/api/auth/passkey/login/options`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ login }),
+        credentials: "same-origin",
+      });
+      if (!optRes.ok) {
+        setStatus(`Passkey challenge failed (${optRes.status})`, "warn");
+        return;
+      }
+      const optData = (await optRes.json()) as {
+        options?: {
+          challenge: string;
+          timeout?: number;
+          rpId?: string;
+          allowCredentials?: Array<{ id: string; type: "public-key" }>;
+          userVerification?: UserVerificationRequirement;
+        };
+        publicKey?: {
+          challenge: string;
+          timeout?: number;
+          rpId?: string;
+          allowCredentials?: Array<{ id: string; type: "public-key" }>;
+          userVerification?: UserVerificationRequirement;
+        };
+      };
+      const rawOptions = optData.options ?? optData.publicKey;
+      if (!rawOptions) {
+        setStatus("Failed to get Passkey options", "warn");
+        return;
+      }
+      const publicKey = {
+        ...rawOptions,
+        challenge: base64urlToBuffer(rawOptions.challenge),
+        allowCredentials: rawOptions.allowCredentials?.map((c) => ({
+          ...c,
+          id: base64urlToBuffer(c.id),
+        })),
+      };
+      const assertion = (await navigator.credentials.get({ publicKey })) as PublicKeyCredential | null;
+      if (!assertion) {
+        setStatus("Passkey authentication canceled", "muted");
+        return;
+      }
+      const rawResponse = assertion.response as AuthenticatorAssertionResponse;
+      const verifyRes = await (options.fetchImpl ?? fetch)(`${base}/api/auth/passkey/login/verify`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          credentialId: bufferToBase64url(assertion.rawId),
+          authenticatorData: bufferToBase64url(rawResponse.authenticatorData),
+          clientDataJSON: bufferToBase64url(rawResponse.clientDataJSON),
+          signature: bufferToBase64url(rawResponse.signature),
+        }),
+        credentials: "same-origin",
+      });
+      const verifyData = (await verifyRes.json().catch(() => ({}))) as { ok?: boolean; login?: string; error?: string };
+      if (verifyRes.ok && verifyData.ok) {
+        setStatus(`Signed in with Passkey (${verifyData.login})`, "ok");
+        if (verifyData.login && verifyData.login !== "__root__" && ownerInput) {
+          ownerInput.value = verifyData.login;
+          applyScope(readScope());
+          void loadAuthorizedRepos(verifyData.login);
+        } else if (ownerInput?.value.trim()) {
+          void loadAuthorizedRepos(ownerInput.value.trim());
+        }
+      } else {
+        setStatus(verifyData.error ?? "Passkey verification failed", "warn");
+      }
+    } catch (err: unknown) {
+      setStatus(`Passkey error: ${err instanceof Error ? err.message : String(err)}`, "warn");
+    }
+  });
+
   async function loadAuthorizedRepos(owner: string): Promise<void> {
     if (!owner || repoSelect === null) return;
     try {
@@ -352,16 +490,9 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
         ok?: boolean;
         repositories?: Array<{ fullName: string; owner: string; name: string }>;
       };
-      if (data.ok && Array.isArray(data.repositories) && data.repositories.length > 0) {
-        repoSelect.innerHTML = '<option value="">-- Choose an authorized repository --</option>';
-        const doc = (root as Document).createElement ? (root as Document) : (root.ownerDocument ?? (typeof document !== "undefined" ? document : null));
-        for (const r of data.repositories) {
-          const opt = doc ? doc.createElement("option") : document.createElement("option");
-          opt.value = r.fullName;
-          opt.textContent = r.fullName;
-          repoSelect.appendChild(opt);
-        }
-        repoSelect.hidden = false;
+      if (data.ok && Array.isArray(data.repositories)) {
+        loadedRepos = data.repositories;
+        renderRepoSelectOptions();
       }
     } catch {
       // Ignore network errors loading authorized repos
