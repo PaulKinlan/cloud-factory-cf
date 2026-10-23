@@ -135,14 +135,17 @@ every socket in the workspace, and that discovery is a security control:
   under `node_modules`, `.git` or `target` is masked like any other. (The first version
   of this fix pruned those trees to stay fast and left a reproducible escape — a socket
   in a pruned directory was never masked, cloud-factory-cf-5vuu.)
+- the table names a socket by the path `bind()` was given, which is not the path the
+  sandbox dials, so three shapes are resolved before masking: `..` is normalised
+  (`bind("/tmp/o/../workspace/x.sock")` is a workspace socket); a row outside the tree is
+  `realpath`-checked and, if it reaches into the workspace through a symlinked directory,
+  masked **at its real workspace path** (masking the bound name would leave the workspace
+  route open — both reproduced with real bubblewrap); and a relative row, which cannot be
+  placed at all, costs one complete walk for that command (cloud-factory-cf-khu9).
 - it is **re-run for every command**, so a socket that appears later is still masked
   (a cache would silently unmask it — cloud-factory-cf-vy8o).
-- one row the table cannot place is a **relative pathname**: `bind("relative.sock")` from
-  a cwd inside the workspace is legal, and the kernel records the name verbatim with no
-  leading slash, so that path cannot be located from the row (cloud-factory-cf-khu9). A
-  table containing any such row costs one complete walk for that command (the walk finds
-  the real file by inode); a host with none pays nothing — measured on this VM: 0
-  relative against 48 absolute and 5 abstract rows.
+- a table with no such row costs nothing extra — measured on this VM: 0 relative against
+  48 absolute and 5 abstract rows, so the walk path is the exception.
 - on a host with no socket table it falls back to a **complete-or-refuse** directory
   walk (`socketScan: { timeoutMs = 5000, maxDirs = 20000, maxDepth = 32 }`). If the
   walk cannot finish — budget, unreadable directory, too deep — the command is

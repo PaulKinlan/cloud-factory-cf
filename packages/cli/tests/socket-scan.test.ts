@@ -232,3 +232,71 @@ test('scanWorkspaceSockets: a relative row forces the complete walk and still fi
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+
+test('analyseSocketTable: an absolute path with ".." is normalised into the workspace', () => {
+  const table = [
+    HEADER,
+    '0000000000000000: 00000002 00000000 00010000 0001 01 1 /srv/other/../app/host.sock',
+    '0000000000000000: 00000002 00000000 00010000 0001 01 2 /srv/app/sub/../../elsewhere/x.sock',
+  ].join('\n');
+
+  const analysis = analyseSocketTable(table, '/srv/app');
+  // The kernel keeps the pathname `bind()` received, so the first row is a socket inside
+  // the workspace that a plain string-prefix test would have discarded.
+  assert.deepEqual(analysis.sockets, ['/srv/app/host.sock']);
+  assert.deepEqual(analysis.outside, ['/srv/elsewhere/x.sock']);
+});
+
+test('scanWorkspaceSockets: a socket bound through a symlink into the workspace is found', async () => {
+  const base = await tempWorkspace('fc-scan-symlink-');
+  const root = path.join(base, 'workspace');
+  const outside = path.join(base, 'outside');
+  await fs.mkdir(root, { recursive: true });
+  await fs.mkdir(outside, { recursive: true });
+  await fs.symlink(root, path.join(outside, 'link'));
+  const close = await listenUnixSocket(path.join(root, 'host.sock'));
+  try {
+    // Bound as `/base/outside/link/host.sock`: lexically outside the workspace, but the
+    // same file, and the same bind mount masks it (mount targets resolve symlinks).
+    const tablePath = path.join(base, 'table');
+    await fs.writeFile(
+      tablePath,
+      [
+        HEADER,
+        `0000000000000000: 00000002 00000000 00010000 0001 01 1 ${path.join(outside, 'link', 'host.sock')}`,
+      ].join('\n'),
+    );
+
+    const result = await scanWorkspaceSockets(root, { tablePath });
+    assert.equal(result.source, 'proc');
+    // The realpath is what gets masked: that is the path the sandbox would dial.
+    assert.deepEqual(result.sockets, [path.join(root, 'host.sock')]);
+  } finally {
+    await close();
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('scanWorkspaceSockets: an unrelated host socket outside the workspace is left alone', async () => {
+  const base = await tempWorkspace('fc-scan-unrelated-');
+  const root = path.join(base, 'workspace');
+  await fs.mkdir(root, { recursive: true });
+  const outsideSock = path.join(base, 'other.sock');
+  const close = await listenUnixSocket(outsideSock);
+  try {
+    const tablePath = path.join(base, 'table');
+    await fs.writeFile(
+      tablePath,
+      [HEADER, `0000000000000000: 00000002 00000000 00010000 0001 01 1 ${outsideSock}`].join('\n'),
+    );
+
+    const result = await scanWorkspaceSockets(root, { tablePath });
+    // Masking is a workspace control, not a system-wide one: an unrelated socket (an
+    // ssh-agent, say) must stay usable.
+    assert.deepEqual(result.sockets, []);
+  } finally {
+    await close();
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});

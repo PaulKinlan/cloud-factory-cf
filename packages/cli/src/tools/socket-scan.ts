@@ -95,8 +95,15 @@ const FIX_HINT =
 const SOCKET_TABLE_ROW = /^\s*[0-9a-fA-F]+:\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\d+\s+(.*)$/;
 
 export interface SocketTableAnalysis {
-  /** Sockets the table places inside the workspace, by absolute path. */
+  /** Sockets the table places inside the workspace, by normalised absolute path. */
   sockets: string[];
+  /**
+   * Absolute rows that are not lexically inside the workspace. They are usually
+   * unrelated host sockets, but a path can reach *into* the workspace through a
+   * symlinked directory, which only `realpath` can tell — so the caller verifies these
+   * before deciding they are none of its business.
+   */
+  outside: string[];
   /**
    * Whether the table holds a pathname that is neither abstract nor absolute. Such a
    * row may name a socket inside the workspace, but the table cannot say where the
@@ -114,8 +121,10 @@ export interface SocketTableAnalysis {
  * whitespace-split field. Exported for tests: parsing a table is pure.
  */
 export function analyseSocketTable(table: string, root: string): SocketTableAnalysis {
-  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+  const normalisedRoot = path.resolve(root);
+  const prefix = normalisedRoot.endsWith(path.sep) ? normalisedRoot : normalisedRoot + path.sep;
   const found: string[] = [];
+  const outside: string[] = [];
   let relativePaths = false;
   for (const line of table.split('\n')) {
     const match = SOCKET_TABLE_ROW.exec(line);
@@ -130,9 +139,15 @@ export function analyseSocketTable(table: string, root: string): SocketTableAnal
       relativePaths = true;
       continue;
     }
-    if (socketPath.startsWith(prefix)) found.push(socketPath);
+    // The kernel keeps the pathname `bind()` received, so an absolute path still needs
+    // normalising: `bind("/tmp/o/../workspace/x.sock")` is a socket *inside* the
+    // workspace whose row does not start with the workspace prefix (cloud-factory-cf-*,
+    // rev-sandbox-4 finding on 2044e50).
+    const resolved = path.resolve(socketPath);
+    if (resolved.startsWith(prefix)) found.push(resolved);
+    else outside.push(resolved);
   }
-  return { sockets: found, relativePaths };
+  return { sockets: found, outside, relativePaths };
 }
 
 /** Convenience wrapper over {@link analyseSocketTable} for callers that only need paths. */
@@ -239,6 +254,42 @@ function isSocketEntry(entry: unknown): boolean {
 }
 
 /**
+ * Which of `candidates` actually reach into the workspace through a symlinked
+ * directory? A row like `/tmp/link/host.sock`, where `/tmp/link` points at the
+ * workspace, is lexically outside it and would otherwise be discarded — and the same
+ * bind mount masks it, because mount targets resolve symlinks.
+ *
+ * One `realpath` per candidate: the table lists a few dozen sockets on a normal host,
+ * so this stays in the low milliseconds, and it only runs for rows that are not
+ * already lexically inside the workspace.
+ */
+async function socketsReachingWorkspace(root: string, candidates: string[]): Promise<string[]> {
+  if (candidates.length === 0) return [];
+  const realRoot = await realpathOrNull(path.resolve(root));
+  if (!realRoot) return [];
+  const prefix = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
+  const reaching: string[] = [];
+  for (const candidate of candidates) {
+    const real = await realpathOrNull(candidate);
+    // Mask the *real* path, not the name the socket was bound under: the sandbox reaches
+    // the file through the workspace (`<root>/host.sock`), so a mount over
+    // `/tmp/link/host.sock` would leave the workspace route open — measured with real
+    // bubblewrap (rev-sandbox-4 symlink finding).
+    if (real && (real === realRoot || real.startsWith(prefix))) reaching.push(real);
+  }
+  return reaching;
+}
+
+async function realpathOrNull(target: string): Promise<string | null> {
+  try {
+    return await fs.realpath(target);
+  } catch {
+    // A socket that has been closed since the table was read is nothing to mask.
+    return null;
+  }
+}
+
+/**
  * Every Unix socket inside `root`, from the cheapest complete source available.
  * Throws `SocketScanError` rather than return a partial answer.
  */
@@ -251,9 +302,10 @@ export async function scanWorkspaceSockets(
   const table = await readHostUnixSocketTable(options.tablePath);
   if (table !== null) {
     const analysis = analyseSocketTable(table, root);
+    const linked = await socketsReachingWorkspace(root, analysis.outside);
     if (!analysis.relativePaths) {
       return {
-        sockets: analysis.sockets.sort(),
+        sockets: [...new Set([...analysis.sockets, ...linked])].sort(),
         source: 'proc',
         dirsScanned: 0,
         elapsedMs: Date.now() - startedAt,
@@ -263,7 +315,7 @@ export async function scanWorkspaceSockets(
     // request pays for a complete walk and unions what it finds. The walk throws rather
     // than returning partial results, so the union is never silently incomplete.
     const walk = await walkWorkspaceSockets(root, options);
-    const sockets = [...new Set([...analysis.sockets, ...walk.sockets])].sort();
+    const sockets = [...new Set([...analysis.sockets, ...linked, ...walk.sockets])].sort();
     return {
       sockets,
       source: 'walk',

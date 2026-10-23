@@ -444,3 +444,77 @@ test('createLocalTools: network-none masks a socket bound with a relative pathna
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('createLocalTools: network-none masks a socket bound with a ".." path (rev-sandbox-4 finding)', async (t) => {
+  const reason = await bwrapUnavailableReason();
+  if (reason) {
+    t.skip(reason);
+    return;
+  }
+
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-dotdot-'));
+  const tmpDir = path.join(base, 'workspace');
+  await fs.mkdir(tmpDir, { recursive: true });
+  await fs.mkdir(path.join(base, 'other'), { recursive: true });
+  // Bound with an absolute path that walks back into the workspace: the kernel records
+  // the `..` verbatim, so a plain string-prefix test sees a socket "outside" the tree.
+  const rawPath = path.join(base, 'other', '..', 'workspace', 'host.sock');
+  const sockPath = path.join(tmpDir, 'host.sock');
+  const server = net.createServer((connection) => {
+    connection.write('HOST_SOCKET_REACHED\n');
+    connection.end();
+  });
+  await new Promise<void>((resolve) => server.listen(rawPath, () => resolve()));
+
+  try {
+    const tools = createLocalTools({ cwd: tmpDir, sandboxNetwork: 'none' });
+    const execTool = tools.find((t2) => t2.name === 'exec_command')!;
+    const res = (await execTool.handler({
+      command: `node -e 'const net = require("net"); for (const p of ["${sockPath}", "${rawPath}"]) net.connect(p).on("data", () => console.log("HOST_SOCKET_REACHED:" + p)).on("error", e => console.log("MASKED_ERR:" + e.code))'`,
+    })) as any;
+    assert.match(res.stdout, /MASKED_ERR:/);
+    assert.doesNotMatch(res.stdout, /HOST_SOCKET_REACHED/);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(sockPath, { force: true }).catch(() => {});
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('createLocalTools: network-none masks a socket reached through a symlink into the workspace', async (t) => {
+  const reason = await bwrapUnavailableReason();
+  if (reason) {
+    t.skip(reason);
+    return;
+  }
+
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-symlink-'));
+  const tmpDir = path.join(base, 'workspace');
+  const outside = path.join(base, 'outside');
+  await fs.mkdir(tmpDir, { recursive: true });
+  await fs.mkdir(outside, { recursive: true });
+  await fs.symlink(tmpDir, path.join(outside, 'link'));
+  const sockPath = path.join(tmpDir, 'host.sock');
+  const linkedPath = path.join(outside, 'link', 'host.sock');
+  const server = net.createServer((connection) => {
+    connection.write('HOST_SOCKET_REACHED\n');
+    connection.end();
+  });
+  // Bind through the symlink: the kernel records `/base/outside/link/host.sock`, which is
+  // lexically outside the workspace and the same file inside it.
+  await new Promise<void>((resolve) => server.listen(linkedPath, () => resolve()));
+
+  try {
+    const tools = createLocalTools({ cwd: tmpDir, sandboxNetwork: 'none' });
+    const execTool = tools.find((t2) => t2.name === 'exec_command')!;
+    const res = (await execTool.handler({
+      command: `node -e 'const net = require("net"); for (const p of ["${sockPath}", "${linkedPath}"]) net.connect(p).on("data", () => console.log("HOST_SOCKET_REACHED:" + p)).on("error", e => console.log("MASKED_ERR:" + e.code))'`,
+    })) as any;
+    assert.match(res.stdout, /MASKED_ERR:/);
+    assert.doesNotMatch(res.stdout, /HOST_SOCKET_REACHED/);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(sockPath, { force: true }).catch(() => {});
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
