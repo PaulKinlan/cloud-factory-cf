@@ -130,30 +130,23 @@ precisely because it is easy to over-read (cloud-factory-cf-5vuu):
 Unix sockets are **not** namespaced, so the third row is the one that needs to know
 every socket in the workspace, and that discovery is a security control:
 
-- it reads the **kernel's bound-socket table** (`/proc/net/unix`), so it is complete and
-  costs ~1ms regardless of workspace size. It does **not** prune directories: a socket
-  under `node_modules`, `.git` or `target` is masked like any other. (The first version
-  of this fix pruned those trees to stay fast and left a reproducible escape — a socket
-  in a pruned directory was never masked, cloud-factory-cf-5vuu.)
-- the table names a socket by the path `bind()` was given, which is not the path the
-  sandbox dials, so the name is used **verbatim** (never trimmed: a trailing space is
-  part of the name) and three shapes are resolved before masking: `..` is normalised
-  (`bind("/tmp/o/../workspace/x.sock")` is a workspace socket); a row outside the tree is
-  `realpath`-checked and, if it reaches into the workspace through a symlinked directory,
-  masked **at its real workspace path** (masking the bound name would leave the workspace
-  route open — both reproduced with real bubblewrap); and a relative row, which cannot be
-  placed at all, costs one complete walk for that command (cloud-factory-cf-khu9). A row
-  that does not resolve to a socket — stale, or a pathname the line-oriented table
-  truncated, such as one containing a newline — also escalates to the walk.
-- it is **re-run for every command**, so a socket that appears later is still masked
-  (a cache would silently unmask it — cloud-factory-cf-vy8o).
-- a table with no such row costs nothing extra — measured on this VM: 0 relative against
-  48 absolute and 5 abstract rows, so the walk path is the exception.
-- on a host with no socket table it falls back to a **complete-or-refuse** directory
-  walk (`socketScan: { timeoutMs = 5000, maxDirs = 20000, maxDepth = 32 }`). If the
-  walk cannot finish — budget, unreadable directory, too deep — the command is
-  **refused**, not run with an unverified mask; raise the budget rather than removing
-  the check.
+- it **asks the filesystem**, not the kernel's socket table: `find <root> \( -type s -o \
+  -type l -xtype s \) -print0`, NUL-delimited. Sockets are found by *type*, so nothing
+  depends on how a pathname was written — names with spaces or newlines, `..`, hardlinks,
+  relative binds and symlinks in either direction all come out as real paths. Both
+  symlinks that reach a socket inside the tree and symlinks pointing at one outside it
+  are masked, because either is dialable from inside.
+- **why not `/proc/net/unix`**: it is cheap (0.1ms) but its Path column is the *string*
+  `bind()` received, not the file. Five escapes came out of that gap in one afternoon
+  (a pruned directory, a relative name, `..`, a symlink, a trimmed trailing space); each
+  fix was another special case. Type discovery deletes the whole class.
+- cost, measured on this VM: **~102ms** for an 844-directory worktree (the equivalent
+  Node walk costs 611ms) and 1.8–4.0s for a synthetic 20,201-directory tree.
+- it is **re-run for every command**, so a socket that appears later is still masked (a
+  cache would silently unmask it — cloud-factory-cf-vy8o).
+- if discovery cannot finish — timeout, an unreadable subtree, a non-zero `find` exit —
+  the command is **refused**, never run with a partial mask. Raise the budget with
+  `socketScan: { timeoutMs }` rather than removing the check.
 
 Not covered: a socket the sandbox's own command creates and then dials *within the same
 command* — that traffic never reaches the host, and the next command's scan masks the

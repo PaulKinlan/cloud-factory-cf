@@ -28,6 +28,7 @@ declare module 'node:fs/promises' {
     name: string;
     isFile(): boolean;
     isDirectory(): boolean;
+    isSymbolicLink(): boolean;
   }
   export interface Stats {
     size: number;
@@ -46,6 +47,23 @@ declare module 'node:fs/promises' {
 }
 
 declare module 'node:child_process' {
+  /**
+   * `spawn` is declared because the sandbox's socket discovery passes a workspace path as
+   * an argv element (never through a shell): `exec` would interpolate that path into a
+   * command line, which is a quoting bug waiting for a filename with a quote in it.
+   */
+  export interface ChildProcessHandle {
+    stdout: { on(event: 'data', listener: (chunk: { toString(): string }) => void): void } | null;
+    stderr: { on(event: 'data', listener: (chunk: { toString(): string }) => void): void } | null;
+    on(event: 'error', listener: (error: { code?: string; message?: string }) => void): void;
+    on(event: 'close', listener: (code: number | null) => void): void;
+    kill(signal?: string): boolean;
+  }
+  export function spawn(
+    command: string,
+    args: string[],
+    options?: { stdio?: Array<'ignore' | 'pipe'>; shell?: boolean },
+  ): ChildProcessHandle;
   export function exec(
     command: string,
     options: {

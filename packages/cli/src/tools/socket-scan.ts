@@ -1,80 +1,73 @@
+import { spawn } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 /**
  * Discovery of host Unix domain sockets inside a workspace (cloud-factory-cf-5vuu,
- * -6rne, -vy8o, -bcra).
+ * -6rne, -vy8o, -bcra, -khu9, -14xh).
  *
  * The `network-none` sandbox unshares the IP namespace, but Unix domain sockets are
- * **not** namespaced: a socket a host process left inside the workspace is still a
- * door to the host network. The sandbox therefore masks every socket it finds
- * (`--ro-bind /dev/null <path>`).
+ * **not** namespaced: a socket a host process left inside the workspace is still a door
+ * to the host network, so the sandbox masks every socket it finds with
+ * `--ro-bind /dev/null <path>`.
  *
- * Discovery must be complete *and* cheap, and those two pull against each other:
+ * ## Why this does not read `/proc/net/unix`
  *
- * - a bounded directory walk that prunes `node_modules`/`target`/… is cheap but
- *   **bypassable** — a socket under a pruned directory is never masked (that was a
- *   reproducible escape on the first version of this fix);
- * - a complete walk is honest but costs ~1ms per directory, so a 20k-directory
- *   workspace pays seconds on *every* command.
+ * The first two versions of this file parsed the kernel's bound-socket table. It is
+ * cheap (O(number of sockets)) but its Path column is the **string `bind()` was given**,
+ * which is not the file: four separate escapes came out of that gap in one afternoon —
+ * a pruned directory, a relative name, an absolute name containing `..`, a name gained
+ * through a symlink, and a name with a trailing space that the parser trimmed. Each fix
+ * was another special case, and the next one was always waiting.
  *
- * So the primary source is not a walk at all: the kernel already publishes every
- * bound Unix socket in `/proc/net/unix`, path included. Reading that table is
- * O(number of sockets) — well under a millisecond — and it cannot be bypassed by
- * putting the socket somewhere inconvenient. The directory walk remains as a degraded
- * fallback for hosts without `/proc` and for one case the table cannot answer — a
- * **relative** pathname (cloud-factory-cf-khu9): `bind("relative.sock")` is legal, the
- * kernel records exactly what it was given, and the binder's cwd is not in the row, so
- * that path cannot be placed in the workspace. A relative row therefore costs one
- * complete walk (it may name a socket inside the workspace), and the walk still
- * **prunes nothing**: complete or refused, never partial. Every incomplete scan throws
- * (`SocketScanError`), because a partial answer means an unmasked socket.
+ * So this asks the filesystem instead. `describeSocketEntries()` spawns:
+ *
+ *     find <root> \( -type s -o -type l -xtype s \) -print0
+ *
+ * which is *type* discovery: it reports real paths read from directory entries, so any
+ * name the filesystem allows is handled natively (spaces, newlines — the output is
+ * NUL-delimited — `..`, hardlinks, and symlinks in either direction: `-xtype s` also
+ * catches a link inside the workspace that points at a socket outside it).
+ *
+ * Cost, measured on the VM: ~102ms for an 844-directory worktree (the equivalent Node
+ * walk costs 611ms) and 1.8–4.0s for a synthetic 20,201-directory tree. The scan is
+ * re-run for every command (`--vy8o`: a cache would silently unmask a socket that
+ * appears later) and a scan that cannot finish **refuses** the command rather than
+ * running with a partial mask.
+ *
+ * Naive seccomp (`connect()` on `AF_UNIX` → EPERM) would remove discovery entirely, but
+ * it also breaks a legitimate socket a command creates and dials itself, so masking
+ * stays the mechanism and this stays its discovery step.
  */
 
-/** Directory names the degraded walk used to prune. Kept only so the docs can say why it does not. */
-export const FORMERLY_SKIPPED_DIRS: ReadonlySet<string> = new Set([
-  'node_modules',
-  'vendor',
-  'dist',
-  'build',
-  'out',
-  'target',
-  'coverage',
-  '.git',
-  '.cache',
-]);
-
 export interface SocketScanOptions {
-  /** Directory budget for the degraded walk. Default 20000. */
-  maxDirs?: number;
-  /** Nesting budget for the degraded walk. Default 32. */
-  maxDepth?: number;
-  /** Wall-clock budget for the degraded walk. Default 5000ms. */
+  /** Wall-clock budget for one scan. Default 5000ms. */
   timeoutMs?: number;
-  /** Directories read in parallel by the degraded walk. Default 16. */
+  /** Directory budget for the fallback walk. Default 20000. */
+  maxDirs?: number;
+  /** Nesting budget for the fallback walk. Default 32. */
+  maxDepth?: number;
+  /** Directories read in parallel by the fallback walk. Default 16. */
   concurrency?: number;
-  /**
-   * Where to read the kernel socket table from. Default `/proc/net/unix`. This only
-   * relocates the source — it never skips verification — so a host that mounts `/proc`
-   * elsewhere can still use the cheap path, and the degraded walk can be exercised.
-   */
-  tablePath?: string;
 }
 
 export interface SocketScanResult {
-  /** Absolute paths of every Unix socket found, sorted. */
+  /**
+   * Absolute paths to mask, sorted. A symlink that reaches a socket is reported by the
+   * path inside the workspace, because that is the name the sandbox would dial.
+   */
   sockets: string[];
-  /** Which source answered: the kernel's socket table, or the fallback walk. */
-  source: 'proc' | 'walk';
-  /** Directories read (0 for the socket table). */
+  /** Which source answered: `find`, or the fallback walk when `find` is unavailable. */
+  source: 'find' | 'walk';
+  /** Directories read (0 when `find` answered: it does not report a count). */
   dirsScanned: number;
   /** Wall time spent scanning. */
   elapsedMs: number;
 }
 
 /**
- * A scan that could not complete. Callers must treat this as "do not run the
- * command": an incomplete scan means an unknown number of unmasked sockets.
+ * A scan that could not complete. Callers must treat this as "do not run the command":
+ * an incomplete scan means an unknown number of unmasked sockets.
  */
 export class SocketScanError extends Error {
   constructor(message: string) {
@@ -83,100 +76,91 @@ export class SocketScanError extends Error {
   }
 }
 
+const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_DIRS = 20000;
 const DEFAULT_MAX_DEPTH = 32;
-const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_CONCURRENCY = 16;
 
 const FIX_HINT =
   'Refusing to run the command with an unverified socket mask. Narrow the workspace, or raise the budget with createLocalTools({ socketScan: { timeoutMs, maxDirs, maxDepth } }).';
 
 /**
- * `/proc/net/unix` rows: `Num: RefCount Protocol Flags Type St Inode Path`.
- *
- * The path is captured **verbatim** — exactly one separator space is consumed, and
- * nothing is trimmed. A pathname may legitimately end in (or consist of) spaces, and
- * trimming would mask `/ws/host.sock` while the real socket stayed at `/ws/host.sock `
- * — an escape of the same shape as the earlier ones (cloud-factory-cf-5vuu).
+ * `find` expression: sockets, and symlinks whose target is a socket. A symlink inside
+ * the workspace pointing at an outside socket is an escape in the other direction and is
+ * worth masking for the same reason as a socket inside the tree.
  */
-const SOCKET_TABLE_ROW = /^\s*[0-9a-fA-F]+:\s+(?:\S+\s+){5}\d+\s(.*)$/;
+// Bare parens: `spawn` passes arguments through verbatim (no shell to eat them), and GNU
+// find rejects the backslash-escaped form when it arrives as a real argv element.
+const FIND_EXPRESSION = ['(', '-type', 's', '-o', '-type', 'l', '-xtype', 's', ')', '-print0'];
 
-export interface SocketTableAnalysis {
-  /** Sockets the table places inside the workspace, by normalised absolute path. */
-  sockets: string[];
-  /**
-   * Absolute rows that are not lexically inside the workspace. They are usually
-   * unrelated host sockets, but a path can reach *into* the workspace through a
-   * symlinked directory, which only `realpath` can tell — so the caller verifies these
-   * before deciding they are none of its business.
-   */
-  outside: string[];
-  /**
-   * Whether the table holds a pathname that is neither abstract nor absolute. Such a
-   * row may name a socket inside the workspace, but the table cannot say where the
-   * binder's cwd was, so the caller must verify with a complete walk.
-   */
-  relativePaths: boolean;
-}
-
-/**
- * Filters a `/proc/net/unix` table down to the sockets inside `root`, and reports
- * whether any row's pathname could not be placed at all.
- *
- * The Path column is free-form (it may contain spaces) and abstract sockets appear
- * as `@name`, so the path is everything after the inode column rather than a
- * whitespace-split field. Exported for tests: parsing a table is pure.
- */
-export function analyseSocketTable(table: string, root: string): SocketTableAnalysis {
-  const normalisedRoot = path.resolve(root);
-  const prefix = normalisedRoot.endsWith(path.sep) ? normalisedRoot : normalisedRoot + path.sep;
+/** NUL-delimited output, so a name containing a newline is not split in two. */
+export function parseFindOutput(stdout: string, root: string): string[] {
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
   const found: string[] = [];
-  const outside: string[] = [];
-  let relativePaths = false;
-  for (const line of table.split('\n')) {
-    const match = SOCKET_TABLE_ROW.exec(line);
-    if (!match) continue;
-    const socketPath = match[1] ?? '';
-    // An abstract socket (@) has no filesystem path, so there is nothing to mask and
-    // nothing the sandbox can dial by name.
-    if (socketPath.length === 0 || socketPath.startsWith('@')) continue;
-    if (!socketPath.startsWith(path.sep)) {
-      // `bind("relative.sock")` from a cwd inside the workspace lands here, and it is a
-      // real escape: the kernel records the pathname verbatim (cloud-factory-cf-khu9).
-      relativePaths = true;
-      continue;
-    }
-    // The kernel keeps the pathname `bind()` received, so an absolute path still needs
-    // normalising: `bind("/tmp/o/../workspace/x.sock")` is a socket *inside* the
-    // workspace whose row does not start with the workspace prefix (cloud-factory-cf-*,
-    // rev-sandbox-4 finding on 2044e50).
-    const resolved = path.resolve(socketPath);
-    if (resolved.startsWith(prefix)) found.push(resolved);
-    else outside.push(resolved);
+  for (const entry of stdout.split('\0')) {
+    if (entry === '') continue;
+    // `find` prints the path it was given, so entries are already absolute here; the
+    // check keeps a stray `.`-relative path from slipping through.
+    const absolute = path.resolve(entry);
+    if (absolute === root || absolute.startsWith(prefix)) found.push(absolute);
   }
-  return { sockets: found, outside, relativePaths };
+  return found;
 }
 
-/** Convenience wrapper over {@link analyseSocketTable} for callers that only need paths. */
-export function socketsUnderRoot(table: string, root: string): string[] {
-  return analyseSocketTable(table, root).sockets;
+interface FindRun {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  missing: boolean;
 }
 
-/** The kernel's bound-socket table, or `null` when this host does not publish one. */
-export async function readHostUnixSocketTable(
-  tablePath = '/proc/net/unix',
-): Promise<string | null> {
-  try {
-    return await fs.readFile(tablePath, 'utf8');
-  } catch {
-    return null;
-  }
+function runFind(root: string, timeoutMs: number): Promise<FindRun> {
+  return new Promise((resolve) => {
+    const child = spawn('find', [root, ...FIND_EXPRESSION], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // No shell: the workspace path is data, not code.
+      shell: false,
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let timedOut = false;
+    let missing = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, timeoutMs);
+
+    child.stdout?.on('data', (chunk: { toString(): string }) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on('data', (chunk: { toString(): string }) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', (err: { code?: string; message?: string }) => {
+      if (err.code === 'ENOENT') missing = true;
+      else stderr += err.message ?? 'spawn failed';
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        resolve({ code: null, stdout, stderr, timedOut, missing });
+      }
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr, timedOut, missing });
+    });
+  });
 }
 
 /**
- * Complete-or-refuse directory walk, used only when `/proc/net/unix` is missing.
- * It prunes nothing: a socket under `node_modules` is exactly the escape this
- * function exists to prevent.
+ * Complete-or-refuse directory walk, used only when `find` is not installed. It prunes
+ * nothing, and anything it cannot read is an error rather than a gap.
  */
 export async function walkWorkspaceSockets(
   root: string,
@@ -223,11 +207,15 @@ export async function walkWorkspaceSockets(
         const next: Array<{ dir: string; depth: number }> = [];
         for (const entry of entries) {
           const full = path.join(dir, entry.name);
+          // `readdir({withFileTypes:true})` reports lstat semantics: a symlink is neither
+          // a socket nor a directory here, so links are not followed. One that reaches a
+          // socket is exactly what `find`'s `-xtype s` catches, and it is checked below.
           if (isSocketEntry(entry)) {
             found.push(full);
+          } else if (entry.isSymbolicLink()) {
+            const target = await socketTarget(full);
+            if (target !== null) found.push(full);
           } else if (entry.isDirectory()) {
-            // `readdir({withFileTypes:true})` reports lstat semantics, so a symlink to
-            // a directory is not `isDirectory()`: links are never followed.
             dirsDiscovered += 1;
             if (dirsDiscovered > maxDirs) {
               throw new SocketScanError(
@@ -249,66 +237,24 @@ export async function walkWorkspaceSockets(
 }
 
 /**
- * `Dirent` here comes from this package's hand-written `node-env.d.ts` shim, which
- * declares only `isFile`/`isDirectory`; Node provides `isSocket` at runtime. Casting
- * keeps the shim untouched: a `.d.ts` edit has no covering suite, and the fast gate
- * refuses unmapped source (cloud-factory-cf-llyg).
+ * `Dirent`/`Stats` here come from this package's hand-written `node-env.d.ts` shim,
+ * which declares a subset of the real module; Node provides `isSocket` at runtime, and a
+ * `.d.ts` edit has no covering suite (the fast gate refuses unmapped source,
+ * cloud-factory-cf-llyg), so the narrow cast keeps the shim untouched.
  */
-type SocketDirent = { isSocket(): boolean };
+type SocketEntry = { isSocket(): boolean };
 
 function isSocketEntry(entry: unknown): boolean {
-  return (entry as SocketDirent).isSocket();
+  return (entry as SocketEntry).isSocket();
 }
 
-/**
- * Which of `candidates` actually reach into the workspace through a symlinked
- * directory? A row like `/tmp/link/host.sock`, where `/tmp/link` points at the
- * workspace, is lexically outside it and would otherwise be discarded — and the same
- * bind mount masks it, because mount targets resolve symlinks.
- *
- * One `realpath` per candidate: the table lists a few dozen sockets on a normal host,
- * so this stays in the low milliseconds, and it only runs for rows that are not
- * already lexically inside the workspace.
- */
-async function socketsReachingWorkspace(root: string, candidates: string[]): Promise<string[]> {
-  if (candidates.length === 0) return [];
-  const realRoot = await realpathOrNull(path.resolve(root));
-  if (!realRoot) return [];
-  const prefix = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
-  const reaching: string[] = [];
-  for (const candidate of candidates) {
-    const real = await socketRealpathOrNull(candidate);
-    // Mask the *real* path, not the name the socket was bound under: the sandbox reaches
-    // the file through the workspace (`<root>/host.sock`), so a mount over
-    // `/tmp/link/host.sock` would leave the workspace route open — measured with real
-    // bubblewrap (rev-sandbox-4 symlink finding).
-    if (real && (real === realRoot || real.startsWith(prefix))) reaching.push(real);
-  }
-  return reaching;
-}
-
-async function realpathOrNull(target: string): Promise<string | null> {
+/** The real path a symlink reaches when that target is a socket, else `null`. */
+async function socketTarget(link: string): Promise<string | null> {
   try {
-    return await fs.realpath(target);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * The real path of `target` when it is a Unix socket, or `null` when it is gone or is
- * something else. Checking the type matters twice: masking a regular file with
- * `/dev/null` would empty it inside the sandbox, and a row whose path does not resolve
- * to a socket means the name in the table is not usable — either stale, or truncated by
- * the line-oriented table format (a pathname containing a newline).
- */
-async function socketRealpathOrNull(target: string): Promise<string | null> {
-  try {
-    const real = await fs.realpath(target);
-    // `lstat` is in `node:fs/promises` at runtime; the package's hand-written
-    // `node-env.d.ts` shim declares a subset of the module, and a `.d.ts` edit has no
-    // covering suite (cloud-factory-cf-llyg), so it is reached through a narrow cast.
-    const stat = await (fs as unknown as { lstat(target: string): Promise<{ isSocket(): boolean }> }).lstat(real);
+    const real = await fs.realpath(link);
+    const stat = await (fs as unknown as {
+      lstat(target: string): Promise<SocketEntry>;
+    }).lstat(real);
     return stat.isSocket() ? real : null;
   } catch {
     return null;
@@ -316,59 +262,48 @@ async function socketRealpathOrNull(target: string): Promise<string | null> {
 }
 
 /**
- * Every Unix socket inside `root`, from the cheapest complete source available.
- * Throws `SocketScanError` rather than return a partial answer.
+ * Every socket the sandbox must mask for `root`: sockets in the workspace plus symlinks
+ * that reach one. Throws `SocketScanError` rather than return a partial answer.
  */
 export async function scanWorkspaceSockets(
   root: string,
   options: SocketScanOptions = {},
 ): Promise<SocketScanResult> {
   const startedAt = Date.now();
-  // Set when the table names something this scan could not pin down (a relative pathname,
-  // or a row that does not resolve to a socket): such a request pays for a complete walk.
-  let unnamedRows = false;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-  const table = await readHostUnixSocketTable(options.tablePath);
-  if (table !== null) {
-    const analysis = analyseSocketTable(table, root);
-    const linked = await socketsReachingWorkspace(root, analysis.outside);
+  const result = await runFind(root, timeoutMs);
 
-    // Verify the rows the table places inside the workspace: only real sockets are masked,
-    // and a row that does not resolve to one means the name is unusable (stale, or a
-    // pathname the table's line format truncated), which needs the complete walk.
-    const verified: string[] = [];
-    for (const placed of analysis.sockets) {
-      const real = await socketRealpathOrNull(placed);
-      if (real === null) unnamedRows = true;
-      else verified.push(real);
-    }
-
-    if (!analysis.relativePaths && !unnamedRows) {
-      return {
-        sockets: [...new Set([...verified, ...linked])].sort(),
-        source: 'proc',
-        dirsScanned: 0,
-        elapsedMs: Date.now() - startedAt,
-      };
-    }
-    // A relative pathname may point into the workspace but cannot be placed, so this
-    // request pays for a complete walk and unions what it finds. The walk throws rather
-    // than returning partial results, so the union is never silently incomplete.
+  if (result.missing) {
+    // No `find` on this host: fall back to the complete-or-refuse walk.
     const walk = await walkWorkspaceSockets(root, options);
-    const sockets = [...new Set([...verified, ...linked, ...walk.sockets])].sort();
     return {
-      sockets,
+      sockets: walk.sockets,
       source: 'walk',
       dirsScanned: walk.dirsScanned,
       elapsedMs: Date.now() - startedAt,
     };
   }
 
-  const walk = await walkWorkspaceSockets(root, options);
+  if (result.timedOut) {
+    throw new SocketScanError(
+      `socket scan exceeded its ${timeoutMs}ms budget under '${root}'. ${FIX_HINT}`,
+    );
+  }
+  if (result.code !== 0) {
+    // `find` exits non-zero when it could not read everything, which is exactly the case
+    // that must not be treated as "no sockets".
+    throw new SocketScanError(
+      `socket scan could not read the whole workspace under '${root}': ${result.stderr.trim() || `find exited ${result.code}`}. ${FIX_HINT}`,
+    );
+  }
+
+  // Mask the path inside the workspace. For a symlink that is the link itself: the mount
+  // follows it, so the target socket becomes unreachable under either name.
   return {
-    sockets: walk.sockets,
-    source: 'walk',
-    dirsScanned: walk.dirsScanned,
+    sockets: [...new Set(parseFindOutput(result.stdout, root))].sort(),
+    source: 'find',
+    dirsScanned: 0,
     elapsedMs: Date.now() - startedAt,
   };
 }

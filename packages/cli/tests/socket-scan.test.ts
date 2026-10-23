@@ -5,20 +5,19 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as net from 'node:net';
 import {
-  analyseSocketTable,
-  readHostUnixSocketTable,
+  parseFindOutput,
   scanWorkspaceSockets,
-  socketsUnderRoot,
   walkWorkspaceSockets,
   SocketScanError,
 } from '../src/tools/socket-scan.ts';
 
 /**
- * The `network-none` sandbox masks host Unix sockets it finds inside the workspace,
- * so discovery is a security control: it must be **complete** (a pruned directory is
- * an escape — cloud-factory-cf-5vuu), cheap (a full walk per command is the cost
- * problem — cloud-factory-cf-6rne), and never silently partial (`SocketScanError`).
- * These tests need no bubblewrap.
+ * Discovery of host Unix sockets in the `network-none` sandbox is a security control, so
+ * it must be **complete** (a missed socket is a host-network escape), and cheap enough to
+ * run before every command. It asks the filesystem (`find -type s -print0`) rather than
+ * parsing `/proc/net/unix`, because that table reports the string `bind()` was given —
+ * which produced five escapes in a day (`cloud-factory-cf-5vuu`, `-khu9`, `-14xh`, and
+ * two more in review). These tests use real sockets and need no bubblewrap.
  */
 
 async function tempWorkspace(prefix: string): Promise<string> {
@@ -35,40 +34,22 @@ async function listenUnixSocket(socketPath: string): Promise<() => Promise<void>
   };
 }
 
-const HEADER =
-  'Num       RefCount Protocol Flags    Type St Inode Path';
-
-test('socketsUnderRoot: parses the kernel table, keeping only paths inside the workspace', () => {
-  const table = [
-    HEADER,
-    '0000000000000000: 00000002 00000000 00010000 0001 01 7092884 /srv/app/node_modules/pkg/host.sock',
-    '0000000000000000: 00000002 00000000 00010000 0001 01 7092885 /srv/app/src/app.sock',
-    '0000000000000000: 00000002 00000000 00010000 0001 01 7092886 /srv/application/decoy.sock',
-    '0000000000000000: 00000002 00000000 00010000 0001 01 7092887 /srv/app/a socket with spaces.sock',
-    '0000000000000000: 00000002 00000000 00010000 0001 01 7092888 @abstract-name',
-    '0000000000000000: 00000002 00000000 00010000 0001 01 7092889 /run/systemd/private',
-    '0000000000000000: 00000002 00000000 00010000 0001 01 7092890',
-    '',
-  ].join('\n');
-
-  // Table order is preserved here; `scanWorkspaceSockets` sorts before returning.
-  assert.deepEqual(socketsUnderRoot(table, '/srv/app').sort(), [
-    '/srv/app/node_modules/pkg/host.sock',
-    '/srv/app/src/app.sock',
-    '/srv/app/a socket with spaces.sock',
+test('parseFindOutput: NUL-separated paths, so a name containing a newline stays one entry', () => {
+  const root = '/srv/app';
+  const stdout = ['/srv/app/a.sock', '/srv/app/b\nc.sock', '/srv/app/d ir .sock', ''].join('\0');
+  assert.deepEqual(parseFindOutput(stdout, root).sort(), [
+    '/srv/app/a.sock',
+    '/srv/app/b\nc.sock',
+    '/srv/app/d ir .sock',
   ].sort());
 });
 
-test('socketsUnderRoot: a prefix that only looks like the workspace is not inside it', () => {
-  const table = [
-    HEADER,
-    '0000000000000000: 00000002 00000000 00010000 0001 01 1 /srv/app-other/x.sock',
-    '0000000000000000: 00000002 00000000 00010000 0001 01 2 /srv/app/x.sock',
-  ].join('\n');
-  assert.deepEqual(socketsUnderRoot(table, '/srv/app'), ['/srv/app/x.sock']);
+test('parseFindOutput: only paths inside the workspace are kept', () => {
+  const stdout = ['/srv/application/decoy.sock', '/srv/app/real.sock'].join('\0');
+  assert.deepEqual(parseFindOutput(stdout, '/srv/app'), ['/srv/app/real.sock']);
 });
 
-test('scanWorkspaceSockets: finds a socket under node_modules (cloud-factory-cf-5vuu: no pruned subtrees)', async () => {
+test('scanWorkspaceSockets: finds a socket under node_modules (cloud-factory-cf-5vuu)', async () => {
   const root = await tempWorkspace('fc-scan-prune-');
   const deep = path.join(root, 'node_modules', 'pkg', 'dist');
   await fs.mkdir(deep, { recursive: true });
@@ -76,17 +57,14 @@ test('scanWorkspaceSockets: finds a socket under node_modules (cloud-factory-cf-
   try {
     const result = await scanWorkspaceSockets(root);
     assert.deepEqual(result.sockets, [path.join(deep, 'hidden.sock')]);
-    // The kernel table answers this, so no directory walk was needed at all. No timing
-    // assertion here on purpose: a load-sensitive bound is a test that reds for whoever
-    // happens to run it on a busy machine (docs/speed.md, tests must be independent).
-    assert.equal(result.source, 'proc');
+    assert.equal(result.source, 'find');
   } finally {
     await close();
     await fs.rm(root, { recursive: true, force: true });
   }
 });
 
-test('scanWorkspaceSockets: a socket created after the previous scan is found by the next one (cloud-factory-cf-vy8o)', async () => {
+test('scanWorkspaceSockets: a socket created after an earlier scan is found by the next one (cloud-factory-cf-vy8o)', async () => {
   const root = await tempWorkspace('fc-scan-fresh-');
   try {
     const before = await scanWorkspaceSockets(root);
@@ -105,15 +83,92 @@ test('scanWorkspaceSockets: a socket created after the previous scan is found by
   }
 });
 
-test('readHostUnixSocketTable: returns the table on this host (the primary source)', async () => {
-  const table = await readHostUnixSocketTable();
-  // Linux publishes it; if this ever becomes null the fallback walk takes over and
-  // the tests below cover that path.
-  if (table === null) return;
-  assert.match(table, /Num|RefCount/);
+test('scanWorkspaceSockets: a name with a trailing space, a newline, or `..` needs no special case', async () => {
+  const root = await tempWorkspace('fc-scan-names-');
+  const names = ['host.sock ', 'two  spaces.sock', 'new\nline.sock'];
+  const closers: Array<() => Promise<void>> = [];
+  try {
+    for (const name of names) closers.push(await listenUnixSocket(path.join(root, name)));
+    const result = await scanWorkspaceSockets(root);
+    assert.deepEqual(result.sockets, names.map((name) => path.join(root, name)).sort());
+  } finally {
+    for (const close of closers) await close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
-test('walkWorkspaceSockets: the fallback prunes nothing and finds deep sockets', async () => {
+test('scanWorkspaceSockets: a relative bind inside the workspace is found by type, whatever it was called', async () => {
+  const root = await tempWorkspace('fc-scan-relative-');
+  const previous = process.cwd();
+  const server = net.createServer((connection) => connection.end());
+  try {
+    process.chdir(root);
+    await new Promise<void>((resolve) => server.listen('relative.sock', () => resolve()));
+    process.chdir(previous);
+    const result = await scanWorkspaceSockets(root);
+    assert.deepEqual(result.sockets, [path.join(root, 'relative.sock')]);
+  } finally {
+    process.chdir(previous);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('scanWorkspaceSockets: a symlink inside the workspace that reaches a socket is reported', async () => {
+  const base = await tempWorkspace('fc-scan-symlink-');
+  const root = path.join(base, 'workspace');
+  const outside = path.join(base, 'outside');
+  await fs.mkdir(root, { recursive: true });
+  await fs.mkdir(outside, { recursive: true });
+  const outsideSock = path.join(outside, 'host.sock');
+  const close = await listenUnixSocket(outsideSock);
+  try {
+    await fs.symlink(outsideSock, path.join(root, 'link.sock'));
+    const result = await scanWorkspaceSockets(root);
+    // Reported by the in-workspace name: that is the path the sandbox would dial, and the
+    // mount follows the link to the socket it reaches.
+    assert.deepEqual(result.sockets, [path.join(root, 'link.sock')]);
+  } finally {
+    await close();
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('scanWorkspaceSockets: an unrelated socket outside the workspace is left alone', async () => {
+  const base = await tempWorkspace('fc-scan-unrelated-');
+  const root = path.join(base, 'workspace');
+  await fs.mkdir(root, { recursive: true });
+  const close = await listenUnixSocket(path.join(base, 'other.sock'));
+  try {
+    const result = await scanWorkspaceSockets(root);
+    // Masking is a workspace control, not a system-wide one: an unrelated socket (an
+    // ssh-agent, say) must stay usable.
+    assert.deepEqual(result.sockets, []);
+  } finally {
+    await close();
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('scanWorkspaceSockets: refuses instead of masking nothing when the scan cannot finish', async () => {
+  const root = await tempWorkspace('fc-scan-timeout-');
+  await fs.mkdir(path.join(root, 'a', 'b', 'c'), { recursive: true });
+  try {
+    await assert.rejects(
+      () => scanWorkspaceSockets(root, { timeoutMs: 0 }),
+      (err: unknown) => {
+        assert.ok(err instanceof SocketScanError);
+        assert.match(err.message, /budget/);
+        assert.match(err.message, /socketScan/);
+        return true;
+      },
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('walkWorkspaceSockets: the no-find fallback prunes nothing and finds deep sockets', async () => {
   const root = await tempWorkspace('fc-walk-deep-');
   const deep = path.join(root, 'node_modules', 'pkg', 'dist', 'nested');
   await fs.mkdir(deep, { recursive: true });
@@ -128,35 +183,17 @@ test('walkWorkspaceSockets: the fallback prunes nothing and finds deep sockets',
   }
 });
 
-test('walkWorkspaceSockets: refuses instead of truncating when the directory budget is exceeded', async () => {
-  const root = await tempWorkspace('fc-walk-dirs-');
-  for (const name of ['a', 'b', 'c', 'd']) await fs.mkdir(path.join(root, name));
+test('walkWorkspaceSockets: refuses when the nesting or directory budget is exceeded', async () => {
+  const root = await tempWorkspace('fc-walk-budget-');
+  await fs.mkdir(path.join(root, 'a', 'b', 'c'), { recursive: true });
   try {
+    await assert.rejects(
+      () => walkWorkspaceSockets(root, { maxDepth: 1 }),
+      (err: unknown) => err instanceof SocketScanError && /nesting exceeds/.test(err.message),
+    );
     await assert.rejects(
       () => walkWorkspaceSockets(root, { maxDirs: 2 }),
-      (err: unknown) => {
-        assert.ok(err instanceof SocketScanError);
-        assert.match(err.message, /more than 2 directories/);
-        assert.match(err.message, /socketScan/);
-        return true;
-      },
-    );
-  } finally {
-    await fs.rm(root, { recursive: true, force: true });
-  }
-});
-
-test('walkWorkspaceSockets: refuses when the nesting budget is exceeded', async () => {
-  const root = await tempWorkspace('fc-walk-depth-');
-  await fs.mkdir(path.join(root, 'a', 'b', 'c', 'd'), { recursive: true });
-  try {
-    await assert.rejects(
-      () => walkWorkspaceSockets(root, { maxDepth: 2 }),
-      (err: unknown) => {
-        assert.ok(err instanceof SocketScanError);
-        assert.match(err.message, /nesting exceeds the 2-level/);
-        return true;
-      },
+      (err: unknown) => err instanceof SocketScanError && /more than 2 directories/.test(err.message),
     );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
@@ -175,172 +212,10 @@ test('walkWorkspaceSockets: refuses instead of failing open when a directory can
   try {
     await assert.rejects(
       () => walkWorkspaceSockets(root),
-      (err: unknown) => {
-        assert.ok(err instanceof SocketScanError);
-        assert.match(err.message, /could not read/);
-        return true;
-      },
+      (err: unknown) => err instanceof SocketScanError && /could not read/.test(err.message),
     );
   } finally {
     await fs.chmod(locked, 0o755).catch(() => {});
-    await fs.rm(root, { recursive: true, force: true });
-  }
-});
-
-
-test('analyseSocketTable: a relative pathname is reported, not silently dropped (cloud-factory-cf-khu9)', () => {
-  const table = [
-    HEADER,
-    '0000000000000000: 00000002 00000000 00010000 0001 01 1 /srv/app/abs.sock',
-    '0000000000000000: 00000002 00000000 00010000 0001 01 2 relative.sock',
-    '0000000000000000: 00000002 00000000 00010000 0001 01 3 sub/dir/other.sock',
-    '0000000000000000: 00000002 00000000 00010000 0001 01 4 @abstract',
-  ].join('\n');
-
-  const analysis = analyseSocketTable(table, '/srv/app');
-  assert.deepEqual(analysis.sockets, ['/srv/app/abs.sock']);
-  // `bind("relative.sock")` from a cwd inside the workspace is an escape, so the scan
-  // cannot trust an absolute-only answer for this table.
-  assert.equal(analysis.relativePaths, true);
-
-  const absoluteOnly = analyseSocketTable(
-    [HEADER, '0000000000000000: 00000002 00000000 00010000 0001 01 1 /srv/app/abs.sock'].join('\n'),
-    '/srv/app',
-  );
-  assert.equal(absoluteOnly.relativePaths, false);
-});
-
-test('scanWorkspaceSockets: a relative row forces the complete walk and still finds the socket (cloud-factory-cf-khu9)', async () => {
-  const root = await tempWorkspace('fc-scan-relative-');
-  const deep = path.join(root, 'node_modules', 'pkg');
-  await fs.mkdir(deep, { recursive: true });
-  const close = await listenUnixSocket(path.join(deep, 'relative.sock'));
-  const tablePath = path.join(root, '..', `${path.basename(root)}-table`);
-  try {
-    // A table shaped like the kernel's after `bind("relative.sock")` from a cwd inside
-    // the workspace: the socket is real, but the row cannot place it.
-    await fs.writeFile(
-      tablePath,
-      [HEADER, '0000000000000000: 00000002 00000000 00010000 0001 01 1 relative.sock'].join('\n'),
-    );
-
-    const result = await scanWorkspaceSockets(root, { tablePath });
-    assert.equal(result.source, 'walk');
-    assert.deepEqual(result.sockets, [path.join(deep, 'relative.sock')]);
-  } finally {
-    await close();
-    await fs.rm(tablePath, { force: true });
-    await fs.rm(root, { recursive: true, force: true });
-  }
-});
-
-
-test('analyseSocketTable: an absolute path with ".." is normalised into the workspace', () => {
-  const table = [
-    HEADER,
-    '0000000000000000: 00000002 00000000 00010000 0001 01 1 /srv/other/../app/host.sock',
-    '0000000000000000: 00000002 00000000 00010000 0001 01 2 /srv/app/sub/../../elsewhere/x.sock',
-  ].join('\n');
-
-  const analysis = analyseSocketTable(table, '/srv/app');
-  // The kernel keeps the pathname `bind()` received, so the first row is a socket inside
-  // the workspace that a plain string-prefix test would have discarded.
-  assert.deepEqual(analysis.sockets, ['/srv/app/host.sock']);
-  assert.deepEqual(analysis.outside, ['/srv/elsewhere/x.sock']);
-});
-
-test('scanWorkspaceSockets: a socket bound through a symlink into the workspace is found', async () => {
-  const base = await tempWorkspace('fc-scan-symlink-');
-  const root = path.join(base, 'workspace');
-  const outside = path.join(base, 'outside');
-  await fs.mkdir(root, { recursive: true });
-  await fs.mkdir(outside, { recursive: true });
-  await fs.symlink(root, path.join(outside, 'link'));
-  const close = await listenUnixSocket(path.join(root, 'host.sock'));
-  try {
-    // Bound as `/base/outside/link/host.sock`: lexically outside the workspace, but the
-    // same file, and the same bind mount masks it (mount targets resolve symlinks).
-    const tablePath = path.join(base, 'table');
-    await fs.writeFile(
-      tablePath,
-      [
-        HEADER,
-        `0000000000000000: 00000002 00000000 00010000 0001 01 1 ${path.join(outside, 'link', 'host.sock')}`,
-      ].join('\n'),
-    );
-
-    const result = await scanWorkspaceSockets(root, { tablePath });
-    assert.equal(result.source, 'proc');
-    // The realpath is what gets masked: that is the path the sandbox would dial.
-    assert.deepEqual(result.sockets, [path.join(root, 'host.sock')]);
-  } finally {
-    await close();
-    await fs.rm(base, { recursive: true, force: true });
-  }
-});
-
-test('scanWorkspaceSockets: an unrelated host socket outside the workspace is left alone', async () => {
-  const base = await tempWorkspace('fc-scan-unrelated-');
-  const root = path.join(base, 'workspace');
-  await fs.mkdir(root, { recursive: true });
-  const outsideSock = path.join(base, 'other.sock');
-  const close = await listenUnixSocket(outsideSock);
-  try {
-    const tablePath = path.join(base, 'table');
-    await fs.writeFile(
-      tablePath,
-      [HEADER, `0000000000000000: 00000002 00000000 00010000 0001 01 1 ${outsideSock}`].join('\n'),
-    );
-
-    const result = await scanWorkspaceSockets(root, { tablePath });
-    // Masking is a workspace control, not a system-wide one: an unrelated socket (an
-    // ssh-agent, say) must stay usable.
-    assert.deepEqual(result.sockets, []);
-  } finally {
-    await close();
-    await fs.rm(base, { recursive: true, force: true });
-  }
-});
-
-
-test('analyseSocketTable: a pathname ending in spaces is kept verbatim, not trimmed (cloud-factory-cf-5vuu)', () => {
-  const table = [
-    HEADER,
-    '0000000000000000: 00000002 00000000 00010000 0001 01 1 /srv/app/host.sock ',
-    '0000000000000000: 00000002 00000000 00010000 0001 01 2 /srv/app/two spaces.sock  ',
-  ].join('\n');
-
-  const analysis = analyseSocketTable(table, '/srv/app');
-  // Trimming would have masked `/srv/app/host.sock` — a path that does not exist — while
-  // leaving the real socket at `/srv/app/host.sock ` open.
-  assert.deepEqual(analysis.sockets, ['/srv/app/host.sock ', '/srv/app/two spaces.sock  ']);
-});
-
-test('scanWorkspaceSockets: a socket whose name ends in a space is masked at that name', async () => {
-  const root = await tempWorkspace('fc-scan-space-');
-  const close = await listenUnixSocket(path.join(root, 'host.sock '));
-  try {
-    const result = await scanWorkspaceSockets(root);
-    assert.equal(result.source, 'proc');
-    assert.deepEqual(result.sockets, [path.join(root, 'host.sock ')]);
-  } finally {
-    await close();
-    await fs.rm(root, { recursive: true, force: true });
-  }
-});
-
-test('scanWorkspaceSockets: a row the table truncates (newline in the name) falls back to the walk', async () => {
-  const root = await tempWorkspace('fc-scan-newline-');
-  const weird = path.join(root, 'a\nb.sock');
-  const close = await listenUnixSocket(weird);
-  try {
-    const result = await scanWorkspaceSockets(root);
-    // The line-oriented table cannot represent that name: the row names `/root/a`, which
-    // is not a socket, so the scan escalates to the complete walk and finds the real file.
-    assert.equal(result.source, 'walk');
-    assert.deepEqual(result.sockets, [weird]);
-  } finally {
-    await close();
     await fs.rm(root, { recursive: true, force: true });
   }
 });

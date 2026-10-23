@@ -341,24 +341,25 @@ test('createLocalTools: an incomplete socket scan refuses the command instead of
     const tools = createLocalTools({
       cwd: tmpDir,
       sandboxNetwork: 'none',
-      // Point at a table that does not exist so the degraded walk runs, then make its
-      // budget too small for this tree. The point is that an incomplete scan refuses.
-      socketScan: { maxDirs: 1, tablePath: path.join(tmpDir, 'no-such-unix-table') },
+      // A zero budget kills the discovery step before it can answer. The point is that an
+      // incomplete scan refuses the command instead of running with an unverified mask.
+      socketScan: { timeoutMs: 0 },
     });
     const execTool = tools.find((t2) => t2.name === 'exec_command')!;
 
     await assert.rejects(
       () => execTool.handler({ command: 'true' }) as Promise<unknown>,
       (err: unknown) => {
-        assert.match(String((err as Error).message ?? err), /more than 1 directories/);
+        // The scan was killed before it could answer, so the refusal names the budget and
+        // the knob that raises it. An incomplete scan must never mean "no sockets".
+        assert.match(String((err as Error).message ?? err), /budget/);
         assert.match(String((err as Error).message ?? err), /socketScan/);
         return true;
       },
     );
 
-    // The same tree is fine with the default budget (and fine immediately when the
-    // kernel table answers): the refusal is a bounded security control, not a hard
-    // workspace-size limit.
+    // The same tree is fine with the default budget: the refusal is a bounded security
+    // control, not a hard workspace-size limit.
     const permissive = createLocalTools({ cwd: tmpDir, sandboxNetwork: 'none' });
     const okRes = (await permissive.find((t2) => t2.name === 'exec_command')!.handler({ command: 'true' })) as any;
     assert.equal(okRes.exitCode, 0);
