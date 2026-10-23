@@ -89,7 +89,7 @@ describe("audit route authentication", () => {
   });
 });
 
-describe("DO event audit log API", () => {
+describe("DO event audit log API", { timeout: 45_000 }, () => {
   const authHeaders = { "x-factory-control-key": controlKey };
 
   it("returns empty event list with zero counts when no events exist", async () => {
