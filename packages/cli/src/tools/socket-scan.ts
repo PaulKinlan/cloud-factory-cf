@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import * as childProcess from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -92,6 +92,29 @@ const FIX_HINT =
 // Bare parens: `spawn` passes arguments through verbatim (no shell to eat them), and GNU
 // find rejects the backslash-escaped form when it arrives as a real argv element.
 const FIND_EXPRESSION = ['(', '-type', 's', '-o', '-type', 'l', '-xtype', 's', ')', '-print0'];
+
+/**
+ * `spawn` is reached through a narrow cast because this package's hand-written
+ * `node-env.d.ts` shim declares only `exec` for `node:child_process`, and editing the
+ * shim is a gate problem: the fast gate refuses a changed source file that no test
+ * references, and nothing references a `.d.ts` (cloud-factory-cf-llyg). `exec` is not an
+ * option here — it interpolates the workspace path into a shell command line.
+ */
+interface SpawnedFind {
+  stdout: { on(event: 'data', listener: (chunk: { toString(): string }) => void): void } | null;
+  stderr: { on(event: 'data', listener: (chunk: { toString(): string }) => void): void } | null;
+  on(event: 'error', listener: (error: { code?: string; message?: string }) => void): void;
+  on(event: 'close', listener: (code: number | null) => void): void;
+  kill(signal?: string): boolean;
+}
+
+type SpawnFn = (
+  command: string,
+  args: string[],
+  options: { stdio: Array<'ignore' | 'pipe'>; shell: boolean },
+) => SpawnedFind;
+
+const spawn = (childProcess as unknown as { spawn: SpawnFn }).spawn;
 
 /** NUL-delimited output, so a name containing a newline is not split in two. */
 export function parseFindOutput(stdout: string, root: string): string[] {
@@ -212,7 +235,7 @@ export async function walkWorkspaceSockets(
           // socket is exactly what `find`'s `-xtype s` catches, and it is checked below.
           if (isSocketEntry(entry)) {
             found.push(full);
-          } else if (entry.isSymbolicLink()) {
+          } else if (isSymbolicLinkEntry(entry)) {
             const target = await socketTarget(full);
             if (target !== null) found.push(full);
           } else if (entry.isDirectory()) {
@@ -246,6 +269,11 @@ type SocketEntry = { isSocket(): boolean };
 
 function isSocketEntry(entry: unknown): boolean {
   return (entry as SocketEntry).isSocket();
+}
+
+/** `Dirent.isSymbolicLink`, which the shim does not declare either. */
+function isSymbolicLinkEntry(entry: unknown): boolean {
+  return (entry as { isSymbolicLink(): boolean }).isSymbolicLink();
 }
 
 /** The real path a symlink reaches when that target is a socket, else `null`. */
