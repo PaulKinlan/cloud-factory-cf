@@ -51,7 +51,7 @@ function cookieAttrs(url: URL, path: string): string {
 }
 
 /** `<login>.<exp>.<hmac>`, signed over the login and its expiry. */
-async function mintSessionToken(
+export async function mintSessionToken(
   signingKey: string,
   login: string,
   nowMs: number = Date.now(),
@@ -758,7 +758,7 @@ export async function handleApiRepos(
       // A browser session speaks for its own login and nobody else's: asking for another
       // account's list is refused rather than silently answered, and an omitted owner
       // means "my repositories" — which is the 1-click path after an OAuth return.
-      if (owner && owner !== session.login) {
+      if (owner && owner.toLowerCase() !== session.login.toLowerCase()) {
         return Response.json(
           { ok: false, error: "not authorised to read another account's repositories" },
           { status: 403 },

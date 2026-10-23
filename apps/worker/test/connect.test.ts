@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ConnectStore } from "../src/events/connect";
 import { signBody, TEST_SECRET } from "./support/webhook";
 import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
+import { mintSessionToken } from "../src/routes/auth";
 
 /**
  * Webhook connection evidence (cloud-factory-cf-7gq.1).
@@ -165,5 +166,69 @@ describe("connect evidence", () => {
     expect(
       (await guarded({ ...env, BROKER_CONTROL_KEY: controlKey }, { "x-factory-control-key": controlKey })).status,
     ).toBe(200);
+  });
+
+  it("authorizes /trace/:owner/:repo/connect with browser session cookie without control key (cloud-factory-cf-qdud)", async () => {
+    const handler = (await import("../src/index")).default;
+    const signingKey = "test-broker-signing-key";
+    const token = await mintSessionToken(signingKey, "octodev");
+    const otherToken = await mintSessionToken(signingKey, "otheruser");
+
+    const testEnv = {
+      ...env,
+      BROKER_CONTROL_KEY: undefined,
+      BROKER_SIGNING_KEY: signingKey,
+    };
+
+    // 1. Valid session for octodev accessing octodev's repo succeeds even when BROKER_CONTROL_KEY is undefined
+    const res = await handler.fetch(
+      new Request("https://factory.example/trace/octodev/connect-ping/connect", {
+        headers: { cookie: `cf_session=${token}` },
+      }),
+      testEnv as never,
+    );
+    expect(res.status).toBe(200);
+
+    // 2. Session for otheruser attempting to read octodev's connection status returns 403
+    const forbidden = await handler.fetch(
+      new Request("https://factory.example/trace/octodev/connect-ping/connect", {
+        headers: { cookie: `cf_session=${otherToken}` },
+      }),
+      testEnv as never,
+    );
+    expect(forbidden.status).toBe(403);
+    const forbiddenJson = (await forbidden.json()) as any;
+    expect(forbiddenJson.error).toContain("another account");
+
+    // 3. Case-insensitive owner comparison (cloud-factory-cf-z1ch): "Octodev" matches session "octodev"
+    const caseRes = await handler.fetch(
+      new Request("https://factory.example/trace/Octodev/connect-ping/connect", {
+        headers: { cookie: `cf_session=${token}` },
+      }),
+      testEnv as never,
+    );
+    expect(caseRes.status).toBe(200);
+  });
+
+  it("rejects cookies signed with WEBHOOK_SECRET on /trace/:owner/:repo/connect (cloud-factory-cf-7suc)", async () => {
+    const handler = (await import("../src/index")).default;
+    const webhookSecret = "webhook-secret-only";
+    const token = await mintSessionToken(webhookSecret, "octodev");
+
+    // When broker keys are unset, WEBHOOK_SECRET must never authenticate a browser session (503 control key not configured)
+    const unsetEnv = {
+      ...env,
+      BROKER_CONTROL_KEY: undefined,
+      BROKER_SIGNING_KEY: undefined,
+      WEBHOOK_SECRET: webhookSecret,
+    };
+
+    const res = await handler.fetch(
+      new Request("https://factory.example/trace/octodev/connect-ping/connect", {
+        headers: { cookie: `cf_session=${token}` },
+      }),
+      unsetEnv as never,
+    );
+    expect(res.status).toBe(503);
   });
 });

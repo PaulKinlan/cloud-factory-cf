@@ -1234,5 +1234,37 @@ describe("/api/repos: the browser session minted by the connect callback (cloud-
     const whReqWithControlKey = new Request("https://example.com/api/repos?owner=octodev", { headers: { cookie: whCookie } });
     const whResWithControlKey = await handleApiRepos(whReqWithControlKey, { ...env, BROKER_SIGNING_KEY: "real-signing-key" } as any, new URL(whReqWithControlKey.url));
     expect(whResWithControlKey.status).toBe(401);
+
+    // 7. Case-insensitive owner comparison (cloud-factory-cf-z1ch): "Octodev" matches session "octodev"
+    const caseReq = new Request("https://example.com/api/repos?owner=Octodev", { headers: { cookie } });
+    const caseRes = await handleApiRepos(caseReq, envNoControlKey as any, new URL(caseReq.url));
+    expect(caseRes.status).toBe(200);
+    const caseData = (await caseRes.json()) as any;
+    expect(caseData.ok).toBe(true);
+  });
+
+  it("allows session auth on /api/repos even when BROKER_CONTROL_KEY is unset", async () => {
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    const sig = await sign(`octodev.${exp}`);
+    const cookie = `cf_session=octodev.${exp}.${sig}`;
+
+    // Test with handleApiRepos directly with env lacking BROKER_CONTROL_KEY
+    const req = new Request("https://example.com/api/repos?owner=octodev", {
+      headers: { cookie },
+    });
+    const testEnv = {
+      ...env,
+      BROKER_CONTROL_KEY: undefined,
+      BROKER_SIGNING_KEY: SESSION_SIGNING_KEY,
+    } as any;
+    const res = await handleApiRepos(req, testEnv, new URL(req.url));
+    expect(res.status).toBe(200);
+
+    // Machine caller with presented key gets 503 if controlKey is unset
+    const machineReq = new Request("https://example.com/api/repos?owner=octodev", {
+      headers: { "x-factory-control-key": "some-key" },
+    });
+    const machineRes = await handleApiRepos(machineReq, testEnv, new URL(machineReq.url));
+    expect(machineRes.status).toBe(503);
   });
 });

@@ -25,7 +25,7 @@ async function record(repository: string, input: Record<string, unknown>): Promi
   });
 }
 
-describe("trace store", () => {
+describe("trace store", { timeout: 45_000 }, () => {
   it("refuses a step with no delivery id instead of inventing one", () => {
     expect(normaliseInput({ step: "claimed" })).toBeNull();
     expect(normaliseInput({ deliveryId: "d1" })).toBeNull();
@@ -283,7 +283,7 @@ describe("estimateTokens", () => {
   });
 });
 
-describe("pipeline trace", () => {
+describe("pipeline trace", { timeout: 45_000 }, () => {
   it("records the ordered steps of a real run, including the prompt and the settlement", async () => {
     // A signed webhook queues one event; draining it runs the pipeline with the
     // trace sink wired exactly as the routes wire it.

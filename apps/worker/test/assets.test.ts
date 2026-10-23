@@ -33,4 +33,27 @@ describe("canvas assets on the API origin", () => {
     expect(response.status).toBe(404);
     expect(response.headers.get("content-type") ?? "").not.toContain("text/html");
   });
+
+  it("serves admin dashboard at /admin without redirect loops", async () => {
+    // Direct GET to /admin must serve 200 without 307 redirect loops
+    const adminRes = await SELF.fetch("https://example.com/admin", { redirect: "manual" });
+    expect(adminRes.status).toBe(200);
+    expect(adminRes.headers.get("content-type")).toContain("text/html");
+    const html = await adminRes.text();
+    expect(html).toContain("Admin Settings");
+
+    // Trailing slash /admin/ also serves 200 cleanly
+    const adminSlashRes = await SELF.fetch("https://example.com/admin/", { redirect: "manual" });
+    expect(adminSlashRes.status).toBe(200);
+    expect(adminSlashRes.headers.get("content-type")).toContain("text/html");
+
+    // With html_handling: "none", /admin.html also serves 200 directly without 307 redirect
+    const adminHtmlRes = await SELF.fetch("https://example.com/admin.html", { redirect: "manual" });
+    expect(adminHtmlRes.status).toBe(200);
+    expect(adminHtmlRes.headers.get("content-type")).toContain("text/html");
+
+    // Non-GET/HEAD methods to /admin return 405
+    const postRes = await SELF.fetch("https://example.com/admin", { method: "POST" });
+    expect(postRes.status).toBe(405);
+  });
 });
