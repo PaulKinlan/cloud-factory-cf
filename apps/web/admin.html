@@ -217,12 +217,12 @@
       </section>
 
       <!-- Navigation Tabs -->
-      <nav class="admin-tabs" role="tablist">
-        <button type="button" id="tab-btn-user" class="admin-tab admin-tab--active" role="tab" aria-selected="true" aria-controls="tab-content-user">
-          👤 My Account &amp; BYOK Keys
-        </button>
-        <button type="button" id="tab-btn-root" class="admin-tab" role="tab" aria-selected="false" aria-controls="tab-content-root">
+      <nav id="admin-tabs-nav" class="admin-tabs" role="tablist" hidden>
+        <button type="button" id="tab-btn-root" class="admin-tab admin-tab--active" role="tab" aria-selected="true" aria-controls="tab-content-root">
           🏛️ Root System Setup
+        </button>
+        <button type="button" id="tab-btn-user" class="admin-tab" role="tab" aria-selected="false" aria-controls="tab-content-user">
+          👤 My Account &amp; BYOK Keys
         </button>
         <button type="button" id="tab-btn-repo" class="admin-tab" role="tab" aria-selected="false" aria-controls="tab-content-repo">
           📦 Repository Overrides
@@ -230,9 +230,23 @@
       </nav>
 
       <!-- ========================================================================= -->
-      <!-- TAB 1: User Account & BYOK AI Keys (Default for Users)                    -->
+      <!-- TAB 1: User Account & BYOK AI Keys                                        -->
       <!-- ========================================================================= -->
-      <div id="tab-content-user" role="tabpanel" aria-labelledby="tab-btn-user">
+      <div id="tab-content-user" role="tabpanel" aria-labelledby="tab-btn-user" hidden>
+        <!-- User Login Prompt Card (Shown when not authenticated) -->
+        <section id="user-login-prompt-card" class="admin-card">
+          <h2>👤 My Account &amp; BYOK Keys</h2>
+          <p class="muted">
+            Sign in with GitHub or your Passkey to manage your personal AI provider API keys (Anthropic, OpenAI, DeepSeek, Gemini) and connected repositories.
+          </p>
+          <div style="display:flex; flex-wrap:wrap; gap:12px; margin-top:16px;">
+            <a id="btn-user-prompt-github" href="/auth/github/login?redirect_uri=/admin" class="button button--agent" style="text-decoration:none;">🐙 Sign in with GitHub</a>
+            <button type="button" id="btn-user-prompt-passkey" class="button button--ghost">🔑 Sign in with Passkey</button>
+          </div>
+        </section>
+
+        <!-- User Configuration Sections (Visible when authenticated) -->
+        <div id="user-config-sections" hidden>
         <!-- User BYOK Keys Card -->
         <section class="admin-card">
           <h2>🧠 Bring Your Own Key (BYOK) AI Providers</h2>
@@ -354,33 +368,40 @@
             <button type="button" id="btn-register-passkey-user" class="button button--ghost">Register New Passkey</button>
           </div>
         </section>
+        </div>
       </div>
 
       <!-- ========================================================================= -->
       <!-- TAB 2: Root System Setup (Platform Owner)                                -->
       <!-- ========================================================================= -->
-      <div id="tab-content-root" role="tabpanel" aria-labelledby="tab-btn-root" hidden>
-        <!-- Root Bootstrap Card (When not authenticated as Root) -->
+      <div id="tab-content-root" role="tabpanel" aria-labelledby="tab-btn-root">
+        <!-- Root Bootstrap Card (Step 1: Unlocks Root Setup) -->
         <section id="root-unlock-card" class="admin-card" style="border-color:var(--agent);">
-          <h2>🔐 Root Administrator Bootstrap</h2>
+          <h2>🔐 Step 1: Enter Broker Control Key</h2>
           <p class="muted">
             The Root Admin bootstrap password matches the <code>BROKER_CONTROL_KEY</code> secret configured on your Cloudflare Worker.
             Enter it once here to unlock system-wide GitHub App and Customer provisioning!
           </p>
+          <div id="root-missing-key-warning" class="alert alert--danger" hidden>
+            ⚠️ <code>BROKER_CONTROL_KEY</code> is not configured on this Cloudflare Worker yet. Run: <code>npx wrangler secret put BROKER_CONTROL_KEY</code>
+          </div>
           <div class="admin-grid">
             <label class="field admin-grid--full">
               <span>Root Bootstrap Password / Control Key (<code>BROKER_CONTROL_KEY</code>)</span>
               <input id="root-bootstrap-key" class="field__control" type="password" placeholder="Enter BROKER_CONTROL_KEY" autocomplete="off" />
             </label>
           </div>
-          <div class="admin-actions">
-            <button type="button" id="btn-root-login" class="button button--agent">🏛️ Unlock Root Admin</button>
+          <div class="admin-actions" style="justify-content:space-between; align-items:center;">
+            <button type="button" id="btn-root-passkey-unlock" class="button button--ghost">🔑 Unlock with Passkey</button>
+            <button type="button" id="btn-root-login" class="button button--agent">🏛️ Unlock Root Setup</button>
           </div>
         </section>
 
+        <!-- Configuration Sections (Step 2 - 5) - Visible only when Root Admin is Unlocked -->
+        <div id="root-config-sections" hidden>
         <!-- System GitHub App Credentials Card -->
         <section class="admin-card">
-          <h2>🐙 System GitHub App Credentials (Deployment-Wide)</h2>
+          <h2>🐙 Step 2: System GitHub App Credentials (Deployment-Wide)</h2>
           <p class="muted">
             The centralized GitHub App credentials used by the deployment to handle 1-click OAuth logins, mint installation access tokens, and verify global webhooks.
             <strong>No repository scope is required.</strong>
@@ -415,7 +436,7 @@
 
         <!-- Global Webhook & Ingestion Card -->
         <section class="admin-card">
-          <h2>⚡ Global GitHub App Webhook &amp; Test Ping</h2>
+          <h2>⚡ Step 3: Global GitHub App Webhook &amp; Test Ping</h2>
           <p class="muted">
             Configure this Webhook URL in your GitHub App settings on GitHub. Every repository with the App installed will automatically send events here.
           </p>
@@ -443,7 +464,7 @@
 
         <!-- Customer & User Provisioning Card -->
         <section class="admin-card">
-          <h2>👥 Customer &amp; User Provisioning</h2>
+          <h2>👥 Step 4: Customer &amp; User Provisioning</h2>
           <p class="muted">Configure customer tenancy and platform owner permissions.</p>
           <div class="admin-grid">
             <label class="field admin-grid--full">
@@ -467,7 +488,7 @@
 
         <!-- Root Passkeys Card -->
         <section class="admin-card" style="margin-top:24px;">
-          <h2>🔑 Root Admin Passkeys</h2>
+          <h2>🔑 Step 5: Root Admin Passkeys</h2>
           <p class="muted">Passkeys registered for the Root Administrator. Use these to unlock the Root System Setup tab instantly without typing the bootstrap key.</p>
           <table class="passkey-table">
             <thead>
@@ -485,6 +506,7 @@
             <button type="button" id="btn-register-passkey-root" class="button button--ghost">Register Root Admin Passkey</button>
           </div>
         </section>
+        </div>
       </div>
 
       <!-- ========================================================================= -->

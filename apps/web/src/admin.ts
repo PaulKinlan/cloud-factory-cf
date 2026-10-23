@@ -153,6 +153,7 @@ export function initAdminDashboard(): void {
   const userAccountLabel = document.getElementById('user-account-label') as HTMLElement | null;
 
   // Tabs
+  const adminTabsNav = document.getElementById('admin-tabs-nav') as HTMLElement | null;
   const tabBtnUser = document.getElementById('tab-btn-user') as HTMLButtonElement | null;
   const tabBtnRoot = document.getElementById('tab-btn-root') as HTMLButtonElement | null;
   const tabBtnRepo = document.getElementById('tab-btn-repo') as HTMLButtonElement | null;
@@ -162,8 +163,11 @@ export function initAdminDashboard(): void {
 
   // Root Elements
   const rootUnlockCard = document.getElementById('root-unlock-card') as HTMLElement | null;
+  const rootMissingKeyWarning = document.getElementById('root-missing-key-warning') as HTMLElement | null;
   const rootBootstrapKeyInput = document.getElementById('root-bootstrap-key') as HTMLInputElement | null;
   const btnRootLogin = document.getElementById('btn-root-login') as HTMLButtonElement | null;
+  const btnRootPasskeyUnlock = document.getElementById('btn-root-passkey-unlock') as HTMLButtonElement | null;
+  const rootConfigSections = document.getElementById('root-config-sections') as HTMLElement | null;
   const appIdInput = document.getElementById('github-app-id') as HTMLInputElement | null;
   const appSlugInput = document.getElementById('github-app-slug') as HTMLInputElement | null;
   const clientIdInput = document.getElementById('github-client-id') as HTMLInputElement | null;
@@ -182,6 +186,11 @@ export function initAdminDashboard(): void {
   const btnSaveSystem = document.getElementById('btn-save-system') as HTMLButtonElement | null;
   const rootPasskeyTbody = document.getElementById('root-passkey-tbody') as HTMLElement | null;
   const btnRegisterPasskeyRoot = document.getElementById('btn-register-passkey-root') as HTMLButtonElement | null;
+
+  // User Elements
+  const userLoginPromptCard = document.getElementById('user-login-prompt-card') as HTMLElement | null;
+  const userConfigSections = document.getElementById('user-config-sections') as HTMLElement | null;
+  const btnUserPromptPasskey = document.getElementById('btn-user-prompt-passkey') as HTMLButtonElement | null;
 
   // User BYOK Elements
   const anthropicKeyInput = document.getElementById('anthropic-key') as HTMLInputElement | null;
@@ -280,29 +289,38 @@ export function initAdminDashboard(): void {
       // offline or error
     }
 
+    const isSystemSetup = Boolean(currentSession.githubConfigured);
+    const isRoot = Boolean(currentSession.isRootAdmin);
+    const isUserLoggedIn = Boolean(currentSession.authenticated && currentSession.login && currentSession.login !== '__root__');
+
     if (authStateText) {
-      if (currentSession.authenticated) {
-        authStateText.textContent = `Active session: @${currentSession.login ?? 'user'}`;
+      if (isUserLoggedIn) {
+        authStateText.textContent = `Active session: @${currentSession.login}`;
+      } else if (isRoot) {
+        authStateText.textContent = 'Root Administrator (Full System Authority)';
+      } else if (!isSystemSetup) {
+        authStateText.textContent = 'System setup required — Step 1: Enter BROKER_CONTROL_KEY below';
       } else {
         authStateText.textContent = 'Not signed in';
       }
     }
 
     if (userBadge) {
-      userBadge.hidden = !currentSession.authenticated;
+      userBadge.hidden = !isUserLoggedIn;
       if (currentSession.login) userBadge.textContent = `@${currentSession.login}`;
     }
 
     if (rootBadge) {
-      rootBadge.hidden = !currentSession.isRootAdmin;
+      rootBadge.hidden = !isRoot;
     }
 
     if (userAccountLabel) {
-      userAccountLabel.textContent = currentSession.login ? `@${currentSession.login} scope` : 'account scope';
+      userAccountLabel.textContent = isUserLoggedIn ? `@${currentSession.login} scope` : 'account scope';
     }
 
+    // GitHub login button: hidden if already logged in as GitHub user, or if system is not setup yet
     if (btnGithubLogin) {
-      btnGithubLogin.hidden = currentSession.authenticated;
+      btnGithubLogin.hidden = isUserLoggedIn || !isSystemSetup;
     }
 
     if (btnPasskeyLogin) {
@@ -317,8 +335,35 @@ export function initAdminDashboard(): void {
       btnLogout.hidden = !currentSession.authenticated;
     }
 
+    // Root setup view: Step 1 unlock card vs Step 2-5 configuration sections
     if (rootUnlockCard) {
-      rootUnlockCard.hidden = currentSession.isRootAdmin;
+      rootUnlockCard.hidden = isRoot;
+    }
+    if (rootConfigSections) {
+      rootConfigSections.hidden = !isRoot;
+    }
+    if (rootMissingKeyWarning) {
+      rootMissingKeyWarning.hidden = currentSession.hasControlKey !== false;
+    }
+
+    // User tab view: prompt card vs config sections
+    if (userLoginPromptCard) {
+      userLoginPromptCard.hidden = Boolean(currentSession.authenticated);
+    }
+    if (userConfigSections) {
+      userConfigSections.hidden = !currentSession.authenticated;
+    }
+
+    // Tab bar visibility:
+    // When the system is NOT set up yet, Root System Setup is the ONLY option visible!
+    if (!isSystemSetup) {
+      if (adminTabsNav) adminTabsNav.hidden = true;
+      switchTab('root');
+    } else {
+      if (adminTabsNav) adminTabsNav.hidden = false;
+      if (isUserLoggedIn && !isRoot && tabContentUser?.hidden && tabContentRoot && !tabContentRoot.hidden) {
+        switchTab('user');
+      }
     }
 
     // Auto-load data for authenticated session
@@ -368,6 +413,16 @@ export function initAdminDashboard(): void {
   });
 
   // Root Bootstrap Unlock
+  rootBootstrapKeyInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      btnRootLogin?.click();
+    }
+  });
+
+  btnRootPasskeyUnlock?.addEventListener('click', () => btnPasskeyLogin?.click());
+  btnUserPromptPasskey?.addEventListener('click', () => btnPasskeyLogin?.click());
+
   btnRootLogin?.addEventListener('click', async () => {
     const key = rootBootstrapKeyInput?.value.trim();
     if (!key) {
@@ -887,6 +942,7 @@ export function initAdminDashboard(): void {
       if (res.ok && data.ok) {
         showStatus('Root System Settings saved successfully!');
         await loadSystemSettings();
+        await refreshSession();
       } else {
         showStatus(data.error ?? `Save failed (HTTP ${res.status})`, true);
       }
