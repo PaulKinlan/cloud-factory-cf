@@ -138,9 +138,9 @@ interface FindRun {
   missing: boolean;
 }
 
-function runFind(root: string, timeoutMs: number): Promise<FindRun> {
+function runFind(findBinary: string, root: string, timeoutMs: number): Promise<FindRun> {
   return new Promise((resolve) => {
-    const child = spawn('find', [root, ...FIND_EXPRESSION], {
+    const child = spawn(findBinary, [root, ...FIND_EXPRESSION], {
       stdio: ['ignore', 'pipe', 'pipe'],
       // No shell: the workspace path is data, not code.
       shell: false,
@@ -293,6 +293,37 @@ async function socketTarget(link: string): Promise<string | null> {
  * Every socket the sandbox must mask for `root`: sockets in the workspace plus symlinks
  * that reach one. Throws `SocketScanError` rather than return a partial answer.
  */
+/**
+ * Absolute locations of `find`, in preference order. `find` is **never** resolved through
+ * `PATH`: an `npm`-style `PATH` commonly starts with the workspace's `node_modules/.bin`,
+ * so a repository could ship an executable called `find` that exits 0 with no output and
+ * have the scan report "no sockets" — the mask would then be applied to nothing
+ * (cloud-factory-cf-5vuu, rev-sandbox-4 PATH-hijack finding).
+ */
+const FIND_BINARIES = ['/usr/bin/find', '/bin/find', '/usr/local/bin/find'] as const;
+
+async function realpathOrNull(target: string): Promise<string | null> {
+  try {
+    return await fs.realpath(target);
+  } catch {
+    return null;
+  }
+}
+
+async function resolveFindBinary(root: string): Promise<string | null> {
+  const realRoot = await realpathOrNull(path.resolve(root));
+  const prefix = realRoot === null ? null : realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
+  for (const candidate of FIND_BINARIES) {
+    const real = await realpathOrNull(candidate);
+    if (real === null) continue;
+    // Belt and braces on top of the absolute path: never execute a `find` that lives
+    // inside the workspace being scanned.
+    if (prefix !== null && (real === realRoot || real.startsWith(prefix))) continue;
+    return real;
+  }
+  return null;
+}
+
 export async function scanWorkspaceSockets(
   root: string,
   options: SocketScanOptions = {},
@@ -300,7 +331,20 @@ export async function scanWorkspaceSockets(
   const startedAt = Date.now();
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-  const result = await runFind(root, timeoutMs);
+  const findBinary = await resolveFindBinary(root);
+  if (findBinary === null) {
+    // No trustworthy `find` on this host: use the complete-or-refuse walk, which needs no
+    // external binary at all.
+    const walk = await walkWorkspaceSockets(root, options);
+    return {
+      sockets: walk.sockets,
+      source: 'walk',
+      dirsScanned: walk.dirsScanned,
+      elapsedMs: Date.now() - startedAt,
+    };
+  }
+
+  const result = await runFind(findBinary, root, timeoutMs);
 
   if (result.missing) {
     // No `find` on this host: fall back to the complete-or-refuse walk.

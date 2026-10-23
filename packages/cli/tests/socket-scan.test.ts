@@ -150,20 +150,42 @@ test('scanWorkspaceSockets: an unrelated socket outside the workspace is left al
   }
 });
 
-test('scanWorkspaceSockets: refuses instead of masking nothing when the scan cannot finish', async () => {
-  const root = await tempWorkspace('fc-scan-timeout-');
-  await fs.mkdir(path.join(root, 'a', 'b', 'c'), { recursive: true });
+test('scanWorkspaceSockets: refuses instead of masking nothing when the scan cannot read the workspace', async () => {
+  const root = await tempWorkspace('fc-scan-partial-');
   try {
+    // `find` exits non-zero when it cannot read everything, and a partial read must never
+    // be reported as "no sockets": that is the failure mode where the mask is applied to
+    // nothing while a host socket sits in the unreadable part of the tree.
     await assert.rejects(
-      () => scanWorkspaceSockets(root, { timeoutMs: 0 }),
+      () => scanWorkspaceSockets(path.join(root, 'does-not-exist')),
       (err: unknown) => {
         assert.ok(err instanceof SocketScanError);
-        assert.match(err.message, /budget/);
+        assert.match(err.message, /could not read the whole workspace/);
         assert.match(err.message, /socketScan/);
         return true;
       },
     );
   } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('scanWorkspaceSockets: refuses when an unreadable subtree stops find (unless root)', async (t) => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    t.skip('root ignores directory permissions');
+    return;
+  }
+  const root = await tempWorkspace('fc-scan-locked-');
+  const locked = path.join(root, 'locked');
+  await fs.mkdir(locked);
+  await fs.chmod(locked, 0o000);
+  try {
+    await assert.rejects(
+      () => scanWorkspaceSockets(root),
+      (err: unknown) => err instanceof SocketScanError && /could not read/.test(err.message),
+    );
+  } finally {
+    await fs.chmod(locked, 0o755).catch(() => {});
     await fs.rm(root, { recursive: true, force: true });
   }
 });
@@ -216,6 +238,46 @@ test('walkWorkspaceSockets: refuses instead of failing open when a directory can
     );
   } finally {
     await fs.chmod(locked, 0o755).catch(() => {});
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test('scanWorkspaceSockets: a workspace-provided `find` on PATH cannot silence the scan (PATH hijack)', async () => {
+  const root = await tempWorkspace('fc-scan-path-');
+  const binDir = path.join(root, 'node_modules', '.bin');
+  await fs.mkdir(binDir, { recursive: true });
+  // What a hostile (or merely odd) repository can ship: a `find` that claims the workspace
+  // is empty. If discovery resolved `find` through PATH — and an npm-style PATH starts
+  // with the workspace's .bin — the mask would be applied to nothing.
+  const fakeFind = path.join(binDir, 'find');
+  await fs.writeFile(fakeFind, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const close = await listenUnixSocket(path.join(root, 'host.sock'));
+
+  const previousPath = process.env.PATH;
+  try {
+    process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+    const result = await scanWorkspaceSockets(root);
+    // Absolute-path resolution means the real `find` runs, so the socket is still found.
+    assert.ok(result.sockets.includes(path.join(root, 'host.sock')), `expected host.sock, got ${JSON.stringify(result.sockets)}`);
+  } finally {
+    process.env.PATH = previousPath;
+    await close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('scanWorkspaceSockets: prefers the system find even when the workspace shadows it', async () => {
+  const root = await tempWorkspace('fc-scan-shadow-');
+  // A `find` at the workspace root as well, in case anything ever resolves relatively.
+  await fs.writeFile(path.join(root, 'find'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const close = await listenUnixSocket(path.join(root, 'deep.sock'));
+  try {
+    const result = await scanWorkspaceSockets(root);
+    assert.deepEqual(result.sockets, [path.join(root, 'deep.sock')]);
+    assert.equal(result.source, 'find');
+  } finally {
+    await close();
     await fs.rm(root, { recursive: true, force: true });
   }
 });

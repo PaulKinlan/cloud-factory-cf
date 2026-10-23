@@ -339,28 +339,37 @@ test('createLocalTools: an incomplete socket scan refuses the command instead of
     await fs.mkdir(path.join(tmpDir, 'one'));
     await fs.mkdir(path.join(tmpDir, 'two'));
 
+    // An unreadable subtree makes the discovery step fail closed rather than answer with a
+    // partial list. (A timing-based trigger is a race: `find` can finish before a zero
+    // budget kills it, which would make this test assert nothing.)
+    const locked = path.join(tmpDir, 'locked');
+    await fs.mkdir(locked);
+    await fs.chmod(locked, 0o000);
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      t.skip('root ignores directory permissions');
+      return;
+    }
+
     const tools = createLocalTools({
       cwd: tmpDir,
       sandboxNetwork: 'none',
-      // A zero budget kills the discovery step before it can answer. The point is that an
-      // incomplete scan refuses the command instead of running with an unverified mask.
-      socketScan: { timeoutMs: 0 },
     });
     const execTool = tools.find((t2) => t2.name === 'exec_command')!;
 
     await assert.rejects(
       () => execTool.handler({ command: 'true' }) as Promise<unknown>,
       (err: unknown) => {
-        // The scan was killed before it could answer, so the refusal names the budget and
-        // the knob that raises it. An incomplete scan must never mean "no sockets".
-        assert.match(String((err as Error).message ?? err), /budget/);
+        // The refusal names what could not be read and the knob that changes the scan; an
+        // incomplete scan must never be interpreted as "no sockets".
+        assert.match(String((err as Error).message ?? err), /could not read/);
         assert.match(String((err as Error).message ?? err), /socketScan/);
         return true;
       },
     );
 
-    // The same tree is fine with the default budget: the refusal is a bounded security
-    // control, not a hard workspace-size limit.
+    // With the subtree readable again the same workspace runs: the refusal is a
+    // fail-closed control, not a property of the tree.
+    await fs.chmod(locked, 0o755);
     const permissive = createLocalTools({ cwd: tmpDir, sandboxNetwork: 'none' });
     const okRes = (await permissive.find((t2) => t2.name === 'exec_command')!.handler({ command: 'true' })) as any;
     assert.equal(okRes.exitCode, 0);
