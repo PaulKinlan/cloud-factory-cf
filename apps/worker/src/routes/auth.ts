@@ -167,7 +167,7 @@ export async function handleGithubLogin(
   env: Env,
   url: URL,
 ): Promise<Response> {
-  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY ?? env.WEBHOOK_SECRET;
+  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
   if (!signingKey) {
     return Response.json({ ok: false, error: "broker signing key not configured" }, { status: 503 });
   }
@@ -284,7 +284,7 @@ export async function handleGithubCallback(
   env: Env,
   url: URL,
 ): Promise<Response> {
-  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY ?? env.WEBHOOK_SECRET;
+  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
   if (!signingKey) {
     return Response.json({ ok: false, error: "broker signing key not configured" }, { status: 503 });
   }
@@ -737,17 +737,20 @@ export async function handleApiRepos(
   url: URL,
 ): Promise<Response> {
   const controlKey = env.BROKER_CONTROL_KEY;
-  if (!controlKey) {
+  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
+
+  if (!controlKey && !signingKey) {
     return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
   }
-  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY ?? env.WEBHOOK_SECRET;
 
   let owner = url.searchParams.get("owner");
   let authorised = false;
 
   // Machine callers present the control key (unchanged contract).
   const presented = request.headers.get("x-factory-control-key");
-  if (presented && (await sameSecret(controlKey, presented))) authorised = true;
+  if (presented && controlKey && (await sameSecret(controlKey, presented))) {
+    authorised = true;
+  }
 
   if (!authorised && signingKey) {
     const session = await readSession(request.headers, signingKey);
@@ -767,6 +770,9 @@ export async function handleApiRepos(
   }
 
   if (!authorised) {
+    if (presented && !controlKey) {
+      return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
+    }
     return Response.json({ ok: false, error: "not authorised to access repository metadata" }, { status: 401 });
   }
 

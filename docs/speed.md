@@ -1,8 +1,8 @@
 # Speed: gate budget for cloud-factory-cf
 
 Landing speed is the fleet's throughput, so this repo states what a gate costs
-and what each tier is expected to run. Times measured on the fleet VM
-(2026-10-18, node 24, vitest 4.1.12, wrangler 4.151.1), warm `node_modules`
+and what each tier is expected to run. Times measured on the fleet VM (2026-10-18 baseline, updated 2026-10-22 for
+workerd serialization; node 24, vitest 4.1.12, wrangler 4.151.1), warm `node_modules`
 served by `fleet-deps`.
 
 ## Commands and what they cost
@@ -11,8 +11,8 @@ served by `fleet-deps`.
 | --- | --- | --- |
 | `npm run build` | `vite build` for `apps/web`, then `wrangler deploy --dry-run` — bundles the Worker, validates `wrangler.jsonc`, DO bindings, migrations and the `ASSETS` directory | 2.0–2.3s |
 | `npm run typecheck` | `tsc --noEmit` per workspace (sdk, cli, worker, web) | 4.0–4.4s |
-| `npm test` | `vitest run` inside workerd (`@cloudflare/vitest-plugin`, serialized via `fileParallelism: false`), `node:test` for packages (`canvas-model`, `sdk`, `cli`), and Vitest for `apps/web` | ~185s full suite under load (78s for 6 files); deterministic pass |
-| `npm run ci` | build + typecheck + test | 14–17s idle VM; 45s+ when the VM is loaded |
+| `npm test` | `vitest run` inside workerd (`@cloudflare/vitest-plugin`, serialized via `fileParallelism: false`), `node:test` for packages (`canvas-model`, `sdk`, `cli`), and Vitest for `apps/web` | ~185–400s full suite under VM load (78s for 6 files); deterministic pass |
+| `npm run ci` | build + typecheck + test | ~190–410s loaded VM (build ~2s + typecheck ~4s + test); test step dominates |
 | `npm run test:file -- test/<file>.test.ts` | one workerd test file | 2–3s |
 | `npm run test -w @factory-cloud/canvas-model` | `node:test` model tests (`packages/canvas-model`) | 0.2s |
 | `npm run test -w @factory-cloud/web` | one node-mode test file set (canvas model) | 0.9s |
@@ -149,8 +149,7 @@ tree went green once `apps/web/dist` existed.
 
 - Fast tier target: **≤ 60s**. Escalate before it crosses that on an ordinary
   change.
-- Full gate target: **≤ 120s**. A change that pushes past it must say so with a
-  measurement in its `LAND-SUMMARY`.
+- Full gate target: **≤ 120s** (historical baseline; under serialized workerd suites on a loaded VM, the full gate ranges ~185–400s). A change that pushes past current ranges must say so with a measurement in its `LAND-SUMMARY`.
 - Adding a test that costs ~1s (like the `@cloudflare/computer` resolution
   guard) is fine when it protects a real contract; say so in the summary.
 

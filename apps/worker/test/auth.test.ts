@@ -1,5 +1,6 @@
 import { env, SELF } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { handleApiRepos } from "../src/routes/auth";
 
 function setupDefaultFetch() {
   vi.stubGlobal(
@@ -1150,5 +1151,88 @@ describe("/api/repos: the browser session minted by the connect callback (cloud-
       headers: { cookie: `cf_session=victimorg.${exp}.${await sign(`octodev.${exp}`)}` },
     });
     expect(retargeted.status).toBe(401);
+  });
+
+  it("allows browser session auth in handleApiRepos when BROKER_CONTROL_KEY is unset (cloud-factory-cf-owqq)", async () => {
+    const cookie = await connect();
+
+    // 1. Valid browser session authenticates successfully even when BROKER_CONTROL_KEY is undefined
+    const envNoControlKey = { ...env, BROKER_CONTROL_KEY: undefined };
+    const ownReq = new Request("https://example.com/api/repos?owner=octodev", { headers: { cookie } });
+    const ownRes = await handleApiRepos(ownReq, envNoControlKey as any, new URL(ownReq.url));
+    expect(ownRes.status).toBe(200);
+    const ownData = (await ownRes.json()) as any;
+    expect(ownData.ok).toBe(true);
+    expect(ownData.repositories.map((repo: any) => repo.fullName)).toEqual([
+      "octodev/widget-service",
+      "octodev/secret-project",
+    ]);
+
+    // 2. Implicit owner with omitted ?owner= query parameter still works without control key
+    const implicitReq = new Request("https://example.com/api/repos", { headers: { cookie } });
+    const implicitRes = await handleApiRepos(implicitReq, envNoControlKey as any, new URL(implicitReq.url));
+    expect(implicitRes.status).toBe(200);
+    expect(((await implicitRes.json()) as any).count).toBe(2);
+
+    // 3. Machine caller presenting control key when BROKER_CONTROL_KEY is unset returns 503
+    const machineReq = new Request("https://example.com/api/repos?owner=octodev", {
+      headers: { "x-factory-control-key": "some-key" },
+    });
+    const machineRes = await handleApiRepos(machineReq, envNoControlKey as any, new URL(machineReq.url));
+    expect(machineRes.status).toBe(503);
+    const machineData = (await machineRes.json()) as any;
+    expect(machineData.ok).toBe(false);
+    expect(machineData.error).toContain("control key not configured");
+
+    // 4. Request without session cookie and without control key returns 401
+    const unauthReq = new Request("https://example.com/api/repos?owner=octodev");
+    const unauthRes = await handleApiRepos(unauthReq, envNoControlKey as any, new URL(unauthReq.url));
+    expect(unauthRes.status).toBe(401);
+
+    // 5. When neither control key nor signing key is configured, returns 503
+    const envNoKeys = {
+      ...env,
+      BROKER_CONTROL_KEY: undefined,
+      BROKER_SIGNING_KEY: undefined,
+      WEBHOOK_SECRET: undefined,
+    };
+    const noKeysReq = new Request("https://example.com/api/repos?owner=octodev", { headers: { cookie } });
+    const noKeysRes = await handleApiRepos(noKeysReq, envNoKeys as any, new URL(noKeysReq.url));
+    expect(noKeysRes.status).toBe(503);
+    const noKeysData = (await noKeysRes.json()) as any;
+    expect(noKeysData.ok).toBe(false);
+    expect(noKeysData.error).toContain("control key not configured");
+
+    // 6. WEBHOOK_SECRET must never authenticate a session cookie (cloud-factory-cf-yk2j)
+    const webhookOnlyEnv = {
+      ...env,
+      BROKER_CONTROL_KEY: undefined,
+      BROKER_SIGNING_KEY: undefined,
+      WEBHOOK_SECRET: "my-webhook-secret",
+    };
+    // Sign cookie with WEBHOOK_SECRET
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    const enc = new TextEncoder();
+    const whKey = await crypto.subtle.importKey(
+      "raw",
+      enc.encode("my-webhook-secret"),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const whSig = Array.from(new Uint8Array(await crypto.subtle.sign("HMAC", whKey, enc.encode(`octodev.${exp}`))))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    const whCookie = `cf_session=octodev.${exp}.${whSig}`;
+
+    const whReq = new Request("https://example.com/api/repos?owner=octodev", { headers: { cookie: whCookie } });
+    const whRes = await handleApiRepos(whReq, webhookOnlyEnv as any, new URL(whReq.url));
+    // Since neither BROKER_CONTROL_KEY nor BROKER_SIGNING_KEY is set, returns 503 (WEBHOOK_SECRET is not accepted)
+    expect(whRes.status).toBe(503);
+
+    // And with BROKER_CONTROL_KEY configured, a WEBHOOK_SECRET-signed cookie is rejected with 401
+    const whReqWithControlKey = new Request("https://example.com/api/repos?owner=octodev", { headers: { cookie: whCookie } });
+    const whResWithControlKey = await handleApiRepos(whReqWithControlKey, { ...env, BROKER_SIGNING_KEY: "real-signing-key" } as any, new URL(whReqWithControlKey.url));
+    expect(whResWithControlKey.status).toBe(401);
   });
 });
