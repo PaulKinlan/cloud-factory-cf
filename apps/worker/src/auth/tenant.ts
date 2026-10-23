@@ -24,8 +24,9 @@ import { readSession } from "../routes/auth";
  * weaker credential. Comparison is case-insensitive because GitHub logins are.
  *
  * A deployment needs *one* of the two credentials configured: a session signing key
- * (`BROKER_SIGNING_KEY`, falling back to `BROKER_CONTROL_KEY`/`WEBHOOK_SECRET`) is
- * enough for browsers, so removing the master control key does not lock the UI out.
+ * (`BROKER_SIGNING_KEY`, falling back to `BROKER_CONTROL_KEY` and nothing else) is enough
+ * for browsers, so removing the master control key does not lock the UI out. A webhook
+ * secret is never a session key — see `sessionSigningKey` below.
  */
 
 /** Who called, and which credential proved it. */
