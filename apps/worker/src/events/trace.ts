@@ -1,3 +1,4 @@
+import { isMissingSchemaError } from "./sql-errors.ts";
 import { asRecord, clampInt, safeParseJson } from "./helpers";
 
 /**
@@ -124,7 +125,11 @@ export class RunTraceStore {
       this.trim();
       this.broadcast(step);
       return step;
-    } catch {
+    } catch (err) {
+      // A transient missing-schema error must reach the coordinator's retry; swallowing it
+      // here turned it into a 400 for a request that would have succeeded
+      // (cloud-factory-cf-1k1y). Anything else is a bad payload: null, and a 400.
+      if (isMissingSchemaError(err)) throw err;
       return null;
     }
   }

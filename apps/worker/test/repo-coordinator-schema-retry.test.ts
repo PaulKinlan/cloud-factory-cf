@@ -68,6 +68,35 @@ describe("RepoCoordinator schema retry", () => {
     expect(await tableExists(repository, "events")).toBe(true);
   });
 
+  it("retries a POST with its body intact, not with an empty one (cloud-factory-cf-1k1y)", async () => {
+    const repository = "acme/schema-retry-body";
+    const stub = coordinator(repository);
+    await stub.fetch(`${BASE}/trace`);
+    await dropTable(repository, "run_trace");
+
+    // A retry that re-sent the consumed stream would reach the handler with no body and
+    // answer 400; the clone is taken before the first attempt so the retry still has it.
+    const response = await stub.fetch(`${BASE}/trace`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        deliveryId: "delivery-body",
+        step: "gate",
+        status: "ok",
+        detail: "body survived the retry",
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { ok: boolean; step: { step: string } | null };
+    expect(body.ok).toBe(true);
+    expect(body.step?.step).toBe("gate");
+    // And the row is really there afterwards.
+    const list = await stub.fetch(`${BASE}/trace`);
+    expect(list.status).toBe(200);
+    expect(JSON.stringify(await list.json())).toContain("body survived the retry");
+  });
+
   it("does not swallow an error that is not a missing table", async () => {
     const repository = "acme/schema-retry-other";
     const stub = coordinator(repository);
