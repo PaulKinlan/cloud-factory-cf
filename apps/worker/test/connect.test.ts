@@ -282,4 +282,54 @@ describe("connect evidence", () => {
     expect(body.ok).toBe(true);
     expect(body.connect.pings).toBe(3);
   });
+
+  it("does not permanently seal on lowercase initial read, preserving later legacy mixed-case recovery (cloud-factory-cf-71la)", async () => {
+    // 1. GitHub: Seed legacy DO directly under mixed-case name
+    const legacyStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("github:Octodev/Probe-Foreclose"));
+    await runInDurableObject(legacyStub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES ('default', '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', 'ping', 2, '2026-10-20T00:00:00Z')",
+      );
+    });
+
+    // 2. Read lowercase first (derived from an unspecific request spelling)
+    const readLower = await SELF.fetch("https://factory.example/trace/octodev/probe-foreclose/connect", {
+      headers: { "x-factory-control-key": controlKey },
+    });
+    expect(readLower.status).toBe(200);
+    const lowerBody = (await readLower.json()) as ConnectBody;
+    expect(lowerBody.connect.pings).toBe(0);
+
+    // 3. Later read with the legacy mixed-case spelling successfully reads through and recovers history
+    const readMixed = await SELF.fetch("https://factory.example/trace/Octodev/Probe-Foreclose/connect", {
+      headers: { "x-factory-control-key": controlKey },
+    });
+    expect(readMixed.status).toBe(200);
+    const mixedBody = (await readMixed.json()) as ConnectBody;
+    expect(mixedBody.connect.pings).toBe(2);
+
+    // 4. GitLab: Seed gitlab legacy DO under mixed-case name
+    const gitlabStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("gitlab:Acme/Probe-Group"));
+    await runInDurableObject(gitlabStub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES ('default', '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', 'ping', 5, '2026-10-20T00:00:00Z')",
+      );
+    });
+
+    // 5. Read lowercase first
+    const glLower = await SELF.fetch("https://factory.example/trace/acme/probe-group/connect?platform=gitlab", {
+      headers: { "x-factory-control-key": controlKey },
+    });
+    expect(glLower.status).toBe(200);
+    const glLowerBody = (await glLower.json()) as ConnectBody;
+    expect(glLowerBody.connect.pings).toBe(0);
+
+    // 6. Later read with mixed-case spelling recovers the 5 pings
+    const glMixed = await SELF.fetch("https://factory.example/trace/Acme/Probe-Group/connect?platform=gitlab", {
+      headers: { "x-factory-control-key": controlKey },
+    });
+    expect(glMixed.status).toBe(200);
+    const glMixedBody = (await glMixed.json()) as ConnectBody;
+    expect(glMixedBody.connect.pings).toBe(5);
+  });
 });

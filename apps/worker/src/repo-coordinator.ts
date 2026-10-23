@@ -235,9 +235,17 @@ export class RepoCoordinator extends DurableObject<Env> {
       candidateNames.push(parsed.repository);
     }
 
+    const unprobedCandidates = candidateNames.filter((cand) => {
+      const row = this.sql.exec<{ name: string }>(
+        "SELECT name FROM _schema_migrations WHERE name = ?",
+        `legacy_probed:${cand}`,
+      ).toArray();
+      return row.length === 0;
+    });
+    if (unprobedCandidates.length === 0) return;
+
     try {
-      let allEmpty = true;
-      for (const cand of candidateNames) {
+      for (const cand of unprobedCandidates) {
         const legacyStub = this.env.REPO_COORDINATOR.get(this.env.REPO_COORDINATOR.idFromName(cand));
         const res = await legacyStub.fetch("https://repo-coordinator.internal/legacy/export", {
           headers: { "x-factory-control-key": controlKey },
@@ -257,10 +265,22 @@ export class RepoCoordinator extends DurableObject<Env> {
         }
 
         if (body.empty) {
+          this.sql.exec(
+            "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES (?, ?)",
+            `legacy_probed:${cand}`,
+            Date.now(),
+          );
+          if (cand === parsed.repository) {
+            try {
+              await legacyStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
+                method: "POST",
+                headers: { "x-factory-control-key": controlKey },
+              });
+            } catch {}
+          }
           continue;
         }
 
-        allEmpty = false;
         const s = body.state;
         if (!s) return;
 
@@ -330,22 +350,6 @@ export class RepoCoordinator extends DurableObject<Env> {
           await this.eventQueue.armAlarm();
         }
         return;
-      }
-
-      if (allEmpty) {
-        this.sql.exec(
-          "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
-          Date.now(),
-        );
-        if (platform === "github") {
-          try {
-            const defaultStub = this.env.REPO_COORDINATOR.get(this.env.REPO_COORDINATOR.idFromName(parsed.repository));
-            await defaultStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
-              method: "POST",
-              headers: { "x-factory-control-key": controlKey },
-            });
-          } catch {}
-        }
       }
     } catch (err) {
       console.error(`Migration error for ${parsed.repository}:`, err);

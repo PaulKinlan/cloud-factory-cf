@@ -199,14 +199,13 @@ export async function resolveGithubCredentials(
   const owner = scope?.owner?.trim() || undefined;
   const repo = scope?.repo?.trim() || undefined;
 
-  // 1. Check CredentialBroker candidates
+  // 1. Check specific CredentialBroker candidates (repo and owner)
   if (env.CREDENTIAL_BROKER) {
-    const candidates: string[] = [];
-    if (owner && repo) candidates.push(`${owner}/${repo}`);
-    if (owner) candidates.push(owner);
-    candidates.push("default", "global");
+    const specificCandidates: string[] = [];
+    if (owner && repo) specificCandidates.push(`${owner}/${repo}`);
+    if (owner) specificCandidates.push(owner);
 
-    for (const name of candidates) {
+    for (const name of specificCandidates) {
       if (result.clientId && result.clientSecret && result.appId && result.privateKey) {
         break;
       }
@@ -265,6 +264,48 @@ export async function resolveGithubCredentials(
       }
     } catch {
       // Ignore OrgCoordinator errors
+    }
+  }
+
+  // 3. Fall back to default / global CredentialBroker
+  if ((!result.clientId || !result.clientSecret || !result.appId || !result.privateKey) && env.CREDENTIAL_BROKER) {
+    for (const name of ["default", "global"]) {
+      if (result.clientId && result.clientSecret && result.appId && result.privateKey) {
+        break;
+      }
+      try {
+        const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(name));
+        const res = await broker.fetch("https://credential-broker.internal/effective-github-app");
+        if (res.ok) {
+          const data = (await res.json().catch(() => null)) as {
+            appId?: string | null;
+            clientId?: string | null;
+            clientSecret?: string | null;
+            privateKey?: string | null;
+          } | null;
+          if (!result.clientId && data?.clientId?.trim()) result.clientId = data.clientId.trim();
+          if (!result.clientSecret && data?.clientSecret?.trim()) result.clientSecret = data.clientSecret.trim();
+          if (!result.appId && data?.appId?.trim()) result.appId = data.appId.trim();
+          if (!result.privateKey && data?.privateKey?.trim()) result.privateKey = data.privateKey.trim();
+        } else if (env.BROKER_CONTROL_KEY) {
+          const settingsRes = await broker.fetch("https://credential-broker.internal/settings", {
+            headers: { "x-factory-control-key": env.BROKER_CONTROL_KEY },
+          });
+          if (settingsRes.ok) {
+            const data = (await settingsRes.json().catch(() => null)) as {
+              githubApp?: { clientId?: string; appId?: string };
+            } | null;
+            if (!result.clientId && data?.githubApp?.clientId?.trim()) {
+              result.clientId = data.githubApp.clientId.trim();
+            }
+            if (!result.appId && data?.githubApp?.appId?.trim()) {
+              result.appId = data.githubApp.appId.trim();
+            }
+          }
+        }
+      } catch {
+        // Continue checking candidates
+      }
     }
   }
 
