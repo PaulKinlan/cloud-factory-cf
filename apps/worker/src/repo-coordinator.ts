@@ -93,6 +93,39 @@ export class RepoCoordinator extends DurableObject<Env> {
     return this.ctx.storage.sql;
   }
 
+  /**
+   * Does this error mean "the object cannot see its own schema yet"?
+   *
+   * The DDL is applied once, in `blockConcurrencyWhile`, but a request can still reach
+   * a query before the schema is visible to it under load — the failure rip4 saw as
+   * `no such table: run_trace` (it serialised the vitest files as a mitigation, not a
+   * cure). A missing-table error is always *before* the statement ran, so retrying the
+   * handler after re-applying the DDL cannot double-apply a write.
+   */
+  private static isMissingSchemaError(err: unknown): boolean {
+    const message = err instanceof Error ? err.message : String(err);
+    return /no such table/i.test(message);
+  }
+
+  /**
+   * Runs `fn`; if SQLite reports a missing table, re-apply the migrations (every
+   * statement is `CREATE TABLE IF NOT EXISTS`, so this is idempotent) and retry once.
+   * Any other error propagates untouched — this must not become a blanket retry
+   * (cloud-factory-cf-u55u, coord's Proposal 1).
+   */
+  private async withSchemaRetry<T>(fn: () => T | Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!RepoCoordinator.isMissingSchemaError(err)) throw err;
+      console.error(
+        `RepoCoordinator ${this.ctx.id.name ?? "?"}: re-applying schema after '${err instanceof Error ? err.message : String(err)}'`,
+      );
+      this.migrate();
+      return await fn();
+    }
+  }
+
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const name = this.ctx.id.name ?? "";
@@ -114,14 +147,16 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
 
     try {
-      await this.ensureMigrated();
+      await this.withSchemaRetry(() => this.ensureMigrated());
     } catch (err) {
       return Response.json(
         { ok: false, error: err instanceof Error ? err.message : String(err) },
         { status: 503 },
       );
     }
-    return this.route(request);
+    // The retry covers both a schema that is momentarily invisible and the writes that
+    // read it (run_trace, canvas documents, the event queue).
+    return this.withSchemaRetry(() => this.route(request));
   }
 
   private async exportLegacyState(request: Request): Promise<Response> {
@@ -503,16 +538,20 @@ export class RepoCoordinator extends DurableObject<Env> {
    * (cloud-factory-cf-7or.1).
    */
   override async alarm(): Promise<void> {
-    await this.eventQueue.requeueExpiredLeases();
-    try {
-      await this.autoDrain();
-    } catch {
-      // A drain that throws must not re-arm for "now": that is a hot loop. Wait out a
-      // backoff; the events stay queued for the next attempt.
-      this.ctx.storage.setAlarm(Date.now() + AUTO_DRAIN_RETRY_MS);
-      return;
-    }
-    await this.eventQueue.armAlarm();
+    // An alarm can fire on a freshly-restored object before its schema is visible, so
+    // it gets the same one-shot schema retry as a request (cloud-factory-cf-u55u).
+    return this.withSchemaRetry(async () => {
+      await this.eventQueue.requeueExpiredLeases();
+      try {
+        await this.autoDrain();
+      } catch {
+        // A drain that throws must not re-arm for "now": that is a hot loop. Wait out a
+        // backoff; the events stay queued for the next attempt.
+        this.ctx.storage.setAlarm(Date.now() + AUTO_DRAIN_RETRY_MS);
+        return;
+      }
+      await this.eventQueue.armAlarm();
+    });
   }
 
   /**
