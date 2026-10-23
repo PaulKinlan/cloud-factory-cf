@@ -36,6 +36,13 @@ async function listenUnixSocket(socketPath: string): Promise<() => Promise<void>
 
 const utf8 = (text: string): Uint8Array => new TextEncoder().encode(text);
 
+/** Byte paths: no JS string can name a file whose name is not valid UTF-8. */
+const BufferCtor = (
+  globalThis as unknown as {
+    Buffer: { from(input: string | number[]): Uint8Array; concat(parts: Uint8Array[]): Uint8Array };
+  }
+).Buffer;
+
 test('parseFindOutput: NUL-separated paths, so a name containing a newline stays one entry', () => {
   const root = '/srv/app';
   const stdout = utf8(['/srv/app/a.sock', '/srv/app/b\nc.sock', '/srv/app/d ir .sock', ''].join('\0'));
@@ -326,41 +333,54 @@ test('scanWorkspaceSockets: a non-ASCII socket name is found exactly (cloud-fact
   }
 });
 
-test('scanWorkspaceSockets: refuses when a socket name is not valid UTF-8 (cloud-factory-cf-sd2y)', async (t) => {
+test('scanWorkspaceSockets: refuses when a socket name is not valid UTF-8 (cloud-factory-cf-sd2y)', async () => {
   const root = await tempWorkspace('fc-scan-nonutf8-');
-  // A byte path, because no JS string can name this file: 0xff is not valid UTF-8.
-  const BufferCtor = (
-    globalThis as unknown as {
-      Buffer: { from(input: string | number[]): Uint8Array; concat(parts: Uint8Array[]): Uint8Array };
-    }
-  ).Buffer;
-  const socketPath = BufferCtor.concat([
+  const ascii = path.join(root, 'plain.sock');
+  const close = await listenUnixSocket(ascii);
+  // `net.listen` only takes string paths, but `rename` does not: this yields a real socket
+  // whose name is not valid UTF-8, which is exactly the case that cannot be masked.
+  const nonUtf8 = BufferCtor.concat([
     BufferCtor.from(`${root}/`),
     BufferCtor.from([0x62, 0x61, 0x64, 0xff]),
     BufferCtor.from('.sock'),
   ]);
-
-  const server = net.createServer((connection) => connection.end());
   try {
-    await new Promise<void>((resolve, reject) => {
-      server.on('error', reject);
-      server.listen(socketPath as unknown as string, () => resolve());
-    });
-  } catch {
-    t.skip('this platform cannot create a socket with a non-UTF-8 name');
-    return;
-  }
+    await fs.rename(ascii, nonUtf8 as unknown as string);
 
-  try {
-    // The name cannot be represented as a string, so it cannot be handed to bubblewrap to
-    // mask. Refusing is the fail-closed answer: masking a replacement-character path and
-    // returning success would leave the real socket reachable.
+    // Both discovery paths must refuse rather than mask a U+FFFD path.
     await assert.rejects(
       () => scanWorkspaceSockets(root),
       (err: unknown) => err instanceof SocketScanError && /not valid UTF-8/.test(err.message),
     );
+    await assert.rejects(
+      () => walkWorkspaceSockets(root),
+      (err: unknown) => err instanceof SocketScanError && /not valid UTF-8/.test(err.message),
+    );
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('walkWorkspaceSockets: an undecodable regular file does not block the scan (cloud-factory-cf-sd2y)', async () => {
+  const root = await tempWorkspace('fc-walk-nonutf8-file-');
+  const weird = BufferCtor.concat([
+    BufferCtor.from(`${root}/`),
+    BufferCtor.from([0x6e, 0xff]),
+    BufferCtor.from('.txt'),
+  ]);
+  try {
+    await fs.writeFile(weird as unknown as string, 'harmless');
+    const close = await listenUnixSocket(path.join(root, 'real.sock'));
+    try {
+      // Only dialable entries matter: a file with an unrepresentable name cannot be a host
+      // socket, so refusing the whole workspace for it would be needless breakage.
+      const result = await walkWorkspaceSockets(root);
+      assert.deepEqual(result.sockets, [path.join(root, 'real.sock')]);
+    } finally {
+      await close();
+    }
+  } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
 });

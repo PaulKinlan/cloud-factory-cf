@@ -282,9 +282,19 @@ export async function walkWorkspaceSockets(
         }
         dirsScanned += 1;
 
-        let entries;
+        let entries: Array<{ name: Uint8Array; isSocket(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean }>;
         try {
-          entries = await fs.readdir(dir, { withFileTypes: true });
+          // Names as bytes: `readdir` with the default encoding replaces invalid UTF-8 with
+          // U+FFFD, which would produce a path that cannot mask the real file
+          // (cloud-factory-cf-sd2y, fallback walk).
+          entries = await (
+            fs as unknown as {
+              readdir(
+                dir: string,
+                options: { withFileTypes: true; encoding: 'buffer' },
+              ): Promise<Array<{ name: Uint8Array; isSocket(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean }>>;
+            }
+          ).readdir(dir, { withFileTypes: true, encoding: 'buffer' });
         } catch (err) {
           throw new SocketScanError(
             `could not read '${dir}' while scanning for host Unix sockets: ${(err as Error).message}. ${FIX_HINT}`,
@@ -293,8 +303,23 @@ export async function walkWorkspaceSockets(
 
         const found: string[] = [];
         const next: Array<{ dir: string; depth: number }> = [];
+        const decoder = new UTF8_DECODER('utf-8', { fatal: true });
         for (const entry of entries) {
-          const full = path.join(dir, entry.name);
+          let name: string;
+          try {
+            name = decoder.decode(entry.name);
+          } catch {
+            // A name that is not valid UTF-8 has no string form, so it cannot be handed to
+            // bubblewrap to mask. Sockets and symlinks must refuse; other entries cannot be
+            // dialled and are skipped rather than blocking every command in the workspace.
+            if (entry.isSocket() || entry.isSymbolicLink()) {
+              throw new SocketScanError(
+                `socket scan found a ${entry.isSocket() ? 'socket' : 'symlink'} whose name is not valid UTF-8 under '${dir}' and cannot be masked. ${FIX_HINT}`,
+              );
+            }
+            continue;
+          }
+          const full = path.join(dir, name);
           // `readdir({withFileTypes:true})` reports lstat semantics: a symlink is neither
           // a socket nor a directory here, so links are not followed. One that reaches a
           // socket is exactly what `find`'s `-xtype s` catches, and it is checked below.
