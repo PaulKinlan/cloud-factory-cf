@@ -71,9 +71,9 @@ Gate speed is a design constraint. Follow the tiers documented in [docs/speed.md
 | Tier | When to Run | Command | Budget |
 |---|---|---|---|
 | **Iterating** | While editing a single file/feature | `npm run test:file -w <workspace> -- <path>` | ≤ 3s |
-| **Implementer Fast Gate** | Once per committed tree before handoff | `fleet-check --fast` | ≤ 60s |
-| **Clean-Tree Full Gate** | Monorepo CI verification (all workspaces) | `npm run ci` | ≤ 120s |
-| **Landing Gate** | Merger only, once per merged union | `fleet-check` | ≤ 120s |
+| **Implementer Fast Gate** | Once per committed tree before handoff | `fleet-check --fast` | ≤ 60s (focused deltas; ~65–250s under VM load for docs smoke set) |
+| **Clean-Tree Full Gate** | Monorepo CI verification (all workspaces) | `npm run ci` | ~190–410s (docs/speed.md) |
+| **Landing Gate** | Merger only, once per merged union | `fleet-check` | ~190–410s (docs/speed.md) |
 
 ### Focused Testing While Iterating
 - **Worker workspace**: `npm run test:file -w @factory-cloud/worker -- test/worker.test.ts` (runs in workerd via `@cloudflare/vitest-plugin`).

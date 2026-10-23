@@ -147,8 +147,7 @@ tree went green once `apps/web/dist` existed.
 
 ## Budgets
 
-- Fast tier target: **≤ 60s**. Escalate before it crosses that on an ordinary
-  change.
+- Fast tier target: **≤ 60s** for focused source deltas (~65–250s under VM load when running the smoke set on docs/config deltas). Escalate before it crosses that on an ordinary change.
 - Full gate target: **≤ 120s** (historical baseline; under serialized workerd suites on a loaded VM, the full gate ranges ~185–400s). A change that pushes past current ranges must say so with a measurement in its `LAND-SUMMARY`.
 - Adding a test that costs ~1s (like the `@cloudflare/computer` resolution
   guard) is fine when it protects a real contract; say so in the summary.
