@@ -1,5 +1,5 @@
 import type { Env } from "../env";
-import { getRepoCoordinator } from "../repo-coordinator-addressing";
+import { getRepoCoordinator, getCredentialBroker } from "../repo-coordinator-addressing";
 import { authorizeControlPlane, authzDenial } from "../auth/tenant";
 import { mintDelegation } from "../auth/delegation";
 
@@ -55,7 +55,7 @@ export async function routeAdminSettings(
   }
 
   const repository = `${owner}/${repo}`;
-  const stub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository));
+  const stub = getCredentialBroker(env, repository);
 
   const headers = new Headers({ "content-type": "application/json" });
   const controlKey = request.headers.get("x-factory-control-key");
@@ -65,6 +65,7 @@ export async function routeAdminSettings(
     const delegation = await mintDelegation(env, { repository, login: authz.principal.login });
     if (delegation) headers.set("x-factory-delegation", delegation);
   }
+  headers.set("x-factory-original-repository", repository);
 
   let bodyText: string | undefined = undefined;
   if (request.method === "POST" || request.method === "DELETE") {
@@ -125,9 +126,12 @@ export async function routeAdminTestPing(
   const repository = `${owner}/${repo}`;
   let secret: string | undefined = undefined;
 
-  const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository));
+  const broker = getCredentialBroker(env, repository);
   try {
-    const secretRes = await broker.fetch("https://credential-broker.internal/effective-webhook-secret");
+    const secretReq = new Request("https://credential-broker.internal/effective-webhook-secret", {
+      headers: { "x-factory-original-repository": repository },
+    });
+    const secretRes = await broker.fetch(secretReq);
     if (secretRes.ok) {
       const data = (await secretRes.json().catch(() => ({}))) as { secret?: string };
       if (typeof data.secret === "string" && data.secret.length > 0) {

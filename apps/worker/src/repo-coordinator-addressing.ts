@@ -6,24 +6,37 @@ import {
 } from "@factory-cloud/sdk";
 import type { Env } from "./env";
 import type { RepoCoordinator } from "./repo-coordinator";
+import type { CredentialBroker } from "./credential-broker-object";
 
 /**
  * Resolves a canonical platform-prefixed repository key for addressing RepoCoordinator
- * and CredentialBroker Durable Objects (ADR 003 Slice 3, cloud-factory-cf-6to.3).
+ * Durable Objects.
  *
- * Rules:
- *   1. If `repository` is already prefixed (`github:owner/repo`, `gitlab:group/project`, `gitea:org/repo`), returns it.
- *   2. If `platformHint` is given (e.g. from `/webhooks/:provider` or `?platform=`), use `repositoryKey(platformHint, repository)`.
- *   3. Otherwise, defaults to "github": `repositoryKey("github", repository)`.
+ * All repository keys are canonicalized to lowercase so that addressing is
+ * case-insensitive across webhooks, trace, API routes, and session authentication.
  */
 export function resolveRepositoryKey(repository: string, platformHint?: string | null): string {
   const trimmed = repository.trim();
-  if (parseRepositoryKey(trimmed)) {
-    return trimmed;
+  const parsed = parseRepositoryKey(trimmed);
+  if (parsed) {
+    return repositoryKey(parsed.platform, parsed.repository.toLowerCase());
   }
   const platform: DevPlatform =
     platformHint && isDevPlatform(platformHint) ? platformHint : "github";
-  return repositoryKey(platform, trimmed);
+  return repositoryKey(platform, trimmed.toLowerCase());
+}
+
+/**
+ * Resolves a canonical repository key for addressing CredentialBroker Durable Objects.
+ *
+ * Strips any platform prefix and canonicalizes to lowercase. Special single-name
+ * targets like "default" and "global" are preserved in lowercase.
+ */
+export function resolveBrokerKey(repository: string): string {
+  const trimmed = repository.trim();
+  const parsed = parseRepositoryKey(trimmed);
+  const repo = parsed ? parsed.repository : trimmed;
+  return repo.toLowerCase();
 }
 
 /**
@@ -36,4 +49,15 @@ export function getRepoCoordinator(
 ): DurableObjectStub<RepoCoordinator> {
   const key = resolveRepositoryKey(repository, platformHint);
   return env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(key));
+}
+
+/**
+ * Returns a DurableObjectStub to the CredentialBroker instance.
+ */
+export function getCredentialBroker(
+  env: Env,
+  repository: string,
+): DurableObjectStub<CredentialBroker> {
+  const key = resolveBrokerKey(repository);
+  return env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(key));
 }

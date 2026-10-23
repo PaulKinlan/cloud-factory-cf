@@ -9,8 +9,15 @@ export const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab|gitea)\/(?<o
  * `content-length`/`host` on a new Request with a different body is a
  * foot-gun in the Workers runtime.
  */
-export function forwardableHeaders(headers: Headers, repository: string): Headers {
+export function forwardableHeaders(
+  headers: Headers,
+  repository: string,
+  originalRepo?: string,
+): Headers {
   const forwarded = new Headers({ "x-factory-repository": repository });
+  if (originalRepo) {
+    forwarded.set("x-factory-original-repository", originalRepo);
+  }
   for (const name of [
     // GitHub
     "x-hub-signature-256",
@@ -65,7 +72,7 @@ export async function routeWebhooks(
     `https://repo-coordinator.internal/events?provider=${encodeURIComponent(provider)}`,
     {
       method: "POST",
-      headers: forwardableHeaders(request.headers, repoKey),
+      headers: forwardableHeaders(request.headers, repoKey, `${owner}/${repo}`),
       body: await request.text(),
     },
   );

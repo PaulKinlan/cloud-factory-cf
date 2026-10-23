@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { parseRepositoryKey } from "@factory-cloud/sdk";
+import { getCredentialBroker } from "./repo-coordinator-addressing";
 import type { Env } from "./env";
 import { planAgents, sourceMatches } from "./canvas-runs";
 import { safeParseJson } from "./events/helpers";
@@ -134,7 +135,8 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
 
     try {
-      await this.withSchemaRetry(() => this.ensureMigrated());
+      const origHeader = request.headers.get("x-factory-original-repository");
+      await this.withSchemaRetry(() => this.ensureMigrated(origHeader));
     } catch (err) {
       return Response.json(
         { ok: false, error: err instanceof Error ? err.message : String(err) },
@@ -199,7 +201,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     return Response.json({ ok: true });
   }
 
-  private async ensureMigrated(): Promise<void> {
+  private async ensureMigrated(originalRepo?: string | null): Promise<void> {
     const name = this.ctx.id.name ?? "";
     const parsed = parseRepositoryKey(name);
     if (!parsed || parsed.platform !== "github") return;
@@ -216,13 +218,26 @@ export class RepoCoordinator extends DurableObject<Env> {
       throw new Error(`BROKER_CONTROL_KEY is unconfigured: migration for ${legacyName} cannot proceed`);
     }
 
-    try {
-      const legacyStub = this.env.REPO_COORDINATOR.get(this.env.REPO_COORDINATOR.idFromName(legacyName));
+    const candidateNames: string[] = [];
+    if (originalRepo) {
+      const origTrimmed = originalRepo.trim();
+      const origParsed = parseRepositoryKey(origTrimmed);
+      const origRepo = origParsed ? origParsed.repository : origTrimmed;
+      if (origRepo.toLowerCase() === parsed.repository && origRepo !== parsed.repository) {
+        candidateNames.push(`github:${origRepo}`);
+        candidateNames.push(origRepo);
+      }
+    }
+    candidateNames.push(parsed.repository);
+
+    let allEmpty = true;
+    for (const cand of candidateNames) {
+      const legacyStub = this.env.REPO_COORDINATOR.get(this.env.REPO_COORDINATOR.idFromName(cand));
       const res = await legacyStub.fetch("https://repo-coordinator.internal/legacy/export", {
         headers: { "x-factory-control-key": controlKey },
       });
       if (!res.ok) {
-        console.error(`Legacy export failed for ${legacyName} with status ${res.status}`);
+        console.error(`Legacy export failed for ${cand} with status ${res.status}`);
         return;
       }
       const body = (await res.json().catch(() => ({}))) as {
@@ -231,29 +246,15 @@ export class RepoCoordinator extends DurableObject<Env> {
         state?: Record<string, unknown[]>;
       };
       if (!body.ok) {
-        console.error(`Legacy export returned not ok for ${legacyName}`);
+        console.error(`Legacy export returned not ok for ${cand}`);
         return;
       }
 
       if (body.empty) {
-        this.sql.exec(
-          "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
-          Date.now(),
-        );
-        try {
-          const ackRes = await legacyStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
-            method: "POST",
-            headers: { "x-factory-control-key": controlKey },
-          });
-          if (!ackRes.ok) {
-            console.error(`Legacy ack-migrated failed on empty path for ${legacyName} with status ${ackRes.status}`);
-          }
-        } catch (ackErr) {
-          console.error(`Legacy ack-migrated network error on empty path for ${legacyName}:`, ackErr);
-        }
-        return;
+        continue;
       }
 
+      allEmpty = false;
       const s = body.state;
       if (!s) return;
 
@@ -313,17 +314,34 @@ export class RepoCoordinator extends DurableObject<Env> {
           headers: { "x-factory-control-key": controlKey },
         });
         if (!ackRes.ok) {
-          console.error(`Legacy ack-migrated failed for ${legacyName} with status ${ackRes.status}`);
+          console.error(`Legacy ack-migrated failed for ${cand} with status ${ackRes.status}`);
         }
       } catch (ackErr) {
-        console.error(`Legacy ack-migrated network error for ${legacyName}:`, ackErr);
+        console.error(`Legacy ack-migrated network error for ${cand}:`, ackErr);
       }
 
       if (this.eventQueue.hasDue()) {
         await this.eventQueue.armAlarm();
       }
-    } catch (err) {
-      console.error(`Migration error for ${legacyName}:`, err);
+      return;
+    }
+
+    if (allEmpty) {
+      this.sql.exec(
+        "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
+        Date.now(),
+      );
+      try {
+        const defaultStub = this.env.REPO_COORDINATOR.get(this.env.REPO_COORDINATOR.idFromName(parsed.repository));
+        await defaultStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
+          method: "POST",
+          headers: { "x-factory-control-key": controlKey },
+        });
+      } catch {}
+    }
+
+    if (this.eventQueue.hasDue()) {
+      await this.eventQueue.armAlarm();
     }
   }
 
@@ -618,7 +636,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       repository,
       controlKey,
       coordinator,
-      broker: this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(repository)),
+      broker: getCredentialBroker(this.env, repository),
       onStep: traceSink(coordinator),
       // Unifies ADR 003 decideAction semantics across alarm and runs paths (cloud-factory-cf-jtg9).
       executionFn: createDefaultExecutionFn(this.env),
@@ -750,8 +768,11 @@ export class RepoCoordinator extends DurableObject<Env> {
         try {
           const parsed = parseRepositoryKey(repoName);
           const brokerRepo = parsed ? parsed.repository : repoName;
-          const broker = this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(brokerRepo));
-          const res = await broker.fetch("https://credential-broker.internal/effective-webhook-secret");
+          const broker = getCredentialBroker(this.env, brokerRepo);
+          const secretReq = new Request("https://credential-broker.internal/effective-webhook-secret", {
+            headers: { "x-factory-original-repository": brokerRepo },
+          });
+          const res = await broker.fetch(secretReq);
           if (res.ok) {
             const data = (await res.json().catch(() => ({}))) as { secret?: string };
             if (typeof data.secret === "string" && data.secret.length > 0) {

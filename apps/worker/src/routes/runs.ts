@@ -2,7 +2,7 @@ import type { Env } from "../env";
 import { createDefaultExecutionFn, drainRepository } from "../pipeline";
 import { reviewRuntime } from "../review/model";
 import { traceSink } from "../events";
-import { getRepoCoordinator } from "../repo-coordinator-addressing";
+import { getRepoCoordinator, getCredentialBroker } from "../repo-coordinator-addressing";
 import { authorizeControlPlane, authzDenial } from "../auth/tenant";
 import { mintDelegation } from "../auth/delegation";
 
@@ -68,7 +68,7 @@ export async function routeRun(
         ? { controlKey: env.BROKER_CONTROL_KEY as string }
         : { delegation }),
       coordinator,
-      broker: env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository)),
+      broker: getCredentialBroker(env, repository),
       onStep: traceSink(coordinator),
       ...(useCoreReviewer ? { executionFn: createDefaultExecutionFn(env) } : {}),
       ...(env.TELEMETRY_ENDPOINT === undefined ? {} : { telemetryEndpoint: env.TELEMETRY_ENDPOINT }),

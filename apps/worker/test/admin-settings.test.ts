@@ -210,4 +210,50 @@ describe("Admin Dashboard & Settings API", () => {
     expect(body.message).toContain("Test ping delivered");
     expect(body.deliveryId).toMatch(/^test-ping-/);
   });
+
+  it("aligns CredentialBroker and RepoCoordinator addressing across case variations (cloud-factory-cf-g5c0, cloud-factory-cf-n23o)", async () => {
+    const customSecret = "custom-mixed-case-secret-999";
+    const mixedRepo = "Octodev/Probe-Repo";
+    const lowerRepo = "octodev/probe-repo";
+
+    // 1. Save settings under mixed-case repository path
+    const saveRes = await SELF.fetch(`https://example.com/api/admin/settings/${mixedRepo}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-factory-control-key": CONTROL_KEY,
+      },
+      body: JSON.stringify({
+        webhookSecret: customSecret,
+        aiProviders: {
+          anthropic: { key: "sk-ant-api03-1234567890abcdef", model: "claude-probe-model" },
+        },
+      }),
+    });
+    expect(saveRes.status).toBe(200);
+
+    // 2. Read back settings under lowercase path
+    const getRes = await SELF.fetch(`https://example.com/api/admin/settings/${lowerRepo}`, {
+      method: "GET",
+      headers: { "x-factory-control-key": CONTROL_KEY },
+    });
+    expect(getRes.status).toBe(200);
+    const settings = (await getRes.json()) as any;
+    expect(settings.ok).toBe(true);
+    expect(settings.aiProviders.anthropic.configured).toBe(true);
+    expect(settings.aiProviders.anthropic.model).toBe("claude-probe-model");
+
+    // 3. Trigger test ping with mixed case and verify RepoCoordinator & CredentialBroker align
+    const pingRes = await SELF.fetch(`https://example.com/api/admin/test-ping/${mixedRepo}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-factory-control-key": CONTROL_KEY,
+      },
+    });
+    expect(pingRes.status).toBe(200);
+    const pingBody = (await pingRes.json()) as any;
+    expect(pingBody.ok).toBe(true);
+    expect(pingBody.status).toBe(202);
+  });
 });
