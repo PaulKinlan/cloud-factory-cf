@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { ToolDefinition } from '@factory-cloud/sdk';
+import { scanWorkspaceSockets, type SocketScanOptions } from './socket-scan.ts';
 
 const execAsync = promisify(exec);
 
@@ -11,6 +12,12 @@ export interface LocalToolsOptions {
   maxFileSize?: number;
   commandTimeoutMs?: number;
   sandbox?: 'bwrap' | 'none';
+  sandboxNetwork?: 'host' | 'none';
+  /**
+   * Budget for the `network-none` Unix-socket scan (cloud-factory-cf-6rne,
+   * cloud-factory-cf-bcra). Exceeding it refuses the command (never an unmasked run).
+   */
+  socketScan?: SocketScanOptions;
 }
 
 export function createLocalTools(options: LocalToolsOptions = {}): readonly ToolDefinition[] {
@@ -166,7 +173,8 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
 
   const execCommandTool: ToolDefinition = {
     name: 'exec_command',
-    description: 'Execute a shell command within the local workspace directory',
+    description:
+      'Execute a shell command within the local workspace directory. Under sandbox mode (default: bubblewrap), confines the filesystem to the workspace and isolates network namespaces (sandboxNetwork: "host" | "none"). With sandboxNetwork: "none" the IP namespace is unshared (--unshare-net: no loopback, LAN or metadata egress) and host Unix domain sockets found inside the workspace are masked with /dev/null. Masking discovers sockets by asking the filesystem (find -type s -print0, complete and not name-based) and is re-run for every command, so every host socket in the workspace is masked - including ones under node_modules/.git/target, names with spaces or newlines, and symlinks that reach a socket - and a socket that appears after an earlier command is still masked. If discovery cannot complete the command is refused rather than run with an unverified mask.',
     parameters: {
       type: 'object',
       properties: {
@@ -180,6 +188,7 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
       const timeout = typeof params.timeoutMs === 'number' ? params.timeoutMs : commandTimeoutMs;
       const realRoot = await fs.realpath(rootDir).catch(() => rootDir);
       const sandboxMode = options.sandbox ?? 'bwrap';
+      const networkMode = options.sandboxNetwork ?? 'host';
 
       if (sandboxMode === 'bwrap') {
         const hasBwrap = await fs
@@ -195,6 +204,8 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
 
         const bwrapArgs: string[] = [
           '/usr/bin/bwrap',
+          '--unshare-pid',
+          '--die-with-parent',
           '--ro-bind',
           '/usr',
           '/usr',
@@ -217,6 +228,10 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
           '/home',
         ];
 
+        if (networkMode === 'none') {
+          bwrapArgs.push('--unshare-net');
+        }
+
         // Read-only mount ONLY the node executable itself rather than its parent directory (fixes cloud-factory-cf-buy)
         const realExec = await fs.realpath(process.execPath).catch(() => process.execPath);
         bwrapArgs.push('--ro-bind', realExec, realExec);
@@ -224,24 +239,45 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
           bwrapArgs.push('--ro-bind', process.execPath, process.execPath);
         }
 
-        // Mount DNS/SSL configuration read-only if present
-        const hasEtcResolv = await fs
-          .stat('/etc/resolv.conf')
-          .then(() => true)
-          .catch(() => false);
-        if (hasEtcResolv) {
-          bwrapArgs.push('--ro-bind', '/etc/resolv.conf', '/etc/resolv.conf');
-        }
-        const hasEtcSsl = await fs
-          .stat('/etc/ssl')
-          .then(() => true)
-          .catch(() => false);
-        if (hasEtcSsl) {
-          bwrapArgs.push('--ro-bind', '/etc/ssl', '/etc/ssl');
+        // Mount DNS/SSL configuration read-only if present and network is enabled
+        if (networkMode !== 'none') {
+          const hasEtcResolv = await fs
+            .stat('/etc/resolv.conf')
+            .then(() => true)
+            .catch(() => false);
+          if (hasEtcResolv) {
+            bwrapArgs.push('--ro-bind', '/etc/resolv.conf', '/etc/resolv.conf');
+          }
+          const hasEtcSsl = await fs
+            .stat('/etc/ssl')
+            .then(() => true)
+            .catch(() => false);
+          if (hasEtcSsl) {
+            bwrapArgs.push('--ro-bind', '/etc/ssl', '/etc/ssl');
+          }
         }
 
         // Mount workspace root read-write only
         bwrapArgs.push('--bind', realRoot, realRoot);
+
+        // With the IP namespace unshared, the remaining door to the host is a Unix
+        // domain socket: sockets are not namespaced, so a socket a host process left
+        // in the workspace still reaches the host network (cloud-factory-cf-5vuu).
+        // Mask every socket the bounded scan finds. The scan runs per command, so a
+        // socket created after an earlier command is masked too (cloud-factory-cf-vy8o),
+        // and a scan that cannot finish refuses the command instead of running with an
+        // unverified mask (cloud-factory-cf-6rne, cloud-factory-cf-bcra).
+        if (networkMode === 'none') {
+          const scan = await scanWorkspaceSockets(realRoot, {
+            ...options.socketScan,
+            // Never outlive the command's own deadline: the scan runs before execAsync.
+            timeoutMs: Math.min(options.socketScan?.timeoutMs ?? 5000, timeout),
+          });
+          for (const sock of scan.sockets) {
+            bwrapArgs.push('--ro-bind', '/dev/null', sock);
+          }
+        }
+
         bwrapArgs.push('--chdir', realRoot);
         bwrapArgs.push('--', '/bin/sh', '-c', cmdStr);
 

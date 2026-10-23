@@ -116,6 +116,42 @@ Or invoke `@factory-cloud/cli` directly:
 npx @factory-cloud/cli review --pr 42 --repo PaulKinlan/cloud-factory-cf --dry-run
 ```
 
+### What `exec_command`'s sandbox actually guarantees
+
+`createLocalTools()` runs commands under bubblewrap. The guarantee is stated
+precisely because it is easy to over-read (cloud-factory-cf-5vuu):
+
+| Guarantee | How |
+| --- | --- |
+| Filesystem confined to the workspace | `/usr`, `/dev`, `/proc` read-only, fresh tmpfs `/home` and `/tmp`, workspace bound read-write |
+| No IP egress with `sandboxNetwork: 'none'` | `--unshare-net`, and `/etc/resolv.conf` is not mounted in that mode |
+| No host Unix-socket relay with `sandboxNetwork: 'none'` | every socket found in the workspace is masked with `--ro-bind /dev/null` |
+
+Unix sockets are **not** namespaced, so the third row is the one that needs to know
+every socket in the workspace, and that discovery is a security control:
+
+- it **asks the filesystem**, not the kernel's socket table: `find <root> \( -type s -o \
+  -type l -xtype s \) -print0`, NUL-delimited. Sockets are found by *type*, so nothing
+  depends on how a pathname was written — names with spaces or newlines, `..`, hardlinks,
+  relative binds and symlinks in either direction all come out as real paths. Both
+  symlinks that reach a socket inside the tree and symlinks pointing at one outside it
+  are masked, because either is dialable from inside.
+- **why not `/proc/net/unix`**: it is cheap (0.1ms) but its Path column is the *string*
+  `bind()` received, not the file. Five escapes came out of that gap in one afternoon
+  (a pruned directory, a relative name, `..`, a symlink, a trimmed trailing space); each
+  fix was another special case. Type discovery deletes the whole class.
+- cost, measured on this VM: **~102ms** for an 844-directory worktree (the equivalent
+  Node walk costs 611ms) and 1.8–4.0s for a synthetic 20,201-directory tree.
+- it is **re-run for every command**, so a socket that appears later is still masked (a
+  cache would silently unmask it — cloud-factory-cf-vy8o).
+- if discovery cannot finish — timeout, an unreadable subtree, a non-zero `find` exit —
+  the command is **refused**, never run with a partial mask. Raise the budget with
+  `socketScan: { timeoutMs }` rather than removing the check.
+
+Not covered: a socket the sandbox's own command creates and then dials *within the same
+command* — that traffic never reaches the host, and the next command's scan masks the
+socket before it can be dialled from outside.
+
 ---
 
 ## 3. Webhook Simulation & Testing
