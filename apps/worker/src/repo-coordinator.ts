@@ -563,8 +563,13 @@ export class RepoCoordinator extends DurableObject<Env> {
       await this.eventQueue.requeueExpiredLeases();
       try {
         await this.autoDrain();
-      } catch {
-        // A drain that throws must not re-arm for "now": that is a hot loop. Wait out a
+      } catch (err) {
+        // A missing table is not a drain failure: it must reach the retry above, which
+        // re-creates the schema and runs the alarm again. Swallowing it here turned a
+        // transient schema window into a permanent 30s backoff loop, with the table never
+        // re-created and no review posted (cloud-factory-cf-chcm).
+        if (isMissingSchemaError(err)) throw err;
+        // Any other throw must not re-arm for "now": that is a hot loop. Wait out a
         // backoff; the events stay queued for the next attempt.
         this.ctx.storage.setAlarm(Date.now() + AUTO_DRAIN_RETRY_MS);
         return;

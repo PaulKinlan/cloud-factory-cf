@@ -97,6 +97,33 @@ describe("RepoCoordinator schema retry", () => {
     expect(JSON.stringify(await list.json())).toContain("body survived the retry");
   });
 
+  it("heals a missing canvas schema during an alarm instead of backing off forever (cloud-factory-cf-chcm)", async () => {
+    const repository = "acme/schema-retry-alarm";
+    const stub = coordinator(repository);
+    await stub.fetch(`${BASE}/trace`);
+
+    // Something for the drain to work on, so `autoDrain()` reaches `canvasHandles()`, the
+    // query that reads canvas_documents.
+    await runInDurableObject(coordinator(repository), (_instance, state) => {
+      state.storage.sql.exec(
+        `INSERT OR REPLACE INTO events (delivery_id, provider, event, action, repository, received_at, payload, status, attempts, available_at)
+         VALUES ('alarm-schema-1', 'github', 'pull_request', 'opened', ?, ?, '{}', 'pending', 0, ?)`,
+        repository.split("/")[1],
+        new Date().toISOString(),
+        new Date(Date.now() - 1000).toISOString(),
+      );
+    });
+    await dropTable(repository, "canvas_documents");
+
+    await runInDurableObject(coordinator(repository), (instance) =>
+      (instance as unknown as { alarm(): Promise<void> }).alarm(),
+    );
+
+    // Before the fix the alarm's own catch swallowed the missing table, re-armed a backoff
+    // and left the table absent; now the retry re-creates it.
+    expect(await tableExists(repository, "canvas_documents")).toBe(true);
+  });
+
   it("does not swallow an error that is not a missing table", async () => {
     const repository = "acme/schema-retry-other";
     const stub = coordinator(repository);
