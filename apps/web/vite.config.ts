@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { defineConfig } from "vitest/config";
 
@@ -6,9 +6,12 @@ export default defineConfig({
   plugins: [
     {
       name: "copy-admin-index",
-      closeBundle() {
-        mkdirSync(resolve(import.meta.dirname, "dist/admin"), { recursive: true });
-        copyFileSync(resolve(import.meta.dirname, "dist/admin.html"), resolve(import.meta.dirname, "dist/admin/index.html"));
+      writeBundle() {
+        const adminHtml = resolve(import.meta.dirname, "dist/admin.html");
+        if (existsSync(adminHtml)) {
+          mkdirSync(resolve(import.meta.dirname, "dist/admin"), { recursive: true });
+          copyFileSync(adminHtml, resolve(import.meta.dirname, "dist/admin/index.html"));
+        }
       },
     },
   ],

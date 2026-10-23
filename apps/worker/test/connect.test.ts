@@ -200,4 +200,26 @@ describe("connect evidence", () => {
     const forbiddenJson = (await forbidden.json()) as any;
     expect(forbiddenJson.error).toContain("another account");
   });
+
+  it("rejects cookies signed with WEBHOOK_SECRET on /trace/:owner/:repo/connect (cloud-factory-cf-7suc)", async () => {
+    const handler = (await import("../src/index")).default;
+    const webhookSecret = "webhook-secret-only";
+    const token = await mintSessionToken(webhookSecret, "octodev");
+
+    // When broker keys are unset, WEBHOOK_SECRET must never authenticate a browser session (503 control key not configured)
+    const unsetEnv = {
+      ...env,
+      BROKER_CONTROL_KEY: undefined,
+      BROKER_SIGNING_KEY: undefined,
+      WEBHOOK_SECRET: webhookSecret,
+    };
+
+    const res = await handler.fetch(
+      new Request("https://factory.example/trace/octodev/connect-ping/connect", {
+        headers: { cookie: `cf_session=${token}` },
+      }),
+      unsetEnv as never,
+    );
+    expect(res.status).toBe(503);
+  });
 });

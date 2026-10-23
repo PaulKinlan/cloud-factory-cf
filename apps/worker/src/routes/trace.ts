@@ -11,9 +11,11 @@ import { readSession } from "./auth";
  *   GET /trace/:owner/:repo/socket     live step stream (WebSocket upgrade)
  *   GET /trace/:owner/:repo/connect    webhook connection evidence (ping/event)
  *
- * All of these are control-plane reads, so they require the broker control key: a
- * trace carries prompts and agent output, and the connection state says whether a
- * repository's hook is live, which must not be world-readable on a public Worker.
+ * Most of these are control-plane reads requiring the broker control key (x-factory-control-key
+ * or ?key= for WebSocket handshakes) because a trace carries prompts and agent output.
+ * GET /trace/:owner/:repo/connect also accepts an authenticated browser session cookie (cf_session),
+ * allowing logged-in dashboard users to verify their repository webhook connection without
+ * needing the broker control key.
  */
 export const TRACE_PATH =
   /^\/trace\/(?<owner>[^/]+)\/(?<repo>[^/]+)(?:\/(?<operation>usage|socket|connect))?$/;
@@ -41,7 +43,7 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
 
   // 2. Browser session auth for operation === "connect" (cloud-factory-cf-qdud)
   if (!authorised && operation === "connect") {
-    const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY ?? env.WEBHOOK_SECRET;
+    const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
     if (signingKey) {
       const session = await readSession(request.headers, signingKey);
       if (session.ok) {
