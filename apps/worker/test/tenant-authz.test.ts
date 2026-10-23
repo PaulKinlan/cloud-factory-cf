@@ -15,11 +15,11 @@ import { describe, expect, it } from "vitest";
 const SIGNING_KEY = "test-broker-signing-key"; // BROKER_SIGNING_KEY in vitest.config.ts
 const CONTROL_KEY = "test-control-key"; // BROKER_CONTROL_KEY in vitest.config.ts
 
-async function sign(data: string): Promise<string> {
+async function sign(data: string, secret: string = SIGNING_KEY): Promise<string> {
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey(
     "raw",
-    enc.encode(SIGNING_KEY),
+    enc.encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
@@ -31,9 +31,9 @@ async function sign(data: string): Promise<string> {
 }
 
 /** A cookie exactly the shape `/auth/github/callback` mints (`login.exp.hmac`). */
-async function session(login: string, ttlSeconds = 900): Promise<string> {
+async function session(login: string, ttlSeconds = 900, secret = SIGNING_KEY): Promise<string> {
   const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
-  return `cf_session=${login}.${exp}.${await sign(`${login}.${exp}`)}`;
+  return `cf_session=${login}.${exp}.${await sign(`${login}.${exp}`, secret)}`;
 }
 
 /** Call the real Worker with the given bindings (the suite's env by default). */
@@ -131,6 +131,21 @@ describe("tenant-bound control-plane sessions (cloud-factory-cf-e1ql)", () => {
 
     const browser = await call(AUDIT, { headers: { cookie: await session("octodev") } }, bindings);
     expect(browser.status).toBe(503);
+  });
+
+  it("refuses a session signed with WEBHOOK_SECRET — a webhook secret is not a session key (cloud-factory-cf-8e7r)", async () => {
+    // The mint path stopped accepting WEBHOOK_SECRET in owqq; verification must state the
+    // same rule, or the day someone mints with it the cookie is accepted here.
+    const webhookSecret = env.WEBHOOK_SECRET as string;
+    const forged = await session("octodev", 900, webhookSecret);
+
+    const bindings = { ...env, BROKER_CONTROL_KEY: undefined };
+    const res = await call(AUDIT, { headers: { cookie: forged } }, bindings);
+    expect(res.status).toBe(401);
+
+    // The legitimate session key still works in the same configuration.
+    const ok = await call(AUDIT, { headers: { cookie: await session("octodev") } }, bindings);
+    expect(ok.status).toBe(200);
   });
 
   it("binds canvas documents to the session's own tenant", async () => {
