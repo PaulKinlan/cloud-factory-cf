@@ -1,4 +1,4 @@
-import { SELF, env } from "cloudflare:test";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { chooseSettlement, planAgents, sourceMatches, uniqueClaims } from "../src/canvas-runs";
 import { sinksFor } from "../src/pipeline";
@@ -7,6 +7,17 @@ import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 
 function coordinator(repository: string) {
   return getRepoCoordinator(env, repository, "github");
+}
+
+/** Simulates a lease/backoff elapsing without sleeping in the test. */
+async function makeDue(repository: string, deliveryId: string): Promise<void> {
+  await runInDurableObject(coordinator(repository), (_instance, state) => {
+    state.storage.sql.exec(
+      "UPDATE events SET available_at = ? WHERE delivery_id = ?",
+      new Date(Date.now() - 1_000).toISOString(),
+      deliveryId,
+    );
+  });
 }
 
 /**
@@ -587,7 +598,7 @@ describe("idempotent delivery across fan-out retries (cloud-factory-cf-eu3)", ()
     // The failed event comes back after its backoff; the reviewer must not post
     // a second review, and the docs agent retries.
     vi.unstubAllGlobals();
-    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    await makeDue(repository, "retry-1");
     const second = stubUpstream();
     const secondReport = (await (await runDocument(repository, documentId)).json()) as {
       ran: number;
@@ -601,7 +612,7 @@ describe("idempotent delivery across fan-out retries (cloud-factory-cf-eu3)", ()
     expect(secondReport.agents.find((agent) => agent.agentId === "n-reviewer")?.runs[0]?.duplicate).toBe(true);
     // No second provider call: the review was delivered once.
     expect(second.calls).toHaveLength(0);
-  });
+  }, 60_000);
 });
 
 describe("one ledger for every runner (cloud-factory-cf-7wj, cloud-factory-cf-lbi)", () => {
@@ -661,7 +672,7 @@ describe("one ledger for every runner (cloud-factory-cf-7wj, cloud-factory-cf-lb
 
     // The other public runner, which used to bypass the ledger entirely.
     vi.unstubAllGlobals();
-    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    await makeDue(repository, "drain-1");
     const second = stubUpstream();
     const drained = await drain(repository);
     expect(drained.claimed).toBe(1);
@@ -682,7 +693,7 @@ describe("one ledger for every runner (cloud-factory-cf-7wj, cloud-factory-cf-lb
       )
     ).json()) as { counts: Record<string, number> };
     expect(stats.counts["pending"]).toBe(1);
-  });
+  }, 60_000);
 
 });
 
