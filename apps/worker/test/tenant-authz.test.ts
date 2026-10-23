@@ -148,6 +148,31 @@ describe("tenant-bound control-plane sessions (cloud-factory-cf-e1ql)", () => {
     expect(ok.status).toBe(200);
   });
 
+  it("refuses a session that switches provider on any tenant route (cloud-factory-cf-fcwm)", async () => {
+    // Same `owner/repo` on another provider is another tenant. The trace was the reported
+    // instance (tw9d); these are the other session-authorised routes that take a platform
+    // hint, all of which honoured it after an owner-only check.
+    const routes = [
+      "/audit/events/octodev/widget-service?platform=gitlab",
+      "/canvas/octodev/widget-service/documents?platform=gitlab",
+      "/studio/octodev/widget-service/agents?platform=gitlab",
+      "/analysis/octodev/widget-service/tree?platform=gitlab",
+    ];
+    for (const route of routes) {
+      const cross = await call(route, { headers: { cookie: await session("octodev") } });
+      expect(cross.status, `${route} must refuse a provider switch for a session`).toBe(403);
+
+      const own = await call(route.replace("platform=gitlab", "platform=github"), {
+        headers: { cookie: await session("octodev") },
+      });
+      expect(own.status, `${route} must still serve the session on github`).not.toBe(403);
+
+      // The machine key names no tenant, so it keeps addressing any provider.
+      const machine = await call(route, { headers: { "x-factory-control-key": CONTROL_KEY } });
+      expect(machine.status, `${route} must still serve the machine key`).not.toBe(403);
+    }
+  });
+
   it("binds canvas documents to the session's own tenant", async () => {
     const own = await call("/canvas/octodev/widget-service/documents", {
       headers: { cookie: await session("octodev") },

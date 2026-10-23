@@ -1,6 +1,6 @@
 import type { Env } from "../env";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
-import { authorizeControlPlane, authzDenial } from "../auth/tenant";
+import { authorizeControlPlane, authzDenial, sessionMayAddressPlatform } from "../auth/tenant";
 import { MAX_TREE_BYTES } from "../git-tree-store";
 import { tarballFiles } from "../git-tarball";
 
@@ -50,7 +50,16 @@ export async function handleGitTree(request: Request, env: Env, url: URL): Promi
   if (request.method === "POST" && Number(request.headers.get("content-length")) > MAX_TREE_BYTES) {
     return Response.json({ ok: false, error: "tree exceeds size limit" }, { status: 413 });
   }
-  const coordinator = getRepoCoordinator(env, `${owner}/${repo}`, url.searchParams.get("platform"));
+  const platform = url.searchParams.get("platform");
+  // A platform hint addresses another provider, which is another tenant: a session may not
+  // switch (cloud-factory-cf-fcwm), the machine key may.
+  if (!sessionMayAddressPlatform(authz.principal, platform)) {
+    return authzDenial(
+      { ok: false, reason: "cross-tenant" },
+      { "cross-tenant": "not authorised for another provider's tenancy" },
+    );
+  }
+  const coordinator = getRepoCoordinator(env, `${owner}/${repo}`, platform);
   const target = path ? `/git-tree/files/${path}` : "/git-tree";
   const query = path ? "" : url.search;
   let body: BodyInit | undefined;
