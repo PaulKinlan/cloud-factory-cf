@@ -45,10 +45,11 @@ session the *general* control-plane credential and to say what happens to the ke
   (`authorizeControlPlane`): the machine key first (unchanged contract), then the
   session, which may only act for its own login — a valid session asking for another
   `:owner` is a typed `cross-tenant` 403, never a retry with a weaker credential.
-- Sessions are signed with `BROKER_SIGNING_KEY`, falling back to `BROKER_CONTROL_KEY`
-  (the `WEBHOOK_SECRET` fallback was removed — a webhook secret is not a session key),
-  so a deployment serves browsers with the master key **unset**. With neither
-  configured, routes fail closed with 503.
+- Sessions are signed with `BROKER_SIGNING_KEY`, falling back to `BROKER_CONTROL_KEY` and
+  nothing else: a webhook secret is not a session key, so `WEBHOOK_SECRET` was dropped from
+  both the mint path (`owqq`) and the verify path (`sessionSigningKey`, cloud-factory-cf-8e7r).
+  A deployment therefore serves browsers with the master key **unset**; with no signing key
+  configured at all, routes fail closed with 503.
 - **The master key survives only as a machine credential**: CI, the scheduler, the CLI
   and an operator's break-glass path. It is not a user credential, it must never be
   requested by the UI, and each route that still needs it is a tracked debt, not a
