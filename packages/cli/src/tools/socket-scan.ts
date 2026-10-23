@@ -310,11 +310,15 @@ export async function walkWorkspaceSockets(
             name = decoder.decode(entry.name);
           } catch {
             // A name that is not valid UTF-8 has no string form, so it cannot be handed to
-            // bubblewrap to mask. Sockets and symlinks must refuse; other entries cannot be
-            // dialled and are skipped rather than blocking every command in the workspace.
-            if (entry.isSocket() || entry.isSymbolicLink()) {
+            // bubblewrap to mask. Anything that could be, or could contain, a dialable socket
+            // must therefore refuse — including a *directory*, because a socket inside it
+            // would be skipped along with the directory and stay reachable through its byte
+            // path (rev-sandbox-4 finding on f34a065). Only an undecodable regular entry is
+            // skipped: it cannot hold a socket and cannot itself be dialled.
+            if (entry.isDirectory() || entry.isSocket() || entry.isSymbolicLink()) {
+              const kind = entry.isDirectory() ? 'directory' : entry.isSocket() ? 'socket' : 'symlink';
               throw new SocketScanError(
-                `socket scan found a ${entry.isSocket() ? 'socket' : 'symlink'} whose name is not valid UTF-8 under '${dir}' and cannot be masked. ${FIX_HINT}`,
+                `socket scan found a ${kind} whose name is not valid UTF-8 under '${dir}' and cannot be scanned or masked. ${FIX_HINT}`,
               );
             }
             continue;

@@ -384,3 +384,32 @@ test('walkWorkspaceSockets: an undecodable regular file does not block the scan 
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+
+test('both discovery paths refuse when an undecodable DIRECTORY hides a socket (rev-sandbox-4 finding)', async () => {
+  const root = await tempWorkspace('fc-scan-nonutf8-dir-');
+  // A directory whose name is not valid UTF-8, holding a perfectly ordinary socket: if the
+  // scan skips the directory it never sees the socket, and the byte path still connects.
+  const plainDir = path.join(root, 'plain');
+  await fs.mkdir(plainDir);
+  const close = await listenUnixSocket(path.join(plainDir, 'host.sock'));
+  const weirdDir = BufferCtor.concat([
+    BufferCtor.from(`${root}/`),
+    BufferCtor.from([0x62, 0x61, 0x64, 0xff]),
+  ]);
+  try {
+    await fs.rename(plainDir, weirdDir as unknown as string);
+
+    await assert.rejects(
+      () => scanWorkspaceSockets(root),
+      (err: unknown) => err instanceof SocketScanError && /not valid UTF-8/.test(err.message),
+    );
+    await assert.rejects(
+      () => walkWorkspaceSockets(root),
+      (err: unknown) => err instanceof SocketScanError && /directory whose name is not valid UTF-8/.test(err.message),
+    );
+  } finally {
+    await close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
