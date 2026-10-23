@@ -45,9 +45,10 @@ session the *general* control-plane credential and to say what happens to the ke
   (`authorizeControlPlane`): the machine key first (unchanged contract), then the
   session, which may only act for its own login — a valid session asking for another
   `:owner` is a typed `cross-tenant` 403, never a retry with a weaker credential.
-- Sessions are signed with `BROKER_SIGNING_KEY`, falling back to
-  `BROKER_CONTROL_KEY`/`WEBHOOK_SECRET`, so a deployment serves browsers with the
-  master key **unset**. With neither configured, routes fail closed with 503.
+- Sessions are signed with `BROKER_SIGNING_KEY`, falling back to `BROKER_CONTROL_KEY`
+  (the `WEBHOOK_SECRET` fallback was removed — a webhook secret is not a session key),
+  so a deployment serves browsers with the master key **unset**. With neither
+  configured, routes fail closed with 503.
 - **The master key survives only as a machine credential**: CI, the scheduler, the CLI
   and an operator's break-glass path. It is not a user credential, it must never be
   requested by the UI, and each route that still needs it is a tracked debt, not a
@@ -74,17 +75,17 @@ To run without the master key:
    control-key-only" list matters to you.
 4. Verify what a keyless deployment actually serves **today** (see the table below).
 
-### What works with the key unset — as of `a902a86`
+### What works with the key unset — as of main `5dddb84`
 
 | Surface | Keyless behaviour | Blocked on |
 | --- | --- | --- |
 | `/audit/*`, `/canvas/<owner>/<repo>/documents`, `/studio/*`, `/analysis/*/tree` | serves the session's own tenant; 403 for another `:owner` | — |
-| `/api/repos` (the canvas repository list) | **still 503** — `handleApiRepos` returns early when `BROKER_CONTROL_KEY` is unset, before it looks at a session | `cloud-factory-cf-owqq` (implemented on `fleet/imp-admin`, unmerged) |
+| `/api/repos` (the canvas repository list) | serves the session's own repositories; 503 only when no signing key is configured at all | — (`cloud-factory-cf-owqq`, merged) |
 | The web UI | **still prompts** for a control key in the connect dialog and admin panel | `cloud-factory-cf-qdud` |
 | `/runs/*`, `/canvas/.../run`, `/broker/*`, `/admin/*`, `/trace/*` | 503/401 without the key | `cloud-factory-cf-ec98` |
 
 So a keyless deployment is a *supported target*, not a finished state: the tenant
-boundary is real on the routes listed as serving sessions, and the three rows above say
+boundary is real on the routes listed as serving sessions, and the two rows above say
 what is not. Do not read this ADR as a claim that the key is already unnecessary.
 
 Rollback is setting `BROKER_CONTROL_KEY` again: the machine path is checked first and
@@ -113,8 +114,8 @@ closes this).
 
 | Slice | Work | Bead | State |
 | --- | --- | --- | --- |
-| 1 | Session as tenant-bound control-plane credential on `/audit`, `/canvas` documents, `/studio`, `/analysis` tree | `cloud-factory-cf-e1ql` | implemented, cleared for landing |
-| 2 | UI stops prompting for the control key; repo connect via browser session (`/api/repos` keyless fix is `owqq`) | `cloud-factory-cf-qdud` | open |
+| 1 | Session as tenant-bound control-plane credential on `/audit`, `/canvas` documents, `/studio`, `/analysis` tree | `cloud-factory-cf-e1ql` | merged (`1ace3b0`) |
+| 2 | UI stops prompting for the control key; repo connect via browser session | `cloud-factory-cf-qdud` | server side merged (`owqq`, `05f4dd3`); the UI still prompts |
 | 3 | Trace WebSocket stops carrying the key in a query string (ephemeral ticket) | `cloud-factory-cf-aqq3` | branch exists (`fleet/imp-2-aqq3`); its lane is gone and the bead is `review-failed`/`waiting` — orphaned, needs re-routing |
 | 4 | Per-tenant capability issuance; execution routes drop the master key | `cloud-factory-cf-ec98` | open (needs ADR 006 slices 1–2) |
 
