@@ -403,3 +403,44 @@ test('createLocalTools: network-none masks a host socket inside node_modules too
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('createLocalTools: network-none masks a socket bound with a relative pathname (cloud-factory-cf-khu9)', async (t) => {
+  const reason = await bwrapUnavailableReason();
+  if (reason) {
+    t.skip(reason);
+    return;
+  }
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-relative-'));
+  const sockPath = path.join(tmpDir, 'relative.sock');
+  try {
+    // `bind("relative.sock")` from a cwd inside the workspace: the kernel records the
+    // pathname verbatim, with no leading slash, so the socket table alone cannot place it.
+    const previousCwd = process.cwd();
+    process.chdir(tmpDir);
+    const server = net.createServer((connection) => {
+      connection.write('HOST_SOCKET_REACHED\n');
+      connection.end();
+    });
+    try {
+      await new Promise<void>((resolve) => server.listen('relative.sock', () => resolve()));
+    } finally {
+      process.chdir(previousCwd);
+    }
+
+    try {
+      const tools = createLocalTools({ cwd: tmpDir, sandboxNetwork: 'none' });
+      const execTool = tools.find((t2) => t2.name === 'exec_command')!;
+      const res = (await execTool.handler({
+        command: `node -e 'const net = require("net"); net.connect("./relative.sock").on("data", () => console.log("HOST_SOCKET_REACHED")).on("error", e => console.log("MASKED_ERR:" + e.code))'`,
+      })) as any;
+      assert.match(res.stdout, /MASKED_ERR:/);
+      assert.doesNotMatch(res.stdout, /HOST_SOCKET_REACHED/);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await fs.rm(sockPath, { force: true }).catch(() => {});
+    }
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});

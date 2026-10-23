@@ -137,6 +137,12 @@ every socket in the workspace, and that discovery is a security control:
   in a pruned directory was never masked, cloud-factory-cf-5vuu.)
 - it is **re-run for every command**, so a socket that appears later is still masked
   (a cache would silently unmask it — cloud-factory-cf-vy8o).
+- one row the table cannot place is a **relative pathname**: `bind("relative.sock")` from
+  a cwd inside the workspace is legal, and the kernel records the name verbatim with no
+  leading slash, so that path cannot be located from the row (cloud-factory-cf-khu9). A
+  table containing any such row costs one complete walk for that command (the walk finds
+  the real file by inode); a host with none pays nothing — measured on this VM: 0
+  relative against 48 absolute and 5 abstract rows.
 - on a host with no socket table it falls back to a **complete-or-refuse** directory
   walk (`socketScan: { timeoutMs = 5000, maxDirs = 20000, maxDepth = 32 }`). If the
   walk cannot finish — budget, unreadable directory, too deep — the command is

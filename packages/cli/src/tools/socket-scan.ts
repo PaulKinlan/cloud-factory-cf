@@ -21,9 +21,13 @@ import * as path from 'node:path';
  * So the primary source is not a walk at all: the kernel already publishes every
  * bound Unix socket in `/proc/net/unix`, path included. Reading that table is
  * O(number of sockets) — well under a millisecond — and it cannot be bypassed by
- * putting the socket somewhere inconvenient. The directory walk remains only as a
- * degraded fallback for hosts without `/proc`, and it **prunes nothing**: complete
- * or refused, never partial. Every incomplete scan throws
+ * putting the socket somewhere inconvenient. The directory walk remains as a degraded
+ * fallback for hosts without `/proc` and for one case the table cannot answer — a
+ * **relative** pathname (cloud-factory-cf-khu9): `bind("relative.sock")` is legal, the
+ * kernel records exactly what it was given, and the binder's cwd is not in the row, so
+ * that path cannot be placed in the workspace. A relative row therefore costs one
+ * complete walk (it may name a socket inside the workspace), and the walk still
+ * **prunes nothing**: complete or refused, never partial. Every incomplete scan throws
  * (`SocketScanError`), because a partial answer means an unmasked socket.
  */
 
@@ -90,26 +94,50 @@ const FIX_HINT =
 /** `/proc/net/unix` rows: `Num: RefCount Protocol Flags Type St Inode Path`. */
 const SOCKET_TABLE_ROW = /^\s*[0-9a-fA-F]+:\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\d+\s+(.*)$/;
 
+export interface SocketTableAnalysis {
+  /** Sockets the table places inside the workspace, by absolute path. */
+  sockets: string[];
+  /**
+   * Whether the table holds a pathname that is neither abstract nor absolute. Such a
+   * row may name a socket inside the workspace, but the table cannot say where the
+   * binder's cwd was, so the caller must verify with a complete walk.
+   */
+  relativePaths: boolean;
+}
+
 /**
- * Filters a `/proc/net/unix` table down to the sockets inside `root`.
+ * Filters a `/proc/net/unix` table down to the sockets inside `root`, and reports
+ * whether any row's pathname could not be placed at all.
  *
  * The Path column is free-form (it may contain spaces) and abstract sockets appear
  * as `@name`, so the path is everything after the inode column rather than a
  * whitespace-split field. Exported for tests: parsing a table is pure.
  */
-export function socketsUnderRoot(table: string, root: string): string[] {
+export function analyseSocketTable(table: string, root: string): SocketTableAnalysis {
   const prefix = root.endsWith(path.sep) ? root : root + path.sep;
   const found: string[] = [];
+  let relativePaths = false;
   for (const line of table.split('\n')) {
     const match = SOCKET_TABLE_ROW.exec(line);
     if (!match) continue;
     const socketPath = (match[1] ?? '').trim();
-    // Bind-mountable paths only: an abstract socket (@) has no filesystem path, so
-    // there is nothing to mask and nothing the sandbox can dial by name.
-    if (!socketPath.startsWith(path.sep)) continue;
+    // An abstract socket (@) has no filesystem path, so there is nothing to mask and
+    // nothing the sandbox can dial by name.
+    if (socketPath.length === 0 || socketPath.startsWith('@')) continue;
+    if (!socketPath.startsWith(path.sep)) {
+      // `bind("relative.sock")` from a cwd inside the workspace lands here, and it is a
+      // real escape: the kernel records the pathname verbatim (cloud-factory-cf-khu9).
+      relativePaths = true;
+      continue;
+    }
     if (socketPath.startsWith(prefix)) found.push(socketPath);
   }
-  return found;
+  return { sockets: found, relativePaths };
+}
+
+/** Convenience wrapper over {@link analyseSocketTable} for callers that only need paths. */
+export function socketsUnderRoot(table: string, root: string): string[] {
+  return analyseSocketTable(table, root).sockets;
 }
 
 /** The kernel's bound-socket table, or `null` when this host does not publish one. */
@@ -222,8 +250,26 @@ export async function scanWorkspaceSockets(
 
   const table = await readHostUnixSocketTable(options.tablePath);
   if (table !== null) {
-    const sockets = socketsUnderRoot(table, root).sort();
-    return { sockets, source: 'proc', dirsScanned: 0, elapsedMs: Date.now() - startedAt };
+    const analysis = analyseSocketTable(table, root);
+    if (!analysis.relativePaths) {
+      return {
+        sockets: analysis.sockets.sort(),
+        source: 'proc',
+        dirsScanned: 0,
+        elapsedMs: Date.now() - startedAt,
+      };
+    }
+    // A relative pathname may point into the workspace but cannot be placed, so this
+    // request pays for a complete walk and unions what it finds. The walk throws rather
+    // than returning partial results, so the union is never silently incomplete.
+    const walk = await walkWorkspaceSockets(root, options);
+    const sockets = [...new Set([...analysis.sockets, ...walk.sockets])].sort();
+    return {
+      sockets,
+      source: 'walk',
+      dirsScanned: walk.dirsScanned,
+      elapsedMs: Date.now() - startedAt,
+    };
   }
 
   const walk = await walkWorkspaceSockets(root, options);

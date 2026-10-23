@@ -5,6 +5,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as net from 'node:net';
 import {
+  analyseSocketTable,
   readHostUnixSocketTable,
   scanWorkspaceSockets,
   socketsUnderRoot,
@@ -181,6 +182,53 @@ test('walkWorkspaceSockets: refuses instead of failing open when a directory can
     );
   } finally {
     await fs.chmod(locked, 0o755).catch(() => {});
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test('analyseSocketTable: a relative pathname is reported, not silently dropped (cloud-factory-cf-khu9)', () => {
+  const table = [
+    HEADER,
+    '0000000000000000: 00000002 00000000 00010000 0001 01 1 /srv/app/abs.sock',
+    '0000000000000000: 00000002 00000000 00010000 0001 01 2 relative.sock',
+    '0000000000000000: 00000002 00000000 00010000 0001 01 3 sub/dir/other.sock',
+    '0000000000000000: 00000002 00000000 00010000 0001 01 4 @abstract',
+  ].join('\n');
+
+  const analysis = analyseSocketTable(table, '/srv/app');
+  assert.deepEqual(analysis.sockets, ['/srv/app/abs.sock']);
+  // `bind("relative.sock")` from a cwd inside the workspace is an escape, so the scan
+  // cannot trust an absolute-only answer for this table.
+  assert.equal(analysis.relativePaths, true);
+
+  const absoluteOnly = analyseSocketTable(
+    [HEADER, '0000000000000000: 00000002 00000000 00010000 0001 01 1 /srv/app/abs.sock'].join('\n'),
+    '/srv/app',
+  );
+  assert.equal(absoluteOnly.relativePaths, false);
+});
+
+test('scanWorkspaceSockets: a relative row forces the complete walk and still finds the socket (cloud-factory-cf-khu9)', async () => {
+  const root = await tempWorkspace('fc-scan-relative-');
+  const deep = path.join(root, 'node_modules', 'pkg');
+  await fs.mkdir(deep, { recursive: true });
+  const close = await listenUnixSocket(path.join(deep, 'relative.sock'));
+  const tablePath = path.join(root, '..', `${path.basename(root)}-table`);
+  try {
+    // A table shaped like the kernel's after `bind("relative.sock")` from a cwd inside
+    // the workspace: the socket is real, but the row cannot place it.
+    await fs.writeFile(
+      tablePath,
+      [HEADER, '0000000000000000: 00000002 00000000 00010000 0001 01 1 relative.sock'].join('\n'),
+    );
+
+    const result = await scanWorkspaceSockets(root, { tablePath });
+    assert.equal(result.source, 'walk');
+    assert.deepEqual(result.sockets, [path.join(deep, 'relative.sock')]);
+  } finally {
+    await close();
+    await fs.rm(tablePath, { force: true });
     await fs.rm(root, { recursive: true, force: true });
   }
 });
