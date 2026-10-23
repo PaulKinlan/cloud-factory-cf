@@ -101,7 +101,7 @@ const FIND_EXPRESSION = ['(', '-type', 's', '-o', '-type', 'l', '-xtype', 's', '
  * option here — it interpolates the workspace path into a shell command line.
  */
 interface SpawnedFind {
-  stdout: { on(event: 'data', listener: (chunk: { toString(): string }) => void): void } | null;
+  stdout: { on(event: 'data', listener: (chunk: Uint8Array) => void): void } | null;
   stderr: { on(event: 'data', listener: (chunk: { toString(): string }) => void): void } | null;
   on(event: 'error', listener: (error: { code?: string; message?: string }) => void): void;
   on(event: 'close', listener: (code: number | null) => void): void;
@@ -116,23 +116,82 @@ type SpawnFn = (
 
 const spawn = (childProcess as unknown as { spawn: SpawnFn }).spawn;
 
-/** NUL-delimited output, so a name containing a newline is not split in two. */
-export function parseFindOutput(stdout: string, root: string): string[] {
-  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
-  const found: string[] = [];
-  for (const entry of stdout.split('\0')) {
-    if (entry === '') continue;
-    // `find` prints the path it was given, so entries are already absolute here; the
-    // check keeps a stray `.`-relative path from slipping through.
-    const absolute = path.resolve(entry);
-    if (absolute === root || absolute.startsWith(prefix)) found.push(absolute);
+const UTF8_DECODER = (
+  globalThis as unknown as {
+    TextDecoder: new (label: string, options?: { fatal?: boolean }) => {
+      decode(bytes: Uint8Array): string;
+    };
   }
-  return found;
+).TextDecoder;
+
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  let length = 0;
+  for (const chunk of chunks) length += chunk.length;
+  const out = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+export interface FindOutputParse {
+  sockets: string[];
+  /**
+   * Entries whose bytes are not valid UTF-8. Such a name cannot be represented as a string,
+   * so it cannot be handed to `bwrap` to mask — the caller must refuse rather than mask a
+   * mangled path and report success (cloud-factory-cf-sd2y).
+   */
+  undecodable: number;
+}
+
+/**
+ * Splits `find -print0` output on NUL **at the byte level** and decodes each entry once.
+ * NUL delimiting means a name containing a newline is one entry; decoding the whole buffer
+ * once means a multi-byte character split across stream chunks is still one character.
+ */
+export function parseFindOutput(bytes: Uint8Array, root: string): FindOutputParse {
+  const normalisedRoot = path.resolve(root);
+  const prefix = normalisedRoot.endsWith(path.sep)
+    ? normalisedRoot
+    : normalisedRoot + path.sep;
+  const decoder = new UTF8_DECODER('utf-8', { fatal: true });
+  const sockets: string[] = [];
+  let undecodable = 0;
+
+  let start = 0;
+  const entries: Array<[number, number]> = [];
+  for (let i = 0; i < bytes.length; i += 1) {
+    if (bytes[i] === 0) {
+      entries.push([start, i]);
+      start = i + 1;
+    }
+  }
+  if (start < bytes.length) entries.push([start, bytes.length]);
+
+  for (const [from, to] of entries) {
+    if (to <= from) continue;
+    let text: string;
+    try {
+      text = decoder.decode(bytes.subarray(from, to));
+    } catch {
+      undecodable += 1;
+      continue;
+    }
+    // `find` prints the path it was given, so entries are already absolute; the check keeps
+    // a stray `.`-relative path from slipping through.
+    const absolute = path.resolve(text);
+    if (absolute === normalisedRoot || absolute.startsWith(prefix)) sockets.push(absolute);
+  }
+  return { sockets, undecodable };
 }
 
 interface FindRun {
   code: number | null;
-  stdout: string;
+  /** Raw stdout bytes: decoding is a separate step so a multi-byte name split across
+   * chunks is not mangled (cloud-factory-cf-sd2y). */
+  stdout: Uint8Array;
   stderr: string;
   timedOut: boolean;
   missing: boolean;
@@ -146,7 +205,10 @@ function runFind(findBinary: string, root: string, timeoutMs: number): Promise<F
       shell: false,
     });
 
-    let stdout = '';
+    const chunks: Uint8Array[] = [];
+    // `Uint8Array<ArrayBufferLike>` vs `Uint8Array<ArrayBuffer>`: the shim has no Buffer, and
+    // every read path here treats the value opaquely, so the wide type is used throughout.
+    let stdout: Uint8Array = new Uint8Array(0);
     let stderr = '';
     let settled = false;
     let timedOut = false;
@@ -157,8 +219,10 @@ function runFind(findBinary: string, root: string, timeoutMs: number): Promise<F
       child.kill('SIGKILL');
     }, timeoutMs);
 
-    child.stdout?.on('data', (chunk: { toString(): string }) => {
-      stdout += chunk.toString();
+    child.stdout?.on('data', (chunk: Uint8Array) => {
+      // Keep the bytes. A `find -print0` entry can be split across chunks anywhere,
+      // including inside a multi-byte character, so decoding per chunk corrupts the name.
+      chunks.push(chunk);
     });
     child.stderr?.on('data', (chunk: { toString(): string }) => {
       stderr += chunk.toString();
@@ -176,6 +240,7 @@ function runFind(findBinary: string, root: string, timeoutMs: number): Promise<F
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      stdout = concatBytes(chunks);
       resolve({ code, stdout, stderr, timedOut, missing });
     });
   });
@@ -370,10 +435,20 @@ export async function scanWorkspaceSockets(
     );
   }
 
+  const parsed = parseFindOutput(result.stdout, root);
+  if (parsed.undecodable > 0) {
+    // A name that is not valid UTF-8 cannot be passed to `bwrap` as an argument, so the
+    // mask cannot cover it. Refusing is the fail-closed answer: masking a mangled path and
+    // returning success would leave the real socket reachable (cloud-factory-cf-sd2y).
+    throw new SocketScanError(
+      `socket scan found ${parsed.undecodable} workspace socket name(s) that are not valid UTF-8 and cannot be masked. ${FIX_HINT}`,
+    );
+  }
+
   // Mask the path inside the workspace. For a symlink that is the link itself: the mount
   // follows it, so the target socket becomes unreachable under either name.
   return {
-    sockets: [...new Set(parseFindOutput(result.stdout, root))].sort(),
+    sockets: [...new Set(parsed.sockets)].sort(),
     source: 'find',
     dirsScanned: 0,
     elapsedMs: Date.now() - startedAt,

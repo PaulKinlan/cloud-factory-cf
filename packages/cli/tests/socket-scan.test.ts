@@ -34,19 +34,49 @@ async function listenUnixSocket(socketPath: string): Promise<() => Promise<void>
   };
 }
 
+const utf8 = (text: string): Uint8Array => new TextEncoder().encode(text);
+
 test('parseFindOutput: NUL-separated paths, so a name containing a newline stays one entry', () => {
   const root = '/srv/app';
-  const stdout = ['/srv/app/a.sock', '/srv/app/b\nc.sock', '/srv/app/d ir .sock', ''].join('\0');
-  assert.deepEqual(parseFindOutput(stdout, root).sort(), [
+  const stdout = utf8(['/srv/app/a.sock', '/srv/app/b\nc.sock', '/srv/app/d ir .sock', ''].join('\0'));
+  assert.deepEqual(parseFindOutput(stdout, root).sockets.sort(), [
     '/srv/app/a.sock',
     '/srv/app/b\nc.sock',
     '/srv/app/d ir .sock',
   ].sort());
+  assert.equal(parseFindOutput(stdout, root).undecodable, 0);
+});
+
+test('parseFindOutput: a multi-byte name split across stream chunks is decoded once (cloud-factory-cf-sd2y)', () => {
+  const root = '/srv/app';
+  const name = `${'/srv/app/'}${'\u00e9'.repeat(30)}-0045.sock`;
+  const bytes = utf8(`${name}\0`);
+  // Every split point must decode identically: the parse sees the concatenated buffer, so a
+  // boundary inside a two-byte character is not the parse's problem.
+  for (const cut of [1, 2, 3, 7, 31, bytes.length - 1]) {
+    const stitched = new Uint8Array([
+      ...bytes.subarray(0, cut),
+      ...bytes.subarray(cut),
+    ]);
+    const parsed = parseFindOutput(stitched, root);
+    assert.deepEqual(parsed.sockets, [name], `cut at ${cut}`);
+    assert.equal(parsed.undecodable, 0);
+  }
+});
+
+test('parseFindOutput: an entry that is not valid UTF-8 is reported, not mangled (cloud-factory-cf-sd2y)', () => {
+  const root = '/srv/app';
+  // 0xff is not a valid UTF-8 byte: there is no string form to hand to bwrap, so the scan
+  // must refuse rather than mask a replacement-character path.
+  const bytes = new Uint8Array([...utf8('/srv/app/bad'), 0xff, ...utf8('.sock'), 0]);
+  const parsed = parseFindOutput(bytes, root);
+  assert.deepEqual(parsed.sockets, []);
+  assert.equal(parsed.undecodable, 1);
 });
 
 test('parseFindOutput: only paths inside the workspace are kept', () => {
-  const stdout = ['/srv/application/decoy.sock', '/srv/app/real.sock'].join('\0');
-  assert.deepEqual(parseFindOutput(stdout, '/srv/app'), ['/srv/app/real.sock']);
+  const stdout = utf8(['/srv/application/decoy.sock', '/srv/app/real.sock'].join('\0'));
+  assert.deepEqual(parseFindOutput(stdout, '/srv/app').sockets, ['/srv/app/real.sock']);
 });
 
 test('scanWorkspaceSockets: finds a socket under node_modules (cloud-factory-cf-5vuu)', async () => {
@@ -278,6 +308,59 @@ test('scanWorkspaceSockets: prefers the system find even when the workspace shad
     assert.equal(result.source, 'find');
   } finally {
     await close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test('scanWorkspaceSockets: a non-ASCII socket name is found exactly (cloud-factory-cf-sd2y)', async () => {
+  const root = await tempWorkspace('fc-scan-utf8-');
+  const name = `${'\u00e9'.repeat(30)}-0045.sock`;
+  const close = await listenUnixSocket(path.join(root, name));
+  try {
+    const result = await scanWorkspaceSockets(root);
+    assert.deepEqual(result.sockets, [path.join(root, name)]);
+  } finally {
+    await close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('scanWorkspaceSockets: refuses when a socket name is not valid UTF-8 (cloud-factory-cf-sd2y)', async (t) => {
+  const root = await tempWorkspace('fc-scan-nonutf8-');
+  // A byte path, because no JS string can name this file: 0xff is not valid UTF-8.
+  const BufferCtor = (
+    globalThis as unknown as {
+      Buffer: { from(input: string | number[]): Uint8Array; concat(parts: Uint8Array[]): Uint8Array };
+    }
+  ).Buffer;
+  const socketPath = BufferCtor.concat([
+    BufferCtor.from(`${root}/`),
+    BufferCtor.from([0x62, 0x61, 0x64, 0xff]),
+    BufferCtor.from('.sock'),
+  ]);
+
+  const server = net.createServer((connection) => connection.end());
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.on('error', reject);
+      server.listen(socketPath as unknown as string, () => resolve());
+    });
+  } catch {
+    t.skip('this platform cannot create a socket with a non-UTF-8 name');
+    return;
+  }
+
+  try {
+    // The name cannot be represented as a string, so it cannot be handed to bubblewrap to
+    // mask. Refusing is the fail-closed answer: masking a replacement-character path and
+    // returning success would leave the real socket reachable.
+    await assert.rejects(
+      () => scanWorkspaceSockets(root),
+      (err: unknown) => err instanceof SocketScanError && /not valid UTF-8/.test(err.message),
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     await fs.rm(root, { recursive: true, force: true });
   }
 });
