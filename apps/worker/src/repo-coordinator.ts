@@ -3,6 +3,7 @@ import { parseRepositoryKey } from "@factory-cloud/sdk";
 import type { Env } from "./env";
 import { planAgents, sourceMatches } from "./canvas-runs";
 import { safeParseJson } from "./events/helpers";
+import { isMissingSchemaError } from "./events/sql-errors";
 import { createDefaultExecutionFn, drainRepository } from "./pipeline";
 import { CanvasStore, migrateCanvasTable } from "./canvas-store";
 import { GitTreeStore, migrateGitTreeTable } from "./git-tree-store";
@@ -93,6 +94,25 @@ export class RepoCoordinator extends DurableObject<Env> {
     return this.ctx.storage.sql;
   }
 
+  /**
+   * Runs `fn`; if SQLite reports a missing table, re-apply the migrations (every
+   * statement is `CREATE TABLE IF NOT EXISTS`, so this is idempotent) and retry once.
+   * Any other error propagates untouched — this must not become a blanket retry
+   * (cloud-factory-cf-u55u, coord's Proposal 1).
+   */
+  private async withSchemaRetry<T>(fn: () => T | Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isMissingSchemaError(err)) throw err;
+      console.error(
+        `RepoCoordinator ${this.ctx.id.name ?? "?"}: re-applying schema after '${err instanceof Error ? err.message : String(err)}'`,
+      );
+      this.migrate();
+      return await fn();
+    }
+  }
+
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const name = this.ctx.id.name ?? "";
@@ -114,14 +134,16 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
 
     try {
-      await this.ensureMigrated();
+      await this.withSchemaRetry(() => this.ensureMigrated());
     } catch (err) {
       return Response.json(
         { ok: false, error: err instanceof Error ? err.message : String(err) },
         { status: 503 },
       );
     }
-    return this.route(request);
+    // The retry covers both a schema that is momentarily invisible and the writes that
+    // read it (run_trace, canvas documents, the event queue).
+    return this.routeWithSchemaRetry(request);
   }
 
   private async exportLegacyState(request: Request): Promise<Response> {
@@ -311,6 +333,38 @@ export class RepoCoordinator extends DurableObject<Env> {
    * itself deadlocks, because it cannot serve the inner request while the outer one
    * is blocked on it.
    */
+  /**
+   * `route()` with the schema retry, for the one input that cannot simply be re-used: a
+   * `Request` body is a stream, so the first attempt consumes it and a naive retry would
+   * hand the handler an empty body (a 400 for POST /trace, and worse for an ingest —
+   * rev-u55u finding, cloud-factory-cf-1k1y). The clone is taken *before* the first
+   * attempt, and only when it is cheap and legal to take: a WebSocket upgrade request
+   * cannot be cloned, and there the original error propagates.
+   */
+  private async routeWithSchemaRetry(request: Request): Promise<Response> {
+    // `request.clone()` carries the host metadata type through, so the clone is typed from
+    // the request itself rather than as a bare `Request`.
+    let retryable: ReturnType<Request["clone"]> | null = null;
+    try {
+      retryable = request.clone();
+    } catch {
+      retryable = null;
+    }
+    try {
+      return await this.route(request);
+    } catch (err) {
+      if (retryable === null || !isMissingSchemaError(err)) throw err;
+      console.error(
+        `RepoCoordinator ${this.ctx.id.name ?? "?"}: re-applying schema after '${err instanceof Error ? err.message : String(err)}'`,
+      );
+      this.migrate();
+      // The clone carries the request's host-metadata generics (`Request<CfHostMetadata, Cf>`),
+      // which do not widen back to the default `Request`; the handler only reads the body and
+      // headers, so the boundary cast is safe here and keeps `route()`'s signature simple.
+      return this.route(retryable as unknown as Request);
+    }
+  }
+
   private async route(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
@@ -503,16 +557,25 @@ export class RepoCoordinator extends DurableObject<Env> {
    * (cloud-factory-cf-7or.1).
    */
   override async alarm(): Promise<void> {
-    await this.eventQueue.requeueExpiredLeases();
-    try {
-      await this.autoDrain();
-    } catch {
-      // A drain that throws must not re-arm for "now": that is a hot loop. Wait out a
-      // backoff; the events stay queued for the next attempt.
-      this.ctx.storage.setAlarm(Date.now() + AUTO_DRAIN_RETRY_MS);
-      return;
-    }
-    await this.eventQueue.armAlarm();
+    // An alarm can fire on a freshly-restored object before its schema is visible, so
+    // it gets the same one-shot schema retry as a request (cloud-factory-cf-u55u).
+    return this.withSchemaRetry(async () => {
+      await this.eventQueue.requeueExpiredLeases();
+      try {
+        await this.autoDrain();
+      } catch (err) {
+        // A missing table is not a drain failure: it must reach the retry above, which
+        // re-creates the schema and runs the alarm again. Swallowing it here turned a
+        // transient schema window into a permanent 30s backoff loop, with the table never
+        // re-created and no review posted (cloud-factory-cf-chcm).
+        if (isMissingSchemaError(err)) throw err;
+        // Any other throw must not re-arm for "now": that is a hot loop. Wait out a
+        // backoff; the events stay queued for the next attempt.
+        this.ctx.storage.setAlarm(Date.now() + AUTO_DRAIN_RETRY_MS);
+        return;
+      }
+      await this.eventQueue.armAlarm();
+    });
   }
 
   /**
