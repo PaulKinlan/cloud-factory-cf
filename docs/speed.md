@@ -105,7 +105,11 @@ contract:
 - for `vitest` workspaces it asks `vitest list --changed --filesOnly` what is
   affected; edge-routed Worker modules have no direct test import for Vitest to
   trace, so `.fleet/coverage-contract.json` pins their `SELF.fetch` integration
-  suites alongside the affected set. A missing pinned suite fails the gate. This
+  suites alongside the affected set. A missing pinned suite fails the gate. So
+  does a contract that cannot be used — unparseable JSON, an entry that is not a
+  list of suite paths, or a key that is not a path in the tree (a typo, a rename,
+  a `./` prefix), because pins that silently stop matching are a false green.
+  Pinned suites run in their own workspace, whatever workspace that is. This
   small mapping is also read by the coverage reporter, preventing a PASS with
   PARTIAL coverage for those paths without running the whole Worker suite.
   `node:test` workspaces are seconds, so a change there runs their whole suite;
