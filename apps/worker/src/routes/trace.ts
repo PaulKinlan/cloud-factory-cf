@@ -142,6 +142,8 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
   }
 
   const stub = getRepoCoordinator(env, `${owner}/${repo}`, platform);
+  const headers = new Headers(request.headers);
+  headers.set("x-factory-original-repository", `${owner}/${repo}`);
 
   if (operation === "socket") {
     if (request.method !== "GET") {
@@ -176,7 +178,7 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
     return stub.fetch(
       new Request(`https://repo-coordinator.internal/trace/socket${forwarded}`, {
         method: "GET",
-        headers: request.headers,
+        headers,
       }),
     );
   }
@@ -194,11 +196,11 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
   }
 
   if (operation === "usage") {
-    return stub.fetch("https://repo-coordinator.internal/trace/usage");
+    return stub.fetch(new Request("https://repo-coordinator.internal/trace/usage", { headers }));
   }
   if (operation === "connect") {
-    return stub.fetch("https://repo-coordinator.internal/connect");
+    return stub.fetch(new Request("https://repo-coordinator.internal/connect", { headers }));
   }
   const query = url.searchParams.toString();
-  return stub.fetch(`https://repo-coordinator.internal/trace${query === "" ? "" : `?${query}`}`);
+  return stub.fetch(new Request(`https://repo-coordinator.internal/trace${query === "" ? "" : `?${query}`}`, { headers }));
 }

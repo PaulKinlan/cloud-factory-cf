@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { parseRepositoryKey } from "@factory-cloud/sdk";
+import { getCredentialBroker } from "./repo-coordinator-addressing";
 import type { Env } from "./env";
 import { planAgents, sourceMatches } from "./canvas-runs";
 import { safeParseJson } from "./events/helpers";
@@ -134,7 +135,8 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
 
     try {
-      await this.withSchemaRetry(() => this.ensureMigrated());
+      const origHeader = request.headers.get("x-factory-original-repository");
+      await this.withSchemaRetry(() => this.ensureMigrated(origHeader));
     } catch (err) {
       return Response.json(
         { ok: false, error: err instanceof Error ? err.message : String(err) },
@@ -199,10 +201,11 @@ export class RepoCoordinator extends DurableObject<Env> {
     return Response.json({ ok: true });
   }
 
-  private async ensureMigrated(): Promise<void> {
+  private async ensureMigrated(originalRepo?: string | null): Promise<void> {
     const name = this.ctx.id.name ?? "";
     const parsed = parseRepositoryKey(name);
-    if (!parsed || parsed.platform !== "github") return;
+    if (!parsed) return;
+    const platform = parsed.platform;
 
     const migrationRow = this.sql.exec<{ name: string }>(
       "SELECT name FROM _schema_migrations WHERE name = 'legacy_read_through'",
@@ -216,114 +219,144 @@ export class RepoCoordinator extends DurableObject<Env> {
       throw new Error(`BROKER_CONTROL_KEY is unconfigured: migration for ${legacyName} cannot proceed`);
     }
 
-    try {
-      const legacyStub = this.env.REPO_COORDINATOR.get(this.env.REPO_COORDINATOR.idFromName(legacyName));
-      const res = await legacyStub.fetch("https://repo-coordinator.internal/legacy/export", {
-        headers: { "x-factory-control-key": controlKey },
-      });
-      if (!res.ok) {
-        console.error(`Legacy export failed for ${legacyName} with status ${res.status}`);
-        return;
+    const candidateNames: string[] = [];
+    if (originalRepo) {
+      const origTrimmed = originalRepo.trim();
+      const origParsed = parseRepositoryKey(origTrimmed);
+      const origRepo = origParsed ? origParsed.repository : origTrimmed;
+      if (origRepo.toLowerCase() === parsed.repository && origRepo !== parsed.repository) {
+        candidateNames.push(`${platform}:${origRepo}`);
+        if (platform === "github") {
+          candidateNames.push(origRepo);
+        }
       }
-      const body = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        empty?: boolean;
-        state?: Record<string, unknown[]>;
-      };
-      if (!body.ok) {
-        console.error(`Legacy export returned not ok for ${legacyName}`);
-        return;
-      }
+    }
+    if (platform === "github") {
+      candidateNames.push(parsed.repository);
+    }
 
-      if (body.empty) {
-        this.sql.exec(
-          "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
-          Date.now(),
-        );
+    const unprobedCandidates = candidateNames.filter((cand) => {
+      const row = this.sql.exec<{ name: string }>(
+        "SELECT name FROM _schema_migrations WHERE name = ?",
+        `legacy_probed:${cand}`,
+      ).toArray();
+      return row.length === 0;
+    });
+    if (unprobedCandidates.length === 0) return;
+
+    try {
+      for (const cand of unprobedCandidates) {
+        const legacyStub = this.env.REPO_COORDINATOR.get(this.env.REPO_COORDINATOR.idFromName(cand));
+        const res = await legacyStub.fetch("https://repo-coordinator.internal/legacy/export", {
+          headers: { "x-factory-control-key": controlKey },
+        });
+        if (!res.ok) {
+          console.error(`Legacy export failed for ${cand} with status ${res.status}`);
+          return;
+        }
+        const body = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          empty?: boolean;
+          state?: Record<string, unknown[]>;
+        };
+        if (!body.ok) {
+          console.error(`Legacy export returned not ok for ${cand}`);
+          return;
+        }
+
+        if (body.empty) {
+          this.sql.exec(
+            "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES (?, ?)",
+            `legacy_probed:${cand}`,
+            Date.now(),
+          );
+          if (cand === parsed.repository) {
+            try {
+              await legacyStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
+                method: "POST",
+                headers: { "x-factory-control-key": controlKey },
+              });
+            } catch {}
+          }
+          continue;
+        }
+
+        const s = body.state;
+        if (!s) return;
+
+        this.ctx.storage.transactionSync(() => {
+          for (const m of (s["memory"] as any[]) ?? []) {
+            this.sql.exec(
+              "INSERT OR IGNORE INTO memory (key, value, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+              m.key, m.value, m.metadata, m.created_at, m.updated_at,
+            );
+          }
+          for (const c of (s["canvas_documents"] as any[]) ?? []) {
+            this.sql.exec(
+              "INSERT OR IGNORE INTO canvas_documents (id, name, document, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+              c.id, c.name, c.document, c.created_at, c.updated_at,
+            );
+          }
+          for (const w of (s["webhook_connect"] as any[]) ?? []) {
+            this.sql.exec(
+              "INSERT OR IGNORE INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+              w.id, w.last_ping_at, w.last_event_at, w.last_event, w.pings, w.updated_at,
+            );
+          }
+          for (const e of (s["events"] as any[]) ?? []) {
+            this.sql.exec(
+              "INSERT OR IGNORE INTO events (delivery_id, provider, event, action, repository, actor, received_at, payload, status, attempts, available_at, last_error, lease_id, kind, canonical_action) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              e.delivery_id, e.provider, e.event, e.action, e.repository, e.actor, e.received_at, e.payload, e.status, e.attempts, e.available_at, e.last_error, e.lease_id, e.kind, e.canonical_action,
+            );
+          }
+          for (const d of (s["event_deliveries"] as any[]) ?? []) {
+            this.sql.exec(
+              "INSERT OR IGNORE INTO event_deliveries (delivery_id, agent_id, status, attempts, updated_at) VALUES (?, ?, ?, ?, ?)",
+              d.delivery_id, d.agent_id, d.status, d.attempts, d.updated_at,
+            );
+          }
+          for (const a of (s["run_audit"] as any[]) ?? []) {
+            this.sql.exec(
+              "INSERT OR IGNORE INTO run_audit (id, document_id, name, agents, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+              a.id, a.document_id, a.name, a.agents, a.detail, a.created_at,
+            );
+          }
+          for (const t of (s["run_trace"] as any[]) ?? []) {
+            this.sql.exec(
+              "INSERT OR IGNORE INTO run_trace (id, delivery_id, sequence, step, status, detail, artifact, created_at, ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              t.id, t.delivery_id, t.sequence, t.step, t.status, t.detail, t.artifact, t.created_at, t.ms,
+            );
+          }
+          this.sql.exec(
+            "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
+            Date.now(),
+          );
+        });
+
+        // Tell legacy DO to cancel its alarm and mark itself migrated
         try {
           const ackRes = await legacyStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
             method: "POST",
             headers: { "x-factory-control-key": controlKey },
           });
           if (!ackRes.ok) {
-            console.error(`Legacy ack-migrated failed on empty path for ${legacyName} with status ${ackRes.status}`);
+            console.error(`Legacy ack-migrated failed for ${cand} with status ${ackRes.status}`);
           }
         } catch (ackErr) {
-          console.error(`Legacy ack-migrated network error on empty path for ${legacyName}:`, ackErr);
+          console.error(`Legacy ack-migrated network error for ${cand}:`, ackErr);
+        }
+
+        if (this.eventQueue.hasDue()) {
+          await this.eventQueue.armAlarm();
         }
         return;
       }
-
-      const s = body.state;
-      if (!s) return;
-
-      this.ctx.storage.transactionSync(() => {
-        for (const m of (s["memory"] as any[]) ?? []) {
-          this.sql.exec(
-            "INSERT OR IGNORE INTO memory (key, value, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            m.key, m.value, m.metadata, m.created_at, m.updated_at,
-          );
-        }
-        for (const c of (s["canvas_documents"] as any[]) ?? []) {
-          this.sql.exec(
-            "INSERT OR IGNORE INTO canvas_documents (id, name, document, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            c.id, c.name, c.document, c.created_at, c.updated_at,
-          );
-        }
-        for (const w of (s["webhook_connect"] as any[]) ?? []) {
-          this.sql.exec(
-            "INSERT OR IGNORE INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            w.id, w.last_ping_at, w.last_event_at, w.last_event, w.pings, w.updated_at,
-          );
-        }
-        for (const e of (s["events"] as any[]) ?? []) {
-          this.sql.exec(
-            "INSERT OR IGNORE INTO events (delivery_id, provider, event, action, repository, actor, received_at, payload, status, attempts, available_at, last_error, lease_id, kind, canonical_action) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            e.delivery_id, e.provider, e.event, e.action, e.repository, e.actor, e.received_at, e.payload, e.status, e.attempts, e.available_at, e.last_error, e.lease_id, e.kind, e.canonical_action,
-          );
-        }
-        for (const d of (s["event_deliveries"] as any[]) ?? []) {
-          this.sql.exec(
-            "INSERT OR IGNORE INTO event_deliveries (delivery_id, agent_id, status, attempts, updated_at) VALUES (?, ?, ?, ?, ?)",
-            d.delivery_id, d.agent_id, d.status, d.attempts, d.updated_at,
-          );
-        }
-        for (const a of (s["run_audit"] as any[]) ?? []) {
-          this.sql.exec(
-            "INSERT OR IGNORE INTO run_audit (id, document_id, name, agents, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            a.id, a.document_id, a.name, a.agents, a.detail, a.created_at,
-          );
-        }
-        for (const t of (s["run_trace"] as any[]) ?? []) {
-          this.sql.exec(
-            "INSERT OR IGNORE INTO run_trace (id, delivery_id, sequence, step, status, detail, artifact, created_at, ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            t.id, t.delivery_id, t.sequence, t.step, t.status, t.detail, t.artifact, t.created_at, t.ms,
-          );
-        }
-        this.sql.exec(
-          "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
-          Date.now(),
-        );
-      });
-
-      // Tell legacy DO to cancel its alarm and mark itself migrated
-      try {
-        const ackRes = await legacyStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
-          method: "POST",
-          headers: { "x-factory-control-key": controlKey },
-        });
-        if (!ackRes.ok) {
-          console.error(`Legacy ack-migrated failed for ${legacyName} with status ${ackRes.status}`);
-        }
-      } catch (ackErr) {
-        console.error(`Legacy ack-migrated network error for ${legacyName}:`, ackErr);
-      }
-
-      if (this.eventQueue.hasDue()) {
-        await this.eventQueue.armAlarm();
-      }
     } catch (err) {
-      console.error(`Migration error for ${legacyName}:`, err);
+      console.error(`Migration error for ${parsed.repository}:`, err);
+    }
+
+    if (this.eventQueue.hasDue()) {
+      await this.eventQueue.armAlarm();
     }
   }
 
@@ -618,7 +651,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       repository,
       controlKey,
       coordinator,
-      broker: this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(repository)),
+      broker: getCredentialBroker(this.env, repository),
       onStep: traceSink(coordinator),
       // Unifies ADR 003 decideAction semantics across alarm and runs paths (cloud-factory-cf-jtg9).
       executionFn: createDefaultExecutionFn(this.env),
@@ -750,8 +783,12 @@ export class RepoCoordinator extends DurableObject<Env> {
         try {
           const parsed = parseRepositoryKey(repoName);
           const brokerRepo = parsed ? parsed.repository : repoName;
-          const broker = this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(brokerRepo));
-          const res = await broker.fetch("https://credential-broker.internal/effective-webhook-secret");
+          const origRepo = headers.get("x-factory-original-repository");
+          const broker = getCredentialBroker(this.env, brokerRepo);
+          const secretReq = new Request("https://credential-broker.internal/effective-webhook-secret", {
+            headers: { "x-factory-original-repository": origRepo ?? brokerRepo },
+          });
+          const res = await broker.fetch(secretReq);
           if (res.ok) {
             const data = (await res.json().catch(() => ({}))) as { secret?: string };
             if (typeof data.secret === "string" && data.secret.length > 0) {

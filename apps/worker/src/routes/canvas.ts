@@ -3,7 +3,7 @@ import { traceSink } from "../events";
 import { runCanvasDocument } from "../canvas-runs";
 import { authorizeControlPlane, authzDenial, sessionMayAddressPlatform } from "../auth/tenant";
 import { mintDelegation } from "../auth/delegation";
-import { getRepoCoordinator } from "../repo-coordinator-addressing";
+import { getRepoCoordinator, getCredentialBroker } from "../repo-coordinator-addressing";
 
 export const CANVAS_PATH = /^\/canvas\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/documents(?:\/(?<id>[^/]+))?$/;
 export const CANVAS_RUN_PATH = /^\/canvas\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/documents\/(?<id>[^/]+)\/run$/;
@@ -49,7 +49,7 @@ export async function routeCanvasRun(
         ? { controlKey: env.BROKER_CONTROL_KEY as string }
         : { delegation }),
       coordinator,
-      broker: env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository)),
+      broker: getCredentialBroker(env, repository),
       onStep: traceSink(coordinator),
       ...(env.TELEMETRY_ENDPOINT === undefined ? {} : { telemetryEndpoint: env.TELEMETRY_ENDPOINT }),
     },

@@ -1,4 +1,4 @@
-import { SELF } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 const CONTROL_KEY = "test-control-key";
@@ -65,6 +65,32 @@ describe("Admin Dashboard & Settings API", () => {
     expect(settings.githubApp.hasPrivateKey).toBe(true);
     expect(settings.githubApp.privateKeyFingerprint).toMatch(/^sha256:[a-f0-9]{16}$/);
     expect(settings.githubApp.privateKeyFingerprint).not.toContain("MIIEow");
+
+    // 3. /export-settings fails closed with 401 when unauthenticated or BROKER_CONTROL_KEY is unset (cloud-factory-cf-g6lv)
+    const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(REPOSITORY));
+    const unauthExport = await broker.fetch("https://credential-broker.internal/export-settings");
+    expect(unauthExport.status).toBe(401);
+
+    const prevKey = (env as any).BROKER_CONTROL_KEY;
+    try {
+      (env as any).BROKER_CONTROL_KEY = undefined;
+      const unsetExport = await broker.fetch("https://credential-broker.internal/export-settings");
+      expect(unsetExport.status).toBe(401);
+      const withKeyExport = await broker.fetch("https://credential-broker.internal/export-settings", {
+        headers: { "x-factory-control-key": CONTROL_KEY },
+      });
+      expect(withKeyExport.status).toBe(401);
+    } finally {
+      (env as any).BROKER_CONTROL_KEY = prevKey;
+    }
+
+    const authExport = await broker.fetch("https://credential-broker.internal/export-settings", {
+      headers: { "x-factory-control-key": CONTROL_KEY },
+    });
+    expect(authExport.status).toBe(200);
+    const exportData = (await authExport.json()) as any;
+    expect(exportData.ok).toBe(true);
+    expect(exportData.rows.length).toBeGreaterThan(0);
   });
 
   it("DELETE ?key= removes only the specified setting, leaving others intact", async () => {
@@ -209,5 +235,111 @@ describe("Admin Dashboard & Settings API", () => {
     expect(body.status).toBe(202);
     expect(body.message).toContain("Test ping delivered");
     expect(body.deliveryId).toMatch(/^test-ping-/);
+  });
+
+  it("aligns CredentialBroker and RepoCoordinator addressing across case variations (cloud-factory-cf-g5c0, cloud-factory-cf-n23o)", async () => {
+    const customSecret = "custom-mixed-case-secret-999";
+    const mixedRepo = "Octodev/Probe-Repo";
+    const lowerRepo = "octodev/probe-repo";
+
+    // 1. Save settings under mixed-case repository path
+    const saveRes = await SELF.fetch(`https://example.com/api/admin/settings/${mixedRepo}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-factory-control-key": CONTROL_KEY,
+      },
+      body: JSON.stringify({
+        webhookSecret: customSecret,
+        aiProviders: {
+          anthropic: { key: "sk-ant-api03-1234567890abcdef", model: "claude-probe-model" },
+        },
+      }),
+    });
+    expect(saveRes.status).toBe(200);
+
+    // 2. Read back settings under lowercase path
+    const getRes = await SELF.fetch(`https://example.com/api/admin/settings/${lowerRepo}`, {
+      method: "GET",
+      headers: { "x-factory-control-key": CONTROL_KEY },
+    });
+    expect(getRes.status).toBe(200);
+    const settings = (await getRes.json()) as any;
+    expect(settings.ok).toBe(true);
+    expect(settings.aiProviders.anthropic.configured).toBe(true);
+    expect(settings.aiProviders.anthropic.model).toBe("claude-probe-model");
+
+    // 3. Trigger test ping with mixed case and verify RepoCoordinator & CredentialBroker align
+    const pingRes = await SELF.fetch(`https://example.com/api/admin/test-ping/${mixedRepo}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-factory-control-key": CONTROL_KEY,
+      },
+    });
+    expect(pingRes.status).toBe(200);
+    const pingBody = (await pingRes.json()) as any;
+    expect(pingBody.ok).toBe(true);
+    expect(pingBody.status).toBe(202);
+  });
+
+  it("migrates legacy mixed-case CredentialBroker settings on webhook delivery and settings access (cloud-factory-cf-w4w1, cloud-factory-cf-spnf)", async () => {
+    const legacyRepo = "Octodev/Legacy-Repo";
+    const customSecret = "legacy-mixed-case-secret-4242";
+
+    // 1. Seed the pre-existing mixed-case broker directly
+    const legacyBroker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(legacyRepo));
+    const seedRes = await legacyBroker.fetch("https://credential-broker.internal/settings", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-factory-control-key": CONTROL_KEY,
+      },
+      body: JSON.stringify({
+        webhookSecret: customSecret,
+        aiProviders: {
+          anthropic: { key: "sk-ant-api03-1234567890abcdef", model: "claude-legacy-model" },
+        },
+      }),
+    });
+    expect(seedRes.status).toBe(200);
+
+    // 2. Deliver a webhook signed with that legacy secret to the mixed-case path
+    const pingPayload = JSON.stringify({ zen: "Responsive is better than fast.", hook_id: 12345 });
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(customSecret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const signatureBytes = await crypto.subtle.sign("HMAC", key, encoder.encode(pingPayload));
+    const signatureHex = Array.from(new Uint8Array(signatureBytes))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    const hookRes = await SELF.fetch(`https://example.com/webhooks/github/${legacyRepo}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": "ping",
+        "x-github-delivery": "legacy-delivery-ping-1",
+        "x-hub-signature-256": `sha256=${signatureHex}`,
+      },
+      body: pingPayload,
+    });
+    expect(hookRes.status).toBe(202);
+
+    // 3. Read back settings from the lowercase route - verify settings were migrated into canonical lowercase broker
+    const getRes = await SELF.fetch(`https://example.com/api/admin/settings/${legacyRepo.toLowerCase()}`, {
+      method: "GET",
+      headers: { "x-factory-control-key": CONTROL_KEY },
+    });
+    expect(getRes.status).toBe(200);
+    const settings = (await getRes.json()) as any;
+    expect(settings.ok).toBe(true);
+    expect(settings.aiProviders.anthropic.configured).toBe(true);
+    expect(settings.aiProviders.anthropic.model).toBe("claude-legacy-model");
   });
 });

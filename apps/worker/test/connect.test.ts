@@ -185,6 +185,10 @@ describe("connect evidence", () => {
       BROKER_SIGNING_KEY: signingKey,
     };
 
+    // 0. Deliver a ping to octodev/connect-ping
+    const pingDelivery = await deliver("octodev/connect-ping", "ping", "octo-ping-1", pingBody("octodev/connect-ping"));
+    expect(pingDelivery.status).toBe(202);
+
     // 1. Valid session for octodev accessing octodev's repo succeeds even when BROKER_CONTROL_KEY is undefined
     const res = await handler.fetch(
       new Request("https://factory.example/trace/octodev/connect-ping/connect", {
@@ -193,6 +197,8 @@ describe("connect evidence", () => {
       testEnv as never,
     );
     expect(res.status).toBe(200);
+    const resData = (await res.json()) as any;
+    expect(resData.connect.pings).toBe(1);
 
     // 2. Session for otheruser attempting to read octodev's connection status returns 403
     const forbidden = await handler.fetch(
@@ -205,7 +211,7 @@ describe("connect evidence", () => {
     const forbiddenJson = (await forbidden.json()) as any;
     expect(forbiddenJson.error).toContain("another account");
 
-    // 3. Case-insensitive owner comparison (cloud-factory-cf-z1ch): "Octodev" matches session "octodev"
+    // 3. Case-insensitive owner comparison (cloud-factory-cf-z1ch, cloud-factory-cf-n23o): "Octodev" matches session "octodev" and finds the ping
     const caseRes = await handler.fetch(
       new Request("https://factory.example/trace/Octodev/connect-ping/connect", {
         headers: { cookie: `cf_session=${token}` },
@@ -213,6 +219,8 @@ describe("connect evidence", () => {
       testEnv as never,
     );
     expect(caseRes.status).toBe(200);
+    const caseData = (await caseRes.json()) as any;
+    expect(caseData.connect.pings).toBe(1);
   });
 
   it("rejects cookies signed with WEBHOOK_SECRET on /trace/:owner/:repo/connect (cloud-factory-cf-7suc)", async () => {
@@ -235,5 +243,93 @@ describe("connect evidence", () => {
       unsetEnv as never,
     );
     expect(res.status).toBe(503);
+  });
+
+  it("resolves connection evidence case-insensitively across mixed-case deliveries and reads (cloud-factory-cf-n23o)", async () => {
+    // 1. Deliver ping under mixed case
+    const mixedDelivery = await deliver("octodev/Probe-Owner-Case", "ping", "probe-ping-1", pingBody("octodev/Probe-Owner-Case"));
+    expect(mixedDelivery.status).toBe(202);
+
+    // 2. Read with differing owner casing
+    const read1 = await connect("/trace/Octodev/probe-owner-case/connect", { "x-factory-control-key": controlKey });
+    expect(read1.status).toBe(200);
+    const body1 = (await read1.json()) as ConnectBody;
+    expect(body1.connect.pings).toBe(1);
+
+    // 3. Deliver ping with mixed-case repo segment
+    await deliver("octodev/Probe-Control-Case", "ping", "probe-ping-2", pingBody("octodev/Probe-Control-Case"));
+
+    // 4. Read with differing owner and repo casing
+    const read2 = await connect("/trace/Octodev/Probe-Control-Case/connect", { "x-factory-control-key": controlKey });
+    expect(read2.status).toBe(200);
+    const body2 = (await read2.json()) as ConnectBody;
+    expect(body2.connect.pings).toBe(1);
+  });
+
+  it("migrates mixed-case GitLab RepoCoordinator state through ensureMigrated (cloud-factory-cf-xorj)", async () => {
+    const mixedStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("gitlab:Acme/Repo"));
+    await runInDurableObject(mixedStub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES ('default', '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', 'ping', 3, '2026-10-20T00:00:00Z')",
+      );
+    });
+
+    const res = await SELF.fetch("https://factory.example/trace/Acme/Repo/connect?platform=gitlab", {
+      headers: { "x-factory-control-key": controlKey },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ConnectBody;
+    expect(body.ok).toBe(true);
+    expect(body.connect.pings).toBe(3);
+  });
+
+  it("does not permanently seal on lowercase initial read, preserving later legacy mixed-case recovery (cloud-factory-cf-71la)", async () => {
+    // 1. GitHub: Seed legacy DO directly under mixed-case name
+    const legacyStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("github:Octodev/Probe-Foreclose"));
+    await runInDurableObject(legacyStub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES ('default', '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', 'ping', 2, '2026-10-20T00:00:00Z')",
+      );
+    });
+
+    // 2. Read lowercase first (derived from an unspecific request spelling)
+    const readLower = await SELF.fetch("https://factory.example/trace/octodev/probe-foreclose/connect", {
+      headers: { "x-factory-control-key": controlKey },
+    });
+    expect(readLower.status).toBe(200);
+    const lowerBody = (await readLower.json()) as ConnectBody;
+    expect(lowerBody.connect.pings).toBe(0);
+
+    // 3. Later read with the legacy mixed-case spelling successfully reads through and recovers history
+    const readMixed = await SELF.fetch("https://factory.example/trace/Octodev/Probe-Foreclose/connect", {
+      headers: { "x-factory-control-key": controlKey },
+    });
+    expect(readMixed.status).toBe(200);
+    const mixedBody = (await readMixed.json()) as ConnectBody;
+    expect(mixedBody.connect.pings).toBe(2);
+
+    // 4. GitLab: Seed gitlab legacy DO under mixed-case name
+    const gitlabStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("gitlab:Acme/Probe-Group"));
+    await runInDurableObject(gitlabStub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES ('default', '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', 'ping', 5, '2026-10-20T00:00:00Z')",
+      );
+    });
+
+    // 5. Read lowercase first
+    const glLower = await SELF.fetch("https://factory.example/trace/acme/probe-group/connect?platform=gitlab", {
+      headers: { "x-factory-control-key": controlKey },
+    });
+    expect(glLower.status).toBe(200);
+    const glLowerBody = (await glLower.json()) as ConnectBody;
+    expect(glLowerBody.connect.pings).toBe(0);
+
+    // 6. Later read with mixed-case spelling recovers the 5 pings
+    const glMixed = await SELF.fetch("https://factory.example/trace/Acme/Probe-Group/connect?platform=gitlab", {
+      headers: { "x-factory-control-key": controlKey },
+    });
+    expect(glMixed.status).toBe(200);
+    const glMixedBody = (await glMixed.json()) as ConnectBody;
+    expect(glMixedBody.connect.pings).toBe(5);
   });
 });

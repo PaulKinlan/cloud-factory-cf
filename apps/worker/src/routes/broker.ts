@@ -1,4 +1,5 @@
 import type { Env } from "../env";
+import { getCredentialBroker } from "../repo-coordinator-addressing";
 
 export const BROKER_PATH =
   /^\/broker\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>capabilities|permissions|provisioning|overrides|proxy|audit|settings)$/;
@@ -28,12 +29,14 @@ export async function routeBroker(
     return new Response("method not allowed", { status: 405 });
   }
 
-  const stub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(`${owner}/${repo}`));
+  const stub = getCredentialBroker(env, `${owner}/${repo}`);
+  const headers = brokerHeaders(request.headers);
+  headers.set("x-factory-original-repository", `${owner}/${repo}`);
   const forwarded = new Request(
     `https://credential-broker.internal/${operation}${search}`,
     {
       method: request.method,
-      headers: brokerHeaders(request.headers),
+      headers,
       body: request.method === "POST" || request.method === "DELETE" ? await request.text() : undefined,
     },
   );

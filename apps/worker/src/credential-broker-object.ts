@@ -171,7 +171,23 @@ export class CredentialBroker extends DurableObject<Env> {
       }
       return Response.json({ ok: false, error: "missing id" }, { status: 400 });
     }
+    if (url.pathname === "/export-settings") {
+      const provisioningKey = this.env.BROKER_CONTROL_KEY;
+      const authorised =
+        provisioningKey !== undefined &&
+        (await sameSecret(provisioningKey, request.headers.get("x-factory-control-key")));
+      if (!authorised) {
+        return Response.json({ ok: false, error: "not authorised to export settings" }, { status: 401 });
+      }
+      const rows = this.sql
+        .exec<{ key: string; value: string; updated_at: string }>(
+          `SELECT key, value, updated_at FROM repo_settings`
+        )
+        .toArray();
+      return Response.json({ ok: true, rows });
+    }
     if (url.pathname === "/effective-webhook-secret") {
+      await this.ensureSettingsMigrated(request);
       const effective = (await this.resolveEffectiveSetting("webhook.secret")) ?? this.env.WEBHOOK_SECRET ?? null;
       if (!effective) {
         return Response.json({ ok: false, error: "no webhook secret configured" }, { status: 503 });
@@ -193,6 +209,31 @@ export class CredentialBroker extends DurableObject<Env> {
         clientSecret,
         privateKey,
         webhookSecret,
+      });
+    }
+    if (url.pathname === "/effective-github-credentials") {
+      await this.ensureSettingsMigrated(request);
+      const provisioningKey = this.env.BROKER_CONTROL_KEY;
+      const authorised =
+        provisioningKey !== undefined &&
+        (await sameSecret(provisioningKey, request.headers.get("x-factory-control-key")));
+      if (!authorised) {
+        return Response.json({ ok: false, error: "not authorised to read credentials" }, { status: 401 });
+      }
+      const storedClientId = this.getSetting("github.client_id");
+      const storedClientSecret = this.getSetting("github.client_secret");
+      const storedAppId = this.getSetting("github.app_id");
+
+      const clientId = storedClientId && storedClientId.trim().length > 0 ? storedClientId.trim() : null;
+      const clientSecret = storedClientSecret && storedClientSecret.trim().length > 0 ? storedClientSecret.trim() : null;
+      const appId = storedAppId && storedAppId.trim().length > 0 ? storedAppId.trim() : null;
+
+      return Response.json({
+        ok: true,
+        repository: this.repository,
+        clientId,
+        clientSecret,
+        appId,
       });
     }
     if (request.method === "POST" && url.pathname === "/proxy") {
@@ -931,6 +972,7 @@ export class CredentialBroker extends DurableObject<Env> {
   // ------------------------------------------------------------- admin settings
 
   private async handleSettings(request: Request): Promise<Response> {
+    await this.ensureSettingsMigrated(request);
     const provisioningKey = this.env.BROKER_CONTROL_KEY;
     const signingKeyConfigured = this.env.BROKER_SIGNING_KEY !== undefined;
     if (!provisioningKey && !signingKeyConfigured) {
@@ -1199,6 +1241,39 @@ export class CredentialBroker extends DurableObject<Env> {
       default:
         return null;
     }
+  }
+
+  private async ensureSettingsMigrated(request: Request): Promise<void> {
+    if (this.repository === DEFAULT_CLIENT || this.repository === "global") return;
+    const count = this.sql.exec<{ c: number }>("SELECT COUNT(*) AS c FROM repo_settings").one().c;
+    if (count > 0) return;
+    const origRepo = request.headers.get("x-factory-original-repository");
+    if (!origRepo) return;
+    const origTrimmed = origRepo.trim();
+    if (origTrimmed.toLowerCase() !== this.repository.toLowerCase() || origTrimmed === this.repository) {
+      return;
+    }
+    const provisioningKey = this.env.BROKER_CONTROL_KEY;
+    try {
+      const legacyStub = this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(origTrimmed));
+      const headers = new Headers();
+      if (provisioningKey) headers.set("x-factory-control-key", provisioningKey);
+      const legacyRes = await legacyStub.fetch("https://credential-broker.internal/export-settings", { headers });
+      if (legacyRes.ok) {
+        const legacyData = (await legacyRes.json().catch(() => null)) as {
+          ok?: boolean;
+          rows?: Array<{ key: string; value: string; updated_at: string }>;
+        } | null;
+        if (legacyData?.rows && legacyData.rows.length > 0) {
+          for (const r of legacyData.rows) {
+            this.sql.exec(
+              "INSERT OR REPLACE INTO repo_settings (key, value, updated_at) VALUES (?, ?, ?)",
+              r.key, r.value, r.updated_at,
+            );
+          }
+        }
+      }
+    } catch {}
   }
 
   private getSetting(key: string): string | null {
