@@ -313,14 +313,55 @@ if [ ! -f .fleet/coverage-contract.json ]; then
   echo "changed-tests: FAIL missing .fleet/coverage-contract.json" >&2
   exit 1
 fi
-mapfile -t pinned_pairs < <(node -e '
+# The selection's status is CHECKED. `mapfile -t pairs < <(node …)` discards the node
+# status, so an unparseable contract produced no pins at all and the gate went green with
+# its mapping silently disabled (cloud-factory-cf-fwji) — the same false green the missing
+# file above already refuses. A key that is not a path in the tree fails for the same
+# reason: a typo, a rename or a "./" prefix would otherwise disable that pin forever, and
+# nothing else validates this file.
+if ! pinned_selection=$(node -e '
   const fs = require("fs");
-  const contract = JSON.parse(fs.readFileSync(".fleet/coverage-contract.json", "utf8"));
+  const path = require("path");
+  const fail = (message) => {
+    console.error("changed-tests: " + message);
+    process.exit(1);
+  };
+  let contract;
+  try {
+    contract = JSON.parse(fs.readFileSync(".fleet/coverage-contract.json", "utf8"));
+  } catch (err) {
+    fail(".fleet/coverage-contract.json is not valid JSON (" + err.message + ")");
+  }
+  if (contract === null || typeof contract !== "object" || Array.isArray(contract)) {
+    fail(".fleet/coverage-contract.json must be an object of source path -> [suite path]");
+  }
   const changed = new Set(process.argv[1].split("\n"));
   for (const [source, tests] of Object.entries(contract)) {
+    // A key has to be the path git reports, byte for byte: "./apps/..." or "apps/../apps/..."
+    // would never match a changed path, so it has to be named here rather than left to
+    // disable its pin quietly.
+    if (source.startsWith("/") || source !== path.posix.normalize(source)) {
+      fail("contracted source " + source + " is not a path in this tree (" + path.posix.normalize(source) + ")");
+    }
+    if (!fs.existsSync(source)) fail("contracted source " + source + " is not a path in this tree");
+    if (!Array.isArray(tests) || tests.length === 0) {
+      fail("contracted source " + source + " must name at least one suite path");
+    }
+    for (const test of tests) {
+      if (typeof test !== "string" || test === "") {
+        fail("contracted source " + source + " has a suite entry that is not a path");
+      }
+    }
     if (changed.has(source)) for (const test of tests) console.log(source + "\t" + test);
   }
-' "$changed" | sort -u)
+' "$changed" | sort -u); then
+  echo "changed-tests: FAIL .fleet/coverage-contract.json cannot be used (see above), so no pin can be trusted" >&2
+  exit 1
+fi
+pinned_pairs=()
+if [ -n "$pinned_selection" ]; then
+  mapfile -t pinned_pairs <<< "$pinned_selection"
+fi
 pinned_sources=""
 pinned_tests=()
 for pair in "${pinned_pairs[@]}"; do
@@ -486,7 +527,17 @@ for test in "${pinned_tests[@]}"; do
   echo "changed-tests: pinned suite $test (edge-routed source)"
   if [ "$LIST" -eq 1 ]; then continue; fi
   ran=$((ran + 1))
-  run_ws_tests "$(ws_of "$test")" npx vitest run "${test#apps/worker/}" || status=1
+  # Resolve the suite relative to ITS OWN workspace (cloud-factory-cf-wj0b): stripping a
+  # hardcoded apps/worker/ prefix only ever worked for Worker suites, so a pin in any
+  # other workspace handed its runner a path that does not exist there.
+  pinned_ws=$(ws_of "$test")
+  if [ "${WS_KIND[$pinned_ws]:-}" = "vitest" ]; then
+    run_ws_tests "$pinned_ws" npx vitest run "${test#"$pinned_ws"/}" || status=1
+  else
+    # A node:test workspace cannot run a single file through vitest; its whole suite is
+    # seconds, which is the same rule the selection above applies to those workspaces.
+    run_ws_tests "$pinned_ws" npm test --silent || status=1
+  fi
 done
 
 if [ "$selftest_wanted" -eq 1 ]; then

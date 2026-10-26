@@ -44,6 +44,14 @@ case "${1:-}" in
   list) [ -n "${FAKE_SELECT:-}" ] && printf '%s\n' $FAKE_SELECT; exit 0 ;;
   run) echo "FAKE vitest run in $(basename "$PWD")"
        [ -n "${FAKE_BUILD_LOG:-}" ] && echo "run $(basename "$PWD")" >> "$FAKE_BUILD_LOG"
+       # A real runner fails on a path that does not exist in its own cwd; without this the
+       # fake would vouch for a wrongly resolved suite path (cloud-factory-cf-wj0b).
+       shift
+       for arg in "$@"; do
+         case "$arg" in
+           *test*/*) [ -e "$arg" ] || { echo "FAKE vitest: no such test file $arg" >&2; exit 1; } ;;
+         esac
+       done
        exit "${FAKE_VITEST_RC:-0}" ;;
   *) exit 0 ;;
 esac
@@ -107,6 +115,12 @@ SH
   "apps/worker/src/routes/git-tree.ts": ["apps/worker/test/git-tree.test.ts"]
 }
 JSON
+    # Every contracted key is a real path in the tree: the gate refuses a contract whose
+    # keys no longer match reality (cloud-factory-cf-fwji).
+    for src in apps/worker/src/auth/tenant.ts apps/worker/src/routes/auth.ts apps/worker/src/routes/git-tree.ts; do
+      mkdir -p "${src%/*}"
+      printf 'export const routed = 1;\n' > "$src"
+    done
     # The buildable packages apps/worker imports through their dist entry points; they
     # have a build script and no tests of their own (kind: none).
     for pkg in canvas-model sdk; do
@@ -281,8 +295,7 @@ reset_tree
 # 6b. Edge-routed modules are not imported directly by tests; a changed test can
 #     otherwise hide their unmapped state behind the workspace's selected suites.
 for route in auth/tenant routes/auth routes/git-tree; do
-  mkdir -p "$FIX/apps/worker/src/${route%/*}"
-  printf 'export const routed = 1;\n' > "$FIX/apps/worker/src/$route.ts"
+  printf '\n// touch\n' >> "$FIX/apps/worker/src/$route.ts"
   export FAKE_SELECT="apps/worker/test/assets.test.ts"
   run_gate
   check "edge-routed $route selects its pinned integration suite" 'test "$RC" -eq 0 && out_has "pinned suite apps/worker/test/"'
@@ -292,10 +305,44 @@ for route in auth/tenant routes/auth routes/git-tree; do
   reset_tree
 done
 mkdir -p "$FIX/apps/worker/src/routes"
-printf 'export const routed = 1;\n' > "$FIX/apps/worker/src/routes/auth.ts"
+printf '\n// touch\n' >> "$FIX/apps/worker/src/routes/auth.ts"
 rm "$FIX/apps/worker/test/auth.test.ts"
 run_gate
 check "a removed contracted suite FAILs rather than silently passing" 'test "$RC" -ne 0 && err_has "contracted suite apps/worker/test/auth.test.ts is missing"'
+reset_tree
+
+# 6c. The contract's own integrity: a selection whose status was discarded used to leave
+#     every pin disabled and the gate green (cloud-factory-cf-fwji).
+contract="$FIX/.fleet/coverage-contract.json"
+printf '\n// touch\n' >> "$FIX/apps/worker/src/routes/auth.ts"
+printf '{ "apps/worker/src/routes/auth.ts": ["apps/worker/test/auth.test.ts",] }\n' > "$contract"
+run_gate
+check "unparseable coverage contract FAILs instead of disabling every pin" 'test "$RC" -ne 0 && err_has ".fleet/coverage-contract.json is not valid JSON" && err_has "cannot be used"'
+run_gate --list
+check "--list also FAILs on an unparseable coverage contract" 'test "$RC" -ne 0 && err_has ".fleet/coverage-contract.json is not valid JSON"'
+printf '{ "apps/worker/src/routes/auth.ts": "apps/worker/test/auth.test.ts" }\n' > "$contract"
+run_gate
+check "a contract entry that is not a list of suites FAILs" 'test "$RC" -ne 0 && err_has "must name at least one suite path"'
+printf '{ "apps/worker/src/routes/auth.ts": [] }\n' > "$contract"
+run_gate
+check "an empty suite list FAILs rather than pinning nothing" 'test "$RC" -ne 0 && err_has "must name at least one suite path"'
+printf '{ "./apps/worker/src/routes/auth.ts": ["apps/worker/test/auth.test.ts"] }\n' > "$contract"
+run_gate
+check "a contract key that is not a path in the tree FAILs" 'test "$RC" -ne 0 && err_has "is not a path in this tree" && err_has "./apps/worker/src/routes/auth.ts"'
+reset_tree
+
+# 6d. A pin in a workspace other than apps/worker resolves relative to ITS workspace
+#     (cloud-factory-cf-wj0b).
+cat > "$contract" <<'JSON'
+{
+  "apps/web/src/m.ts": ["apps/web/test/a.test.ts"]
+}
+JSON
+printf '\n// touch\n' >> "$FIX/apps/web/src/m.ts"
+run_gate
+check "a pin outside apps/worker runs in its own workspace" 'test "$RC" -eq 0 && out_has "pinned suite apps/web/test/a.test.ts" && out_has "FAKE vitest run in web"'
+run_gate --list
+check "--list reports the workspace-relative pin" 'test "$RC" -eq 0 && out_has "pinned suite apps/web/test/a.test.ts"'
 reset_tree
 
 # 7. DECLARED_UNVERIFIED source still runs the workspace suite for evidence.
