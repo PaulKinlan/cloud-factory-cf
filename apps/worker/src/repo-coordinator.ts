@@ -17,6 +17,8 @@ import {
   RunAuditStore,
   RunTraceStore,
   migrateConnectTable,
+  mergeLegacyConnectRow,
+  type LegacyConnectRow,
   migrateEventQueueTable,
   migrateDeliveryLedgerTable,
   migrateRunAuditTable,
@@ -207,11 +209,6 @@ export class RepoCoordinator extends DurableObject<Env> {
     if (!parsed) return;
     const platform = parsed.platform;
 
-    const migrationRow = this.sql.exec<{ name: string }>(
-      "SELECT name FROM _schema_migrations WHERE name = 'legacy_read_through'",
-    ).toArray();
-    if (migrationRow.length > 0) return;
-
     const controlKey = this.env.BROKER_CONTROL_KEY;
     const legacyName = parsed.repository;
     if (!controlKey) {
@@ -244,6 +241,9 @@ export class RepoCoordinator extends DurableObject<Env> {
     });
     if (unprobedCandidates.length === 0) return;
 
+    let anyImported = false;
+    let allLossless = true;
+
     try {
       for (const cand of unprobedCandidates) {
         const legacyStub = this.env.REPO_COORDINATOR.get(this.env.REPO_COORDINATOR.idFromName(cand));
@@ -252,7 +252,7 @@ export class RepoCoordinator extends DurableObject<Env> {
         });
         if (!res.ok) {
           console.error(`Legacy export failed for ${cand} with status ${res.status}`);
-          return;
+          continue;
         }
         const body = (await res.json().catch(() => ({}))) as {
           ok?: boolean;
@@ -261,7 +261,7 @@ export class RepoCoordinator extends DurableObject<Env> {
         };
         if (!body.ok) {
           console.error(`Legacy export returned not ok for ${cand}`);
-          return;
+          continue;
         }
 
         if (body.empty) {
@@ -282,7 +282,10 @@ export class RepoCoordinator extends DurableObject<Env> {
         }
 
         const s = body.state;
-        if (!s) return;
+        if (!s) continue;
+
+        anyImported = true;
+        let candLossless = true;
 
         this.ctx.storage.transactionSync(() => {
           for (const m of (s["memory"] as any[]) ?? []) {
@@ -297,11 +300,13 @@ export class RepoCoordinator extends DurableObject<Env> {
               c.id, c.name, c.document, c.created_at, c.updated_at,
             );
           }
-          for (const w of (s["webhook_connect"] as any[]) ?? []) {
-            this.sql.exec(
-              "INSERT OR IGNORE INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-              w.id, w.last_ping_at, w.last_event_at, w.last_event, w.pings, w.updated_at,
-            );
+          for (const w of (s["webhook_connect"] as LegacyConnectRow[]) ?? []) {
+            // One row per DO with a monotonic `pings` counter: ignore-on-conflict would
+            // throw legacy evidence away, so merge it instead (cloud-factory-cf-tgu9).
+            if (!mergeLegacyConnectRow(this.sql, w)) {
+              candLossless = false;
+              allLossless = false;
+            }
           }
           for (const e of (s["events"] as any[]) ?? []) {
             this.sql.exec(
@@ -327,11 +332,20 @@ export class RepoCoordinator extends DurableObject<Env> {
               t.id, t.delivery_id, t.sequence, t.step, t.status, t.detail, t.artifact, t.created_at, t.ms,
             );
           }
-          this.sql.exec(
-            "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
-            Date.now(),
-          );
+          if (candLossless) {
+            this.sql.exec(
+              "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES (?, ?)",
+              `legacy_probed:${cand}`,
+              Date.now(),
+            );
+          }
         });
+
+        if (!candLossless) {
+          console.error(
+            `Legacy merge for candidate ${cand} dropped a webhook_connect value it could not represent; leaving candidate unsealed`,
+          );
+        }
 
         // Tell legacy DO to cancel its alarm and mark itself migrated
         try {
@@ -345,12 +359,22 @@ export class RepoCoordinator extends DurableObject<Env> {
         } catch (ackErr) {
           console.error(`Legacy ack-migrated network error for ${cand}:`, ackErr);
         }
-
-        if (this.eventQueue.hasDue()) {
-          await this.eventQueue.armAlarm();
-        }
-        return;
       }
+
+      if (anyImported && allLossless) {
+        this.sql.exec(
+          "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
+          Date.now(),
+        );
+      }
+    } catch (err) {
+      console.error(`Migration error for ${parsed.repository}:`, err);
+    }
+
+    if (this.eventQueue.hasDue()) {
+      await this.eventQueue.armAlarm();
+    }
+  }
     } catch (err) {
       console.error(`Migration error for ${parsed.repository}:`, err);
     }
