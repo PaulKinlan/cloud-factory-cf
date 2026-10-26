@@ -343,6 +343,11 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
   setStatus("Not checked yet", "muted");
 
   let loadedRepos: Array<{ fullName: string; owner: string; name: string }> = [];
+  // One request per owner in flight at a time. The post-OAuth bootstrap loads the list
+  // and then `open()` loads it again while that first fetch is still pending, so the
+  // select was rendered twice for one list and `/api/repos` was fetched twice
+  // (cloud-factory-cf-xxso).
+  let reposInFlight: { owner: string; promise: Promise<void> } | null = null;
 
   function renderRepoSelectOptions(): void {
     if (repoSelect === null) return;
@@ -464,6 +469,18 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
   });
 
   async function loadAuthorizedRepos(owner: string): Promise<void> {
+    if (!owner || repoSelect === null) return;
+    if (reposInFlight !== null && reposInFlight.owner === owner) return reposInFlight.promise;
+    const promise = fetchAuthorizedRepos(owner);
+    reposInFlight = { owner, promise };
+    try {
+      await promise;
+    } finally {
+      if (reposInFlight?.promise === promise) reposInFlight = null;
+    }
+  }
+
+  async function fetchAuthorizedRepos(owner: string): Promise<void> {
     if (!owner || repoSelect === null) return;
     try {
       const headers: Record<string, string> = {};
