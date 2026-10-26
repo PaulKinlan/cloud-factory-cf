@@ -33,7 +33,9 @@ export {
 export {
   ConnectStore,
   migrateConnectTable,
+  mergeLegacyConnectRow,
   type ConnectStatus,
+  type LegacyConnectRow,
 } from "./connect";
 
 export {
