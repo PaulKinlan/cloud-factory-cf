@@ -368,4 +368,84 @@ describe("connect evidence", () => {
     const glMixedBody = (await glMixed.json()) as ConnectBody;
     expect(glMixedBody.connect.pings).toBe(5);
   });
+
+  it("merges legacy history from multiple differing case spellings without orphaning or premature sealing (cloud-factory-cf-ik4w)", async () => {
+    // 1. GitHub: Seed two different legacy spellings
+    const stub1 = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("github:Octodev/Probe-Multi"));
+    await runInDurableObject(stub1, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES ('default', '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', 'ping', 2, '2026-10-20T00:00:00Z')",
+      );
+    });
+
+    const stub2 = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("github:OCTODEV/Probe-Multi"));
+    await runInDurableObject(stub2, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES ('default', '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', 'ping', 3, '2026-10-20T00:00:00Z')",
+      );
+    });
+
+    // Read spelling 1
+    const read1 = await SELF.fetch("https://factory.example/trace/Octodev/Probe-Multi/connect", {
+      headers: { "x-factory-control-key": controlKey },
+    });
+    expect(read1.status).toBe(200);
+    const body1 = (await read1.json()) as ConnectBody;
+    expect(body1.connect.pings).toBe(2);
+
+    // Read spelling 2: must merge with spelling 1 to yield 5, not leave spelling 2 orphaned
+    const read2 = await SELF.fetch("https://factory.example/trace/OCTODEV/Probe-Multi/connect", {
+      headers: { "x-factory-control-key": controlKey },
+    });
+    expect(read2.status).toBe(200);
+    const body2 = (await read2.json()) as ConnectBody;
+    expect(body2.connect.pings).toBe(5);
+
+    // Verify spelling 2 DO was ack-migrated
+    await runInDurableObject(stub2, async (_instance, state) => {
+      const rows = state.storage.sql.exec<{ name: string }>(
+        "SELECT name FROM _schema_migrations WHERE name = 'migrated_to_prefixed'",
+      ).toArray();
+      expect(rows).toHaveLength(1);
+    });
+
+    // 2. GitLab: Seed two different legacy spellings
+    const glStub1 = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("gitlab:Acme/Probe-Multi-GL"));
+    await runInDurableObject(glStub1, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES ('default', '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', 'ping', 4, '2026-10-20T00:00:00Z')",
+      );
+    });
+
+    const glStub2 = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("gitlab:ACME/Probe-Multi-GL"));
+    await runInDurableObject(glStub2, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES ('default', '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', 'ping', 7, '2026-10-20T00:00:00Z')",
+      );
+    });
+
+    // Read GitLab spelling 1
+    const glRead1 = await SELF.fetch("https://factory.example/trace/Acme/Probe-Multi-GL/connect?platform=gitlab", {
+      headers: { "x-factory-control-key": controlKey },
+    });
+    expect(glRead1.status).toBe(200);
+    const glBody1 = (await glRead1.json()) as ConnectBody;
+    expect(glBody1.connect.pings).toBe(4);
+
+    // Read GitLab spelling 2: must merge to yield 11
+    const glRead2 = await SELF.fetch("https://factory.example/trace/ACME/Probe-Multi-GL/connect?platform=gitlab", {
+      headers: { "x-factory-control-key": controlKey },
+    });
+    expect(glRead2.status).toBe(200);
+    const glBody2 = (await glRead2.json()) as ConnectBody;
+    expect(glBody2.connect.pings).toBe(11);
+
+    // Verify spelling 2 DO was ack-migrated
+    await runInDurableObject(glStub2, async (_instance, state) => {
+      const rows = state.storage.sql.exec<{ name: string }>(
+        "SELECT name FROM _schema_migrations WHERE name = 'migrated_to_prefixed'",
+      ).toArray();
+      expect(rows).toHaveLength(1);
+    });
+  });
 });

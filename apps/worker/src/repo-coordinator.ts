@@ -375,14 +375,6 @@ export class RepoCoordinator extends DurableObject<Env> {
       await this.eventQueue.armAlarm();
     }
   }
-    } catch (err) {
-      console.error(`Migration error for ${parsed.repository}:`, err);
-    }
-
-    if (this.eventQueue.hasDue()) {
-      await this.eventQueue.armAlarm();
-    }
-  }
 
   /**
    * The coordinator's own request routing, callable in process. The alarm drains
