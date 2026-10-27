@@ -280,12 +280,23 @@ describe("GitHub OAuth & App Install Flow", () => {
     });
     expect(badKey.status).toBe(401);
 
-    // 3. Disallowed HTTP methods return 405
-    const postReq = await SELF.fetch("https://example.com/api/repos?owner=octodev", {
+    // 3. Unsupported HTTP methods return 405. POST is NOT one of them: it installs a
+    // repository through the OrgCoordinator (routes/auth.ts handleApiRepos), so the old
+    // assertion here was stale and has been red on main since that path was added.
+    const deleteReq = await SELF.fetch("https://example.com/api/repos?owner=octodev", {
+      method: "DELETE",
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(deleteReq.status).toBe(405);
+
+    // 3b. A supported POST with no body is a body-validation failure (400), which is what
+    // the stale assertion was actually observing.
+    const emptyPost = await SELF.fetch("https://example.com/api/repos?owner=octodev", {
       method: "POST",
       headers: { "x-factory-control-key": "test-control-key" },
     });
-    expect(postReq.status).toBe(405);
+    expect(emptyPost.status).toBe(400);
+    await expect(emptyPost.json()).resolves.toMatchObject({ ok: false, error: "invalid json" });
 
     // 4. Missing ?owner returns 400
     const missingOwner = await SELF.fetch("https://example.com/api/repos", {
