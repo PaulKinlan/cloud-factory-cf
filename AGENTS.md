@@ -71,7 +71,7 @@ Gate speed is a design constraint. Follow the tiers documented in [docs/speed.md
 | Tier | When to Run | Command | Budget |
 |---|---|---|---|
 | **Iterating** | While editing a single file/feature | `npm run test:file -w <workspace> -- <path>` | ≤ 3s |
-| **Implementer Fast Gate** | Once per committed tree before handoff | `fleet-check --fast` | ≤ 60s (focused deltas; ~65–250s under VM load for docs smoke set) |
+| **Implementer Fast Gate** | Once per committed tree before handoff | `fleet-check --fast` | ≤ 60s focused deltas; docs/config deltas run the smoke set: 22–110s quiet, 212–315s under VM load (max 313s, `65a40b0`); 433–526s and 900s-bound kills measured 2026-10-27 |
 | **Clean-Tree Full Gate** | Monorepo CI verification (all workspaces) | `npm run ci` | ~190–410s (docs/speed.md) |
 | **Landing Gate** | Merger only, once per merged union | `fleet-check` | ~190–410s (docs/speed.md) |
 

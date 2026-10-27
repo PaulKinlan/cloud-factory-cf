@@ -147,7 +147,16 @@ tree went green once `apps/web/dist` existed.
 
 ## Budgets
 
-- Fast tier target: **≤ 60s** for focused source deltas (~65–250s under VM load when running the smoke set on docs/config deltas). Escalate before it crosses that on an ordinary change.
+- Fast tier target: **≤ 60s** for focused source deltas. Docs/config deltas run the
+  smoke set instead, and its measured range is wider than the fast tier: **22–110s on a
+  quiet VM, 212–315s under VM load** (11 cached PASS runs; worst 313s on `65a40b0`). A
+  load-starved box goes past that: on 2026-10-27 (load average 10–26 on 2 vCPU) the
+  `apps/web` half of the smoke set alone took **433s**, a mixed docs+scripts delta took
+  **526s**, and **three** fast runs were killed at the 900s bound without finishing
+  (906s, 909s, 906s) — one of them a docs-only delta that spent the time rebuilding
+  `apps/web/dist` in a worktree that had no build artifacts. So budget the ceiling and
+  treat a killed run as UNTESTED, not a pass. Escalate before it crosses that on an
+  ordinary change.
 - Full gate target: **≤ 120s** (historical baseline; under serialized workerd suites on a loaded VM, the full gate ranges ~185–400s). A change that pushes past current ranges must say so with a measurement in its `LAND-SUMMARY`.
 - Adding a test that costs ~1s (like the `@cloudflare/computer` resolution
   guard) is fine when it protects a real contract; say so in the summary.
