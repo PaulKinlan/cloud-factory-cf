@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { assertUpstreamAccepted } from '../src/sinks/broker-result.ts';
 import {
   ActionSinkRegistry,
   BeadsTaskSink,
@@ -170,6 +171,15 @@ test('BeadsTaskSink asks for task.create / task.update and fails a rejected writ
 
   assert.equal(rejected.success, false);
   assert.match(rejected.error ?? '', /beads task\.create answered 404/);
+});
+
+test('assertUpstreamAccepted: a status at or above 400, or no status, is a failure', () => {
+  assert.deepEqual(assertUpstreamAccepted({ status: 204, body: null }, 'pr.review'), { status: 204 });
+  assert.throws(
+    () => assertUpstreamAccepted({ status: 404, body: { error: 'unsupported action' } }, 'pr.review'),
+    /pr\.review answered 404/,
+  );
+  assert.throws(() => assertUpstreamAccepted(undefined, 'issue.create'), /issue\.create answered no status/);
 });
 
 test('a rejected default sink does not report success through the sink registry', async () => {
