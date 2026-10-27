@@ -4,5 +4,5 @@
     "types": ["vite/client"],
     "lib": ["ES2022", "DOM", "DOM.Iterable"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "vite.config.ts"]
+  "include": ["src/**/*.ts"]
 }
