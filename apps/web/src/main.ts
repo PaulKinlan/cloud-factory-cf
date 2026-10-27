@@ -41,6 +41,25 @@ import {
   type NodeKind,
 } from "./model";
 
+/**
+ * The template builders below were written against the pre-`canvas-model` signature
+ * `createNode(doc, kind, position, config, label)`. The model now takes
+ * `(doc, kind, position, { label })` and seeds `config` from `DEFAULT_CONFIG`, so the
+ * template's config has to be applied explicitly; without this, main.ts does not
+ * typecheck and the landing gate cannot pass (cloud-factory-cf-6xju).
+ */
+function addTemplateNode(
+  doc: CanvasDoc,
+  kind: NodeKind,
+  position: { x: number; y: number },
+  config: Record<string, string>,
+  label: string,
+): CanvasNode {
+  const node = createNode(doc, kind, position, { label });
+  for (const [key, value] of Object.entries(config)) setNodeConfig(doc, node.id, key, value);
+  return node;
+}
+
 const STORAGE_KEY = "cloud-factory-canvas:v1";
 
 const viewport = required<HTMLDivElement>("viewport");
@@ -1026,11 +1045,11 @@ for (const card of document.querySelectorAll<HTMLButtonElement>("[data-template]
       doc = createSampleDoc();
     } else if (tmpl === "issue-triage") {
       doc = createDoc();
-      const s = createNode(doc, "source", { x: 80, y: 160 }, { provider: "github", event: "issues.opened" }, "GitHub Issue Opened");
-      const a = createNode(doc, "agent", { x: 380, y: 160 }, { model: "gpt-6-astra", prompt: "Triage inbound issue, assess priority, label, and plan resolution." }, "Issue Triager");
-      const m = createNode(doc, "memory", { x: 380, y: 380 }, { scope: "org" }, "Org Context");
-      const k1 = createNode(doc, "sink", { x: 680, y: 120 }, { type: "github-issue-comment" }, "Issue Comment Sink");
-      const k2 = createNode(doc, "sink", { x: 680, y: 240 }, { type: "beads-task" }, "Beads Task Sink");
+      const s = addTemplateNode(doc, "source", { x: 80, y: 160 }, { provider: "github", event: "issues.opened" }, "GitHub Issue Opened");
+      const a = addTemplateNode(doc, "agent", { x: 380, y: 160 }, { model: "gpt-6-astra", prompt: "Triage inbound issue, assess priority, label, and plan resolution." }, "Issue Triager");
+      const m = addTemplateNode(doc, "memory", { x: 380, y: 380 }, { scope: "org" }, "Org Context");
+      const k1 = addTemplateNode(doc, "sink", { x: 680, y: 120 }, { type: "github-issue-comment" }, "Issue Comment Sink");
+      const k2 = addTemplateNode(doc, "sink", { x: 680, y: 240 }, { type: "beads-task" }, "Beads Task Sink");
       connect(doc, s.id, a.id);
       connect(doc, a.id, m.id);
       connect(doc, m.id, a.id);
@@ -1038,23 +1057,23 @@ for (const card of document.querySelectorAll<HTMLButtonElement>("[data-template]
       connect(doc, a.id, k2.id);
     } else if (tmpl === "security-audit") {
       doc = createDoc();
-      const s = createNode(doc, "source", { x: 80, y: 160 }, { provider: "github", event: "push" }, "GitHub Push");
-      const a = createNode(doc, "agent", { x: 380, y: 160 }, { model: "deepseek-reasoner", prompt: "Analyze push diff for credential leaks and unmasked socket vulnerabilities." }, "Security Auditor");
-      const m = createNode(doc, "memory", { x: 380, y: 380 }, { scope: "repo" }, "Audit Findings");
-      const k = createNode(doc, "sink", { x: 680, y: 160 }, { type: "telemetry" }, "Telemetry Sink");
+      const s = addTemplateNode(doc, "source", { x: 80, y: 160 }, { provider: "github", event: "push" }, "GitHub Push");
+      const a = addTemplateNode(doc, "agent", { x: 380, y: 160 }, { model: "deepseek-reasoner", prompt: "Analyze push diff for credential leaks and unmasked socket vulnerabilities." }, "Security Auditor");
+      const m = addTemplateNode(doc, "memory", { x: 380, y: 380 }, { scope: "repo" }, "Audit Findings");
+      const k = addTemplateNode(doc, "sink", { x: 680, y: 160 }, { type: "telemetry" }, "Telemetry Sink");
       connect(doc, s.id, a.id);
       connect(doc, a.id, m.id);
       connect(doc, a.id, k.id);
     } else if (tmpl === "full-sdlc") {
       doc = createDoc();
-      const s1 = createNode(doc, "source", { x: 60, y: 100 }, { provider: "github", event: "pull_request.opened" }, "PR Opened");
-      const s2 = createNode(doc, "source", { x: 60, y: 260 }, { provider: "github", event: "issues.opened" }, "Issue Opened");
-      const a1 = createNode(doc, "agent", { x: 360, y: 100 }, { model: "claude-sonnet-5-5", prompt: "Review pull requests, verify tests and standards." }, "PR Reviewer");
-      const a2 = createNode(doc, "agent", { x: 360, y: 260 }, { model: "gpt-6-astra", prompt: "Analyze and break down issues into implementation beads." }, "Task Planner");
-      const m = createNode(doc, "memory", { x: 360, y: 440 }, { scope: "repo" }, "SDLC Memory");
-      const k1 = createNode(doc, "sink", { x: 660, y: 80 }, { type: "github-pr-review" }, "PR Review Sink");
-      const k2 = createNode(doc, "sink", { x: 660, y: 200 }, { type: "beads-task" }, "Beads Task Sink");
-      const k3 = createNode(doc, "sink", { x: 660, y: 320 }, { type: "telemetry" }, "Telemetry Sink");
+      const s1 = addTemplateNode(doc, "source", { x: 60, y: 100 }, { provider: "github", event: "pull_request.opened" }, "PR Opened");
+      const s2 = addTemplateNode(doc, "source", { x: 60, y: 260 }, { provider: "github", event: "issues.opened" }, "Issue Opened");
+      const a1 = addTemplateNode(doc, "agent", { x: 360, y: 100 }, { model: "claude-sonnet-5-5", prompt: "Review pull requests, verify tests and standards." }, "PR Reviewer");
+      const a2 = addTemplateNode(doc, "agent", { x: 360, y: 260 }, { model: "gpt-6-astra", prompt: "Analyze and break down issues into implementation beads." }, "Task Planner");
+      const m = addTemplateNode(doc, "memory", { x: 360, y: 440 }, { scope: "repo" }, "SDLC Memory");
+      const k1 = addTemplateNode(doc, "sink", { x: 660, y: 80 }, { type: "github-pr-review" }, "PR Review Sink");
+      const k2 = addTemplateNode(doc, "sink", { x: 660, y: 200 }, { type: "beads-task" }, "Beads Task Sink");
+      const k3 = addTemplateNode(doc, "sink", { x: 660, y: 320 }, { type: "telemetry" }, "Telemetry Sink");
       connect(doc, s1.id, a1.id);
       connect(doc, a1.id, m.id);
       connect(doc, a1.id, k1.id);
@@ -1113,7 +1132,7 @@ studioSimBtn?.addEventListener("click", () => {
 
 studioApplyBtn?.addEventListener("click", () => {
   const prompt = studioPrompt?.value.trim() ?? (compiledAgent?.prompt || "Autonomous assistant");
-  const a = createNode(doc, "agent", { x: 380, y: 200 }, { model: "claude-sonnet-5-5", prompt }, compiledAgent?.name ?? "Custom Agent");
+  const a = addTemplateNode(doc, "agent", { x: 380, y: 200 }, { model: "claude-sonnet-5-5", prompt }, compiledAgent?.name ?? "Custom Agent");
   selectedId = a.id;
   persist();
   render();
