@@ -53,7 +53,11 @@ fi
 # its mapping silently disabled (cloud-factory-cf-fwji) — the same false green the missing
 # file above already refuses. A key that is not a path in the tree fails for the same
 # reason: a typo, a rename or a "./" prefix would otherwise disable that pin forever, and
-# nothing else validates this file.
+# nothing else validates this file. A SUITE entry is held to the same standard (bead
+# cloud-factory-cf-jl8x): a pin whose suite was deleted, renamed or moved outside a
+# workspace used to be named only when its source next changed, so contract rot went
+# unnoticed for as long as that source sat still, and an entry outside apps/*/* (or with a
+# "./" prefix) reached the runner as `cd '' && npm test` instead of a named failure.
 if ! pinned_selection=$(node -e '
   const fs = require("fs");
   const path = require("path");
@@ -85,6 +89,25 @@ if ! pinned_selection=$(node -e '
     for (const test of tests) {
       if (typeof test !== "string" || test === "") {
         fail("contracted source " + source + " has a suite entry that is not a path");
+      }
+      // Same two-path rules the keys get, for the same reason: a value git/the runner
+      // would never resolve must be named here, not left to fail on a later delta.
+      if (test.startsWith("/") || test !== path.posix.normalize(test)) {
+        fail("contracted source " + source + " names suite " + test + " that is not a path in this tree (" + path.posix.normalize(test) + ")");
+      }
+      // A suite outside apps/<name>/… or packages/<name>/… has no owning workspace, so the
+      // pin runner had nothing to cd into. (ws_of() is empty for the same paths.)
+      const suiteWs = /^(?:apps|packages)\/[^/]+\//.test(test) ? test.slice(0, test.indexOf("/", test.indexOf("/") + 1)) : "";
+      if (suiteWs === "") {
+        fail("contracted source " + source + " names suite " + test + " outside a workspace (apps/<name>/… or packages/<name>/…)");
+      }
+      if (!fs.existsSync(path.join(suiteWs, "package.json"))) {
+        fail("contracted source " + source + " names suite " + test + " in " + suiteWs + ", which is not a workspace");
+      }
+      // Existence is checked HERE, at validation time, not only when the pin fires: a
+      // deleted or renamed suite is contract rot now, whatever the delta touches.
+      if (!fs.existsSync(test)) {
+        fail("contracted suite " + test + " is missing");
       }
     }
     if (changed.has(source)) for (const test of tests) console.log(source + "\t" + test);

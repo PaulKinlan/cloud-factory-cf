@@ -357,6 +357,29 @@ run_gate --list
 check "--list reports the workspace-relative pin" 'test "$RC" -eq 0 && out_has "pinned suite apps/web/test/a.test.ts"'
 reset_tree
 
+# 6e. A SUITE entry is held to the same standard as a key (cloud-factory-cf-jl8x).
+#     Contract rot used to be named only when the pinned source next changed, so a
+#     deleted suite could sit unnoticed indefinitely; and an entry with no owning
+#     workspace reached the runner as `cd '' && npm test` instead of a named failure.
+printf '\n// touch\n' >> "$FIX/docs/speed.md"
+rm "$FIX/apps/worker/test/git-tree.test.ts"
+run_gate
+check "a deleted contracted suite FAILs on an untouched source, at validation time" 'test "$RC" -ne 0 && err_has "contracted suite apps/worker/test/git-tree.test.ts is missing" && out_lacks "smoke set"'
+run_gate --list
+check "--list also FAILs on a deleted contracted suite" 'test "$RC" -ne 0 && err_has "contracted suite apps/worker/test/git-tree.test.ts is missing"'
+reset_tree
+printf '{ "apps/worker/src/routes/auth.ts": ["./apps/worker/test/auth.test.ts"] }\n' > "$contract"
+run_gate
+check "a suite entry that is not a normalized path FAILs by name" 'test "$RC" -ne 0 && err_has "names suite ./apps/worker/test/auth.test.ts that is not a path in this tree" && err_has "apps/worker/test/auth.test.ts)"'
+printf '{ "apps/worker/src/routes/auth.ts": ["scripts/gate.test.ts"] }\n' > "$contract"
+run_gate
+check "a suite entry outside every workspace FAILs by name, not with a cd error" 'test "$RC" -ne 0 && err_has "names suite scripts/gate.test.ts outside a workspace" && ! err_has "cd: "'
+printf '{ "apps/worker/src/routes/auth.ts": ["apps/ghost/test/gone.test.ts"] }\n' > "$contract"
+mkdir -p "$FIX/apps/ghost/test" && printf 'export {};\n' > "$FIX/apps/ghost/test/gone.test.ts"
+run_gate
+check "a suite entry in a directory that is not a workspace FAILs by name" 'test "$RC" -ne 0 && err_has "names suite apps/ghost/test/gone.test.ts in apps/ghost, which is not a workspace"'
+reset_tree
+
 # 7. DECLARED_UNVERIFIED source still runs the workspace suite for evidence.
 printf '\n// touch\n' >> "$FIX/apps/web/src/main.ts"
 run_gate

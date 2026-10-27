@@ -109,6 +109,10 @@ contract:
   does a contract that cannot be used — unparseable JSON, an entry that is not a
   list of suite paths, or a key that is not a path in the tree (a typo, a rename,
   a `./` prefix), because pins that silently stop matching are a false green.
+  Suite entries are checked with the keys, on every delta: a pin that no longer
+  resolves, sits outside a workspace, or names a suite that has been deleted or
+  renamed is named on stderr straight away rather than when its source next
+  changes, and never reaches the runner as an unresolvable path.
   Pinned suites run in their own workspace, whatever workspace that is. This
   small mapping is also read by the coverage reporter, preventing a PASS with
   PARTIAL coverage for those paths without running the whole Worker suite.
