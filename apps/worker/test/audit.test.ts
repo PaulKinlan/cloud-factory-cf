@@ -1,5 +1,5 @@
 import { env, SELF } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AUDIT_PATH } from "../src/routes/audit";
 import { githubRequest } from "./support/webhook";
 import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
@@ -40,6 +40,30 @@ async function callAudit(
  */
 function queuedTotal(stats: Record<string, number> | undefined): number {
   return Object.values(stats ?? {}).reduce((sum, n) => sum + (Number(n) || 0), 0);
+}
+
+/**
+ * The ingest route answers 202 before the delivery is readable, so a read that follows it
+ * immediately is asserting on state the DO only guarantees eventually - green on a quiet
+ * VM, and "expected undefined to be 1" inside a loaded gate run (cloud-factory-cf-8xzi).
+ * Wait for visibility instead of assuming it, bounded so a real regression still fails
+ * rather than hanging.
+ */
+async function waitForEventVisible(
+  callAudit: (path: string, headers: Record<string, string>) => Promise<Response>,
+  repository: string,
+  deliveryId: string,
+  headers: Record<string, string>,
+): Promise<void> {
+  await vi.waitFor(
+    async () => {
+      const res = await callAudit(`/audit/events/${repository}?deliveryId=${deliveryId}`, headers);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { count?: number };
+      expect(body.count).toBe(1);
+    },
+    { timeout: 8_000, interval: 100 },
+  );
 }
 
 describe("audit route patterns", () => {
@@ -243,6 +267,8 @@ describe("DO event audit log API", { timeout: 45_000 }, () => {
     const req = await githubRequest("stats", repository);
     const queued = await SELF.fetch(req);
     expect(queued.status).toBe(202);
+    // 202 means queued, not stored (cloud-factory-cf-8xzi).
+    await waitForEventVisible(callAudit, repository, "stats", authHeaders);
 
     // Detail route /audit/events/:owner/:repo/stats returns the event detail view
     const detailRes = await callAudit(`/audit/events/${repository}/stats`, authHeaders);
