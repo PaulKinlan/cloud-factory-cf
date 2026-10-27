@@ -195,12 +195,13 @@ export class CredentialBroker extends DurableObject<Env> {
       return Response.json({ ok: true, secret: effective });
     }
     if (url.pathname === "/effective-github-app") {
-      const appId = (await this.resolveEffectiveSetting("github.app_id")) || this.env.GITHUB_APP_ID || null;
-      const appSlug = (await this.resolveEffectiveSetting("github.app_slug")) || this.env.GITHUB_APP_SLUG || null;
-      const clientId = (await this.resolveEffectiveSetting("github.client_id")) || this.env.GITHUB_CLIENT_ID || null;
-      const clientSecret = (await this.resolveEffectiveSetting("github.client_secret")) || this.env.GITHUB_CLIENT_SECRET || null;
-      const privateKey = (await this.resolveEffectiveSetting("github.private_key")) || this.env.GITHUB_PRIVATE_KEY || null;
-      const webhookSecret = (await this.resolveEffectiveSetting("webhook.secret")) || this.env.WEBHOOK_SECRET || null;
+      const isRepo = this.repository.includes("/");
+      const appId = this.getSetting("github.app_id") || (isRepo ? await this.resolveEffectiveSetting("github.app_id") : null) || this.env.GITHUB_APP_ID || null;
+      const appSlug = this.getSetting("github.app_slug") || (isRepo ? await this.resolveEffectiveSetting("github.app_slug") : null) || this.env.GITHUB_APP_SLUG || null;
+      const clientId = this.getSetting("github.client_id") || (isRepo ? await this.resolveEffectiveSetting("github.client_id") : null) || this.env.GITHUB_CLIENT_ID || null;
+      const clientSecret = this.getSetting("github.client_secret") || (isRepo ? await this.resolveEffectiveSetting("github.client_secret") : null) || this.env.GITHUB_CLIENT_SECRET || null;
+      const privateKey = this.getSetting("github.private_key") || (isRepo ? await this.resolveEffectiveSetting("github.private_key") : null) || this.env.GITHUB_PRIVATE_KEY || null;
+      const webhookSecret = this.getSetting("webhook.secret") || (isRepo ? await this.resolveEffectiveSetting("webhook.secret") : null) || this.env.WEBHOOK_SECRET || null;
       return Response.json({
         ok: true,
         appId,

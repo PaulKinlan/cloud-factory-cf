@@ -282,7 +282,7 @@ describe("GitHub OAuth & App Install Flow", () => {
 
     // 3. Disallowed HTTP methods return 405
     const postReq = await SELF.fetch("https://example.com/api/repos?owner=octodev", {
-      method: "POST",
+      method: "DELETE",
       headers: { "x-factory-control-key": "test-control-key" },
     });
     expect(postReq.status).toBe(405);

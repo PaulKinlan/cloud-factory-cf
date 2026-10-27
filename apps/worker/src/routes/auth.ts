@@ -337,6 +337,7 @@ export async function resolveGithubCredentials(
         if (res.ok) {
           const data = (await res.json().catch(() => null)) as {
             appId?: string | null;
+            appSlug?: string | null;
             clientId?: string | null;
             clientSecret?: string | null;
             privateKey?: string | null;
@@ -344,6 +345,7 @@ export async function resolveGithubCredentials(
           if (!result.clientId && data?.clientId?.trim()) result.clientId = data.clientId.trim();
           if (!result.clientSecret && data?.clientSecret?.trim()) result.clientSecret = data.clientSecret.trim();
           if (!result.appId && data?.appId?.trim()) result.appId = data.appId.trim();
+          if (!result.appSlug && data?.appSlug?.trim()) result.appSlug = data.appSlug.trim();
           if (!result.privateKey && data?.privateKey?.trim()) result.privateKey = data.privateKey.trim();
         } else if (env.BROKER_CONTROL_KEY) {
           const settingsRes = await broker.fetch("https://credential-broker.internal/settings", {
@@ -351,7 +353,7 @@ export async function resolveGithubCredentials(
           });
           if (settingsRes.ok) {
             const data = (await settingsRes.json().catch(() => null)) as {
-              githubApp?: { clientId?: string; appId?: string };
+              githubApp?: { clientId?: string; appId?: string; appSlug?: string };
             } | null;
             if (!result.clientId && data?.githubApp?.clientId?.trim()) {
               result.clientId = data.githubApp.clientId.trim();
@@ -359,11 +361,34 @@ export async function resolveGithubCredentials(
             if (!result.appId && data?.githubApp?.appId?.trim()) {
               result.appId = data.githubApp.appId.trim();
             }
+            if (!result.appSlug && data?.githubApp?.appSlug?.trim()) {
+              result.appSlug = data.githubApp.appSlug.trim();
+            }
           }
         }
       } catch {
         // Continue checking candidates
       }
+    }
+  }
+
+  // 2. Check OrgCoordinator if owner is specified
+  if ((!result.clientId || !result.clientSecret) && owner && env.ORG_COORDINATOR) {
+    try {
+      const org = env.ORG_COORDINATOR.get(env.ORG_COORDINATOR.idFromName(owner));
+      const res = await org.fetch("https://org-coordinator.internal/memory/github.client_id");
+      if (res.ok) {
+        const data = (await res.json().catch(() => null)) as { value?: unknown } | null;
+        const val =
+          typeof data?.value === "string"
+            ? data.value.trim()
+            : typeof data === "string"
+              ? (data as string).trim()
+              : undefined;
+        if (!result.clientId && val) result.clientId = val;
+      }
+    } catch {
+      // Ignore OrgCoordinator errors
     }
   }
 
