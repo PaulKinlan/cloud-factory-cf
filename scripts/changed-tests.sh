@@ -268,13 +268,27 @@ if [ "$sources_n" -eq 0 ] && [ "$tests_n" -eq 0 ]; then
   # coverage UNKNOWN). Run a fixed smoke set so the verdict has evidence.
   echo "changed-tests: $(echo "$changed" | wc -l | tr -d ' ') changed path(s), none of them source or test:"
   echo "$changed" | sed 's/^/  /'
+  # A delta confined to the gate's own decision logic cannot change app behaviour, and the
+  # precise check for it is the self-test. The browser/workerd smoke set buys nothing there
+  # and cost a whole 900s bound on a loaded VM, which killed the gate with no verdict
+  # (cloud-factory-cf-xszd). Any other path in the delta keeps the smoke set: that is what
+  # catches a gate that fails open on a real workspace.
+  selftest_only=0
+  if [ "$selftest_wanted" -eq 1 ] && ! echo "$changed" | grep -qvxE 'scripts/changed-tests(\.selftest)?\.sh'; then
+    selftest_only=1
+  fi
   if [ "$LIST" -eq 1 ]; then
+    if [ "$selftest_only" -eq 1 ]; then
+      echo "changed-tests: ${SELFTEST}: gate self-test only (delta is confined to the gate's own logic)"
+      exit 0
+    fi
     [ "$selftest_wanted" -eq 1 ] && echo "changed-tests: ${SELFTEST}: gate self-test"
     echo "changed-tests: smoke = apps/web (whole node suite), apps/worker test/worker.test.ts test/assets.test.ts"
     exit 0
   fi
   smoke_status=0
   if [ "$selftest_wanted" -eq 1 ]; then run_selftest || smoke_status=1; fi
+  [ "$selftest_only" -eq 1 ] && exit "$smoke_status"
   run_smoke "nothing mapped to a suite" || smoke_status=1
   exit "$smoke_status"
 fi

@@ -300,6 +300,21 @@ run_gate
 check "docs-only delta runs the smoke set" 'test "$RC" -eq 0 && out_has "FAKE vitest run in web" && out_has "FAKE vitest run in worker"'
 reset_tree
 
+# 8b. A delta confined to the gate's own logic runs the self-test and NOT the app smoke
+#     set. The smoke set (whole web suite + worker workerd suite) buys nothing for a gate
+#     change and cost a full 900s bound on a loaded VM, killing the gate with no verdict
+#     (cloud-factory-cf-xszd).
+mkdir -p "$FIX/scripts"
+printf '#!/usr/bin/env bash\necho "STUB selftest"\nexit 0\n' > "$FIX/scripts/changed-tests.selftest.sh"
+: > "$FIX/scripts/changed-tests.sh"
+( cd "$FIX" && git add scripts && git commit -qm "gate scripts" )
+printf '\n# touch\n' >> "$FIX/scripts/changed-tests.sh"
+run_gate
+check "a delta confined to the gate's own logic runs the self-test, not the app smoke set" 'test "$RC" -eq 0 && out_has "gate self-test" && out_has "STUB selftest" && out_lacks "FAKE vitest run"'
+rm -f "$FIX/scripts/changed-tests.sh" "$FIX/scripts/changed-tests.selftest.sh"
+( cd "$FIX" && git add -A scripts && git commit -qm "drop gate stubs" )
+reset_tree
+
 # 9. A test file no workspace runs is named, and the smoke set still runs (never a red).
 mkdir -p "$FIX/apps/ghost/test" && printf 'export {};\n' > "$FIX/apps/ghost/test/ghost.test.ts"
 run_gate
