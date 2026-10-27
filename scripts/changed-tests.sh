@@ -452,9 +452,15 @@ for ws in "${WS_ORDER[@]}"; do
     continue
   fi
 
-  # Source-only delta for this workspace.
+  # Source-only delta for this workspace. The selection is captured as a LIST, not just
+  # a count: it is what gets run below, so the gate never pays a second `--changed`
+  # bootstrap to re-derive a selection it already has (cloud-factory-cf-56j5, the same
+  # mechanism the test-file path above uses).
+  selected_files=""
   if [ "$kind" = "vitest" ]; then
-    selected=$( (cd "$ws" && npx vitest list --changed "$BASE" --filesOnly 2>/dev/null) | grep -cE '\.(test|spec)\.[cm]?[jt]sx?$' || true)
+    selected_files=$( (cd "$ws" && npx vitest list --changed "$BASE" --filesOnly 2>/dev/null) | grep -E '\.(test|spec)\.[cm]?[jt]sx?$' || true)
+    selected=$(printf '%s' "$selected_files" | grep -c . || true)
+    case "$selected" in ''|*[!0-9]*) selected=0 ;; esac
   else
     selected=1   # node:test packages run their whole suite, so a source change is covered
   fi
@@ -483,11 +489,16 @@ for ws in "${WS_ORDER[@]}"; do
   if [ "$kind" = "vitest" ]; then
     echo "changed-tests: ${ws}: ${selected} affected test file(s)"
     if [ "$LIST" -eq 1 ]; then
-      (cd "$ws" && npx vitest list --changed "$BASE" --filesOnly 2>/dev/null) | sed 's/^/  /'
+      printf '%s\n' "$selected_files" | sed 's/^/  /'
       continue
     fi
     ran=$((ran + 1))
-    run_ws_tests "$ws" npx vitest run --changed "$BASE" || status=1
+    # Run the selection by name rather than asking vitest to re-derive it with
+    # `--changed`: one vitest bootstrap cheaper per source delta, and the invocation
+    # shape the fast tier can afford (cloud-factory-cf-56j5).
+    files=()
+    while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done <<< "$selected_files"
+    run_ws_tests "$ws" npx vitest run "${files[@]}" || status=1
     continue
   fi
 

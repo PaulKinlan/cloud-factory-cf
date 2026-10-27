@@ -286,9 +286,20 @@ reset_tree
 # 5. A source delta selects the affected vitest files.
 printf '\n// touch\n' >> "$FIX/apps/web/src/m.ts"
 export FAKE_SELECT="apps/web/test/a.test.ts"
+export FAKE_VITEST_ARGS="$TMP/vitest.args"
 run_gate
-unset FAKE_SELECT
 check "source delta runs the affected vitest files" 'test "$RC" -eq 0 && out_has "1 affected test file(s)" && out_has "FAKE vitest run in web"'
+# 5b. ... and it runs them BY NAME, reusing the list `list --changed` already produced.
+#     The source-only path used to count that list and throw it away, then pay a SECOND
+#     vitest bootstrap for `run --changed` to re-derive the same selection — one whole
+#     bootstrap per source delta, in the shape the worker hangs were blamed on
+#     (cloud-factory-cf-56j5).
+: > "$FAKE_VITEST_ARGS"
+run_gate
+check "a source delta runs the selected suites by name, with no --changed run" 'test "$RC" -eq 0 && grep -qx "args web apps/web/test/a.test.ts" "$FAKE_VITEST_ARGS" && ! grep -q -- "--changed" "$FAKE_VITEST_ARGS"'
+run_gate --list
+check "--list names the same selection for a source delta" 'test "$RC" -eq 0 && out_has "1 affected test file(s)" && out_has "apps/web/test/a.test.ts"'
+unset FAKE_SELECT FAKE_VITEST_ARGS
 reset_tree
 
 # 6. A source delta that selects no suite is a FAIL, never a silent green.
