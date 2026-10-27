@@ -36,6 +36,75 @@ changed=$(
     git diff --name-only                 # unstaged
     git ls-files --others --exclude-standard; } 2>/dev/null | sort -u
 )
+# Edge-routed modules are exercised through SELF.fetch, not imported by their tests.
+# Vitest --changed only follows its module graph, so those suites need explicit pins.
+# The same contract is consumed by fleet-check's independent coverage reporter.
+#
+# Validated HERE, before every early exit below: a docs/config-only delta (or one that
+# selects nothing) runs no pinned suite, but a contract that cannot be used still has to
+# fail — otherwise the pins it should supply stay silently off for the deltas that need
+# them (rev-cloudfactorycffwji on cloud-factory-cf-fwji).
+if [ ! -f .fleet/coverage-contract.json ]; then
+  echo "changed-tests: FAIL missing .fleet/coverage-contract.json" >&2
+  exit 1
+fi
+# The selection's status is CHECKED. `mapfile -t pairs < <(node …)` discards the node
+# status, so an unparseable contract produced no pins at all and the gate went green with
+# its mapping silently disabled (cloud-factory-cf-fwji) — the same false green the missing
+# file above already refuses. A key that is not a path in the tree fails for the same
+# reason: a typo, a rename or a "./" prefix would otherwise disable that pin forever, and
+# nothing else validates this file.
+if ! pinned_selection=$(node -e '
+  const fs = require("fs");
+  const path = require("path");
+  const fail = (message) => {
+    console.error("changed-tests: " + message);
+    process.exit(1);
+  };
+  let contract;
+  try {
+    contract = JSON.parse(fs.readFileSync(".fleet/coverage-contract.json", "utf8"));
+  } catch (err) {
+    fail(".fleet/coverage-contract.json is not valid JSON (" + err.message + ")");
+  }
+  if (contract === null || typeof contract !== "object" || Array.isArray(contract)) {
+    fail(".fleet/coverage-contract.json must be an object of source path -> [suite path]");
+  }
+  const changed = new Set(process.argv[1].split("\n"));
+  for (const [source, tests] of Object.entries(contract)) {
+    // A key has to be the path git reports, byte for byte: "./apps/..." or "apps/../apps/..."
+    // would never match a changed path, so it has to be named here rather than left to
+    // disable its pin quietly.
+    if (source.startsWith("/") || source !== path.posix.normalize(source)) {
+      fail("contracted source " + source + " is not a path in this tree (" + path.posix.normalize(source) + ")");
+    }
+    if (!fs.existsSync(source)) fail("contracted source " + source + " is not a path in this tree");
+    if (!Array.isArray(tests) || tests.length === 0) {
+      fail("contracted source " + source + " must name at least one suite path");
+    }
+    for (const test of tests) {
+      if (typeof test !== "string" || test === "") {
+        fail("contracted source " + source + " has a suite entry that is not a path");
+      }
+    }
+    if (changed.has(source)) for (const test of tests) console.log(source + "\t" + test);
+  }
+' "$changed" | sort -u); then
+  echo "changed-tests: FAIL .fleet/coverage-contract.json cannot be used (see above), so no pin can be trusted" >&2
+  exit 1
+fi
+pinned_pairs=()
+if [ -n "$pinned_selection" ]; then
+  mapfile -t pinned_pairs <<< "$pinned_selection"
+fi
+pinned_sources=""
+pinned_tests=()
+for pair in "${pinned_pairs[@]}"; do
+  pinned_sources+="${pair%%$'\t'*}"$'\n'
+  pinned_tests+=("${pair#*$'\t'}")
+done
+is_pinned_source() { case $'\n'"$pinned_sources" in *$'\n'"$1"$'\n'*) return 0 ;; *) return 1 ;; esac; }
+
 if [ -z "$changed" ]; then
   echo "changed-tests: no changes against $BASE — nothing to run"
   exit 0
@@ -306,69 +375,6 @@ if [ -n "$unmapped_tests" ]; then
   echo "$unmapped_tests" | grep -v '^$' | sed 's/^/  /'
 fi
 
-# Edge-routed modules are exercised through SELF.fetch, not imported by their tests.
-# Vitest --changed only follows its module graph, so those suites need explicit pins.
-# The same contract is consumed by fleet-check's independent coverage reporter.
-if [ ! -f .fleet/coverage-contract.json ]; then
-  echo "changed-tests: FAIL missing .fleet/coverage-contract.json" >&2
-  exit 1
-fi
-# The selection's status is CHECKED. `mapfile -t pairs < <(node …)` discards the node
-# status, so an unparseable contract produced no pins at all and the gate went green with
-# its mapping silently disabled (cloud-factory-cf-fwji) — the same false green the missing
-# file above already refuses. A key that is not a path in the tree fails for the same
-# reason: a typo, a rename or a "./" prefix would otherwise disable that pin forever, and
-# nothing else validates this file.
-if ! pinned_selection=$(node -e '
-  const fs = require("fs");
-  const path = require("path");
-  const fail = (message) => {
-    console.error("changed-tests: " + message);
-    process.exit(1);
-  };
-  let contract;
-  try {
-    contract = JSON.parse(fs.readFileSync(".fleet/coverage-contract.json", "utf8"));
-  } catch (err) {
-    fail(".fleet/coverage-contract.json is not valid JSON (" + err.message + ")");
-  }
-  if (contract === null || typeof contract !== "object" || Array.isArray(contract)) {
-    fail(".fleet/coverage-contract.json must be an object of source path -> [suite path]");
-  }
-  const changed = new Set(process.argv[1].split("\n"));
-  for (const [source, tests] of Object.entries(contract)) {
-    // A key has to be the path git reports, byte for byte: "./apps/..." or "apps/../apps/..."
-    // would never match a changed path, so it has to be named here rather than left to
-    // disable its pin quietly.
-    if (source.startsWith("/") || source !== path.posix.normalize(source)) {
-      fail("contracted source " + source + " is not a path in this tree (" + path.posix.normalize(source) + ")");
-    }
-    if (!fs.existsSync(source)) fail("contracted source " + source + " is not a path in this tree");
-    if (!Array.isArray(tests) || tests.length === 0) {
-      fail("contracted source " + source + " must name at least one suite path");
-    }
-    for (const test of tests) {
-      if (typeof test !== "string" || test === "") {
-        fail("contracted source " + source + " has a suite entry that is not a path");
-      }
-    }
-    if (changed.has(source)) for (const test of tests) console.log(source + "\t" + test);
-  }
-' "$changed" | sort -u); then
-  echo "changed-tests: FAIL .fleet/coverage-contract.json cannot be used (see above), so no pin can be trusted" >&2
-  exit 1
-fi
-pinned_pairs=()
-if [ -n "$pinned_selection" ]; then
-  mapfile -t pinned_pairs <<< "$pinned_selection"
-fi
-pinned_sources=""
-pinned_tests=()
-for pair in "${pinned_pairs[@]}"; do
-  pinned_sources+="${pair%%$'\t'*}"$'\n'
-  pinned_tests+=("${pair#*$'\t'}")
-done
-is_pinned_source() { case $'\n'"$pinned_sources" in *$'\n'"$1"$'\n'*) return 0 ;; *) return 1 ;; esac; }
 
 # Per-workspace execution. Tests and sources are decided independently: a test-file
 # delta in one workspace is never skipped because another workspace's source changed.

@@ -331,6 +331,18 @@ run_gate
 check "a contract key that is not a path in the tree FAILs" 'test "$RC" -ne 0 && err_has "is not a path in this tree" && err_has "./apps/worker/src/routes/auth.ts"'
 reset_tree
 
+# 6c2. A docs/config-only delta runs no suites at all, but the contract is validated
+#      before that early exit: a stale contract must not stay silently disabled
+#      (rev-cloudfactorycffwji on cloud-factory-cf-fwji).
+printf '{ "apps/worker/src/routes/auth.ts": ["apps/worker/test/auth.test.ts",] }\n' > "$contract"
+printf '\n// touch\n' >> "$FIX/docs/speed.md"
+run_gate
+check "a docs-only delta FAILs on an unparseable contract instead of running the smoke set" 'test "$RC" -ne 0 && err_has ".fleet/coverage-contract.json is not valid JSON" && out_lacks "smoke set"'
+printf '{ "apps/worker/src/routes/gone.ts": ["apps/worker/test/auth.test.ts"] }\n' > "$contract"
+run_gate
+check "a docs-only delta FAILs on a contract key that no longer exists" 'test "$RC" -ne 0 && err_has "is not a path in this tree" && err_has "apps/worker/src/routes/gone.ts"'
+reset_tree
+
 # 6d. A pin in a workspace other than apps/worker resolves relative to ITS workspace
 #     (cloud-factory-cf-wj0b).
 cat > "$contract" <<'JSON'
