@@ -50,11 +50,13 @@ describe("worker entry point", () => {
       events: Array<{ deliveryId: string; status: string; actor: string | null }>;
     };
     expect(body.count).toBe(1);
-    expect(body.events[0]).toMatchObject({
-      deliveryId,
-      status: "pending",
-      actor: "octocat",
-    });
+    expect(body.events[0]).toMatchObject({ deliveryId, actor: "octocat" });
+    // The 200 means accepted, not "still pending": the drain can claim the delivery between
+    // the write and this read, which is why the status is asserted as "queued or already
+    // taken" instead of pinning it to pending. With test files running in parallel the
+    // claim lands sooner and the old assertion failed with "processing" (j998, same family
+    // as 8xzi's audit read-after-write).
+    expect(["pending", "processing"]).toContain(body.events[0]!.status);
 
     const rows = await runInDurableObject(stub, (_instance, state) =>
       state.storage.sql
