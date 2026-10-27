@@ -53,13 +53,15 @@ test('GitHubPRReviewSink: validates payload and dispatches via signed request or
   assert.equal(denied.success, false);
   assert.match(denied.error!, /permission denied/i);
 
-  // Test successful dispatch via credential broker
+  // Test successful dispatch via credential broker. The action name is the broker's
+  // own (`pr.review`), the call asks for the upstream status, and the broker's answer is
+  // that status object (cloud-factory-cf-g9aw).
   const executedCalls: any[] = [];
   const allowedBroker = new DefaultCredentialBroker(
-    ['github:create_pr_review'],
+    ['github:pr.review'],
     async (req) => {
       executedCalls.push(req);
-      return { reviewId: 'rev_123', status: 'submitted' };
+      return { status: 201, body: { reviewId: 'rev_123' } };
     },
   );
   const allowedCtx = mockCtx(allowedBroker);
@@ -69,9 +71,11 @@ test('GitHubPRReviewSink: validates payload and dispatches via signed request or
     allowedCtx,
   );
   assert.equal(success.success, true);
-  assert.deepEqual(success.result, { reviewId: 'rev_123', status: 'submitted' });
+  assert.deepEqual(success.result, { status: 201 });
   assert.equal(executedCalls.length, 1);
-  assert.equal(executedCalls[0].params.prNumber, 42);
+  assert.equal(executedCalls[0].action, 'pr.review');
+  assert.equal(executedCalls[0].includeStatus, true);
+  assert.equal(executedCalls[0].params.number, 42);
 
   // Test custom executor override
   const customSink = new GitHubPRReviewSink({
@@ -139,10 +143,10 @@ test('BeadsTaskSink: validates payload and priority, dispatches task actions', a
   // Test beads:task:update with ID forwards to broker correctly
   const updateCalls: any[] = [];
   const broker = new DefaultCredentialBroker(
-    ['beads:update_task'],
+    ['beads:task.update'],
     async (req) => {
       updateCalls.push(req);
-      return { ok: true };
+      return { status: 200, body: { ok: true } };
     },
   );
   const brokerCtx = mockCtx(broker);
@@ -158,7 +162,9 @@ test('BeadsTaskSink: validates payload and priority, dispatches task actions', a
   );
   assert.equal(validUpdate.success, true);
   assert.equal(updateCalls.length, 1);
-  assert.equal(updateCalls[0].params.id, 'cf-123');
+  // `task.update`'s route is /tasks/{taskId}
+  assert.equal(updateCalls[0].action, 'task.update');
+  assert.equal(updateCalls[0].params.taskId, 'cf-123');
   assert.equal(updateCalls[0].params.status, 'IN_REVIEW');
 
   // Test custom executor receives resolved task ID from action.target (fixes cloud-factory-cf-44v)

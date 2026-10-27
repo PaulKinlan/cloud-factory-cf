@@ -44,6 +44,11 @@ export interface CredentialCapabilityRequest {
   readonly service: string;
   readonly action: string;
   readonly params?: Readonly<Record<string, unknown>>;
+  /**
+   * Ask the broker to report the upstream status instead of only the body, so a sink can
+   * tell an accepted call from a rejected one (cloud-factory-cf-g9aw).
+   */
+  readonly includeStatus?: boolean;
 }
 
 /**

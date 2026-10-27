@@ -1,5 +1,6 @@
 import type { ActionSink, SinkAction, SinkDispatchResult, GitHubIssuePayload } from '../types/sinks.ts';
 import type { AgentContext } from '../types/context.ts';
+import { assertUpstreamAccepted, type SignedBrokerResult } from './broker-result.ts';
 
 export type GitHubIssueExecutor = (
   payload: GitHubIssuePayload,
@@ -75,15 +76,16 @@ export class GitHubIssueSink implements ActionSink {
         };
       }
 
-      const result = await ctx.credentials.executeSignedRequest({
+      const result = await ctx.credentials.executeSignedRequest<SignedBrokerResult>({
         service: 'github',
-        action: 'create_issue',
+        // The broker's action name is `issue.create`; `create_issue` is refused as an
+        // unknown action before GitHub sees it (cloud-factory-cf-g9aw). Its forwarded body
+        // is title/body, so labels and assignees are not silently promised here.
+        action: 'issue.create',
+        includeStatus: true,
         params: {
-          repo: ctx.repo ? `${ctx.repo.owner}/${ctx.repo.name}` : undefined,
           title: payload.title,
           body: payload.body,
-          labels: payload.labels,
-          assignees: payload.assignees,
         },
       });
 
@@ -92,7 +94,7 @@ export class GitHubIssueSink implements ActionSink {
         actionId: action.id,
         actionType: action.type,
         success: true,
-        result,
+        result: assertUpstreamAccepted(result, 'issue.create'),
         durationMs: Date.now() - start,
       };
     } catch (err: unknown) {
