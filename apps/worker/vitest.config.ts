@@ -39,7 +39,12 @@ export default defineConfig({
   ],
   test: {
     include: ["test/**/*.test.ts"],
-    testTimeout: 20_000,
+    // 20s was the default and it is what turns a loaded VM into a red gate: these suites
+    // drive real Durable Objects (audit 20-46s per test, connect 21-25s per test under
+    // load 6-16 on 2 vCPU), so 20s expired mid-test and the failure looked like a code
+    // regression (cloud-factory-cf-t8mu). 60s still fails a genuinely hung test but gives
+    // the DO round-trips room on a busy machine.
+    testTimeout: 60_000,
     fileParallelism: false,
   },
 });
