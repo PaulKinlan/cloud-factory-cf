@@ -311,6 +311,10 @@ printf '#!/usr/bin/env bash\necho "STUB selftest"\nexit 0\n' > "$FIX/scripts/cha
 printf '\n# touch\n' >> "$FIX/scripts/changed-tests.sh"
 run_gate
 check "a delta confined to the gate's own logic runs the self-test, not the app smoke set" 'test "$RC" -eq 0 && out_has "gate self-test" && out_has "STUB selftest" && out_lacks "FAKE vitest run"'
+# The run names its suite, so a coverage reader can see what was exercised instead of
+# reporting the changed files as NOT demonstrated (a log that names no suite reads as
+# "nothing ran", which for this delta is exactly backwards).
+check "the self-test-only run names the suite it executed" 'out_has "fast-gate: passed: scripts/changed-tests.selftest.sh"'
 rm -f "$FIX/scripts/changed-tests.sh" "$FIX/scripts/changed-tests.selftest.sh"
 ( cd "$FIX" && git add -A scripts && git commit -qm "drop gate stubs" )
 reset_tree

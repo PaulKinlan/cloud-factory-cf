@@ -288,7 +288,17 @@ if [ "$sources_n" -eq 0 ] && [ "$tests_n" -eq 0 ]; then
   fi
   smoke_status=0
   if [ "$selftest_wanted" -eq 1 ]; then run_selftest || smoke_status=1; fi
-  [ "$selftest_only" -eq 1 ] && exit "$smoke_status"
+  if [ "$selftest_only" -eq 1 ]; then
+    # Positive evidence of what ran. Without it the coverage reader sees a log that names
+    # no suite and reports the changed files as "NOT demonstrated to be exercised", which
+    # is the opposite of what happened: the self-test is the whole check for this delta.
+    if [ "$smoke_status" -eq 0 ]; then
+      echo "fast-gate: passed: ${SELFTEST}"
+    else
+      echo "fast-gate: failed: ${SELFTEST}"
+    fi
+    exit "$smoke_status"
+  fi
   run_smoke "nothing mapped to a suite" || smoke_status=1
   exit "$smoke_status"
 fi
