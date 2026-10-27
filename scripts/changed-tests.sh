@@ -360,9 +360,11 @@ for ws in "${WS_ORDER[@]}"; do
       [ -f "$path" ] || test_gone+="$path"$'\n'
     done <<< "$ws_tests"
 
+    selected_files=""
     selected=0
     if [ -z "$test_gone" ] && [ "$kind" = "vitest" ]; then
-      selected=$( (cd "$ws" && npx vitest list --changed "$BASE" --filesOnly 2>/dev/null) | grep -cE '\.(test|spec)\.[cm]?[jt]sx?$' || true)
+      selected_files=$( (cd "$ws" && npx vitest list --changed "$BASE" --filesOnly 2>/dev/null) | grep -E '\.(test|spec)\.[cm]?[jt]sx?$' || true)
+      selected=$(printf '%s' "$selected_files" | grep -c . || true)
       case "$selected" in ''|*[!0-9]*) selected=0 ;; esac
     fi
 
@@ -373,12 +375,20 @@ for ws in "${WS_ORDER[@]}"; do
       # unrelated landings KILLED at it (cloud-factory-cf-67sy).
       if [ "$LIST" -eq 1 ]; then
         echo "changed-tests: ${ws}: ${selected} affected test file(s) (test-file delta)"
-        (cd "$ws" && npx vitest list --changed "$BASE" --filesOnly 2>/dev/null) | sed 's/^/  /'
+        printf '%s\n' "$selected_files" | sed 's/^/  /'
         continue
       fi
       echo "changed-tests: ${ws}: ${selected} affected test file(s) (test-file delta: $(echo "$ws_tests" | tr '\n' ' '))"
       ran=$((ran + 1))
-      run_ws_tests "$ws" npx vitest run --changed "$BASE" || status=1
+      # Name the selected files instead of asking vitest to re-derive them with
+      # `--changed`. Two reasons: it is one whole vitest bootstrap cheaper per gate
+      # (the selection above already paid for a `list --changed`), and in apps/worker
+      # the `--changed` run never reached a test at all - the banner printed and then
+      # nothing for 900s, twice, killing the fast gate at its bound (8xzi's delta),
+      # while the very same file runs by name in about two minutes.
+      files=()
+      while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done <<< "$selected_files"
+      run_ws_tests "$ws" npx vitest run "${files[@]}" || status=1
       continue
     fi
 

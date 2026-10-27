@@ -44,6 +44,9 @@ case "${1:-}" in
   list) [ -n "${FAKE_SELECT:-}" ] && printf '%s\n' $FAKE_SELECT; exit 0 ;;
   run) echo "FAKE vitest run in $(basename "$PWD")"
        [ -n "${FAKE_BUILD_LOG:-}" ] && echo "run $(basename "$PWD")" >> "$FAKE_BUILD_LOG"
+       # The arguments of a run are recorded so a check can assert the gate names the
+       # affected files instead of asking vitest to re-derive them with --changed.
+       [ -n "${FAKE_VITEST_ARGS:-}" ] && echo "args $(basename "$PWD") ${*:2}" >> "$FAKE_VITEST_ARGS"
        exit "${FAKE_VITEST_RC:-0}" ;;
   *) exit 0 ;;
 esac
@@ -173,11 +176,19 @@ reset_tree
 #     KILLED at it (cloud-factory-cf-67sy).
 printf '\n// touch\n' >> "$FIX/apps/web/test/a.test.ts"
 export FAKE_SELECT="apps/web/test/a.test.ts"
+export FAKE_VITEST_ARGS="$TMP/vitest.args"
 run_gate
 check "a modified test file runs the affected suites, not the whole suite" 'test "$RC" -eq 0 && out_has "1 affected test file(s) (test-file delta" && out_has "FAKE vitest run in web"'
+# 3b-ii. The affected suites are passed BY NAME. A `--changed` run re-derives the
+#        selection from git inside the workspace, and in apps/worker that run never
+#        reached a test: the banner printed, then nothing for the whole 900s bound, and
+#        the fast gate was KILLED at it twice (cloud-factory-cf-8xzi's delta), while the
+#        same file runs by name in about two minutes. Naming them is also one vitest
+#        bootstrap cheaper, which is the point of the fast tier.
+check "the affected suites are run by name, not by a --changed run" 'test "$RC" -eq 0 && grep -qx "args web apps/web/test/a.test.ts" "$FAKE_VITEST_ARGS" && ! grep -q -- "--changed" "$FAKE_VITEST_ARGS"'
 run_gate --list
 check "--list reports affected suites for a modified test file" 'test "$RC" -eq 0 && out_has "1 affected test file(s) (test-file delta"'
-unset FAKE_SELECT
+unset FAKE_SELECT FAKE_VITEST_ARGS
 reset_tree
 
 # 3c. ... while a DELETED test file keeps the workspace-wide run, because --changed cannot
