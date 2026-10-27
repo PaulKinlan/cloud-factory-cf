@@ -1,6 +1,6 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { ConnectStore } from "../src/events/connect";
+import { ConnectStore, mergeLegacyConnectRow } from "../src/events/connect";
 import { signBody, TEST_SECRET } from "./support/webhook";
 import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 import { mintSessionToken } from "../src/routes/auth";
@@ -149,6 +149,42 @@ describe("connect evidence", () => {
       lastEventAt: "2026-10-19T16:01:00.000Z",
       lastEvent: "pull_request",
       pings: 1,
+    });
+  });
+
+  it("reports a legacy webhook_connect value it cannot represent instead of dropping it silently (cloud-factory-cf-tgu9)", async () => {
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("acme/connect-merge"));
+    const result = await runInDurableObject(stub, (_instance, state) => {
+      const representable = mergeLegacyConnectRow(state.storage.sql, {
+        id: "default",
+        last_ping_at: "2026-10-19T16:00:00.000Z",
+        last_event_at: "2026-10-19T16:00:00.000Z",
+        last_event: "ping",
+        pings: 3,
+        updated_at: "2026-10-19T16:00:00.000Z",
+      });
+      const unrepresentable = mergeLegacyConnectRow(state.storage.sql, {
+        id: "default",
+        last_ping_at: null,
+        last_event_at: null,
+        last_event: null,
+        pings: "not-a-count",
+        updated_at: null,
+      });
+      const store = new ConnectStore(state.storage.sql, "acme/connect-merge");
+      return { representable, unrepresentable, snapshot: store.snapshot() };
+    });
+
+    expect(result.representable).toBe(true);
+    // The caller must be able to tell that the legacy value was lost, so it can refuse
+    // to write the seal marker that would make the loss permanent (cloud-factory-cf-tgu9).
+    expect(result.unrepresentable).toBe(false);
+    expect(result.snapshot).toEqual({
+      repository: "acme/connect-merge",
+      lastPingAt: "2026-10-19T16:00:00.000Z",
+      lastEventAt: "2026-10-19T16:00:00.000Z",
+      lastEvent: "ping",
+      pings: 3,
     });
   });
 

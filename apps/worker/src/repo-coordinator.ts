@@ -16,6 +16,8 @@ import {
   RunAuditStore,
   RunTraceStore,
   migrateConnectTable,
+  mergeLegacyConnectRow,
+  type LegacyConnectRow,
   migrateEventQueueTable,
   migrateDeliveryLedgerTable,
   migrateRunAuditTable,
@@ -257,6 +259,11 @@ export class RepoCoordinator extends DurableObject<Env> {
       const s = body.state;
       if (!s) return;
 
+      // A legacy value we cannot represent must not disappear behind the seal
+      // (cloud-factory-cf-tgu9): if anything was dropped, stay unsealed and say so
+      // rather than making the loss permanent and silent.
+      let mergedLosslessly = true;
+
       this.ctx.storage.transactionSync(() => {
         for (const m of (s["memory"] as any[]) ?? []) {
           this.sql.exec(
@@ -270,11 +277,10 @@ export class RepoCoordinator extends DurableObject<Env> {
             c.id, c.name, c.document, c.created_at, c.updated_at,
           );
         }
-        for (const w of (s["webhook_connect"] as any[]) ?? []) {
-          this.sql.exec(
-            "INSERT OR IGNORE INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            w.id, w.last_ping_at, w.last_event_at, w.last_event, w.pings, w.updated_at,
-          );
+        for (const w of (s["webhook_connect"] as LegacyConnectRow[]) ?? []) {
+          // One row per DO with a monotonic `pings` counter: ignore-on-conflict would
+          // throw legacy evidence away, so merge it instead (cloud-factory-cf-tgu9).
+          if (!mergeLegacyConnectRow(this.sql, w)) mergedLosslessly = false;
         }
         for (const e of (s["events"] as any[]) ?? []) {
           this.sql.exec(
@@ -300,11 +306,19 @@ export class RepoCoordinator extends DurableObject<Env> {
             t.id, t.delivery_id, t.sequence, t.step, t.status, t.detail, t.artifact, t.created_at, t.ms,
           );
         }
-        this.sql.exec(
-          "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
-          Date.now(),
-        );
+        if (mergedLosslessly) {
+          this.sql.exec(
+            "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
+            Date.now(),
+          );
+        }
       });
+
+      if (!mergedLosslessly) {
+        console.error(
+          `Legacy merge for ${legacyName} dropped a webhook_connect value it could not represent; leaving the repository unsealed so the evidence stays reachable`,
+        );
+      }
 
       // Tell legacy DO to cancel its alarm and mark itself migrated
       try {

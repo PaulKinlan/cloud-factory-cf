@@ -1,5 +1,7 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { migrateRunTraceTable } from "../src/events";
+import { signBody, TEST_SECRET } from "./support/webhook";
 
 describe("RepoCoordinator legacy read-through migration (Slice 3)", () => {
   const CONTROL_KEY = "test-control-key";
@@ -185,6 +187,170 @@ describe("RepoCoordinator legacy read-through migration (Slice 3)", () => {
     const proxiedBody = (await proxiedRes.json()) as { repository: string; counts: Record<string, number> };
     expect(proxiedBody.repository).toBe(legacyRepo);
     expect(proxiedBody.counts["pending"]).toBe(1);
+  });
+
+  it("sums the legacy ping counter into an already-canonical webhook_connect row (cloud-factory-cf-tgu9)", async () => {
+    const repo = "sums-org/sums-repo";
+    const prefixedRepo = `github:${repo}`;
+
+    const legacyStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repo));
+    await runInDurableObject(legacyStub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "default",
+        "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:00:00.000Z",
+        "ping",
+        5,
+        "2026-01-01T00:00:00.000Z",
+      );
+    });
+
+    // The canonical object already recorded its own first delivery before the legacy
+    // export succeeded — the ordering that made INSERT OR IGNORE lose the counter.
+    const prefixedStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(prefixedRepo));
+    await runInDurableObject(prefixedStub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "default",
+        "2026-02-01T00:00:00.000Z",
+        "2026-02-01T00:00:00.000Z",
+        "ping",
+        1,
+        "2026-02-01T00:00:00.000Z",
+      );
+    });
+
+    const res = await prefixedStub.fetch("https://repo-coordinator.internal/stats");
+    expect(res.status).toBe(200);
+
+    await runInDurableObject(prefixedStub, (_instance, state) => {
+      const rows = state.storage.sql
+        .exec<{ last_ping_at: string; last_event_at: string; last_event: string; pings: number }>(
+          "SELECT last_ping_at, last_event_at, last_event, pings FROM webhook_connect",
+        )
+        .toArray();
+      expect(rows).toEqual([
+        {
+          last_ping_at: "2026-02-01T00:00:00.000Z",
+          last_event_at: "2026-02-01T00:00:00.000Z",
+          last_event: "ping",
+          pings: 6,
+        },
+      ]);
+    });
+  });
+
+  it("keeps the later last_event pair when the legacy webhook_connect row is newer (cloud-factory-cf-tgu9)", async () => {
+    const repo = "later-org/later-repo";
+    const prefixedRepo = `github:${repo}`;
+
+    const legacyStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repo));
+    await runInDurableObject(legacyStub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "default",
+        "2026-03-01T00:00:00.000Z",
+        "2026-03-01T00:00:00.000Z",
+        "pull_request",
+        2,
+        "2026-03-01T00:00:00.000Z",
+      );
+    });
+
+    const prefixedStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(prefixedRepo));
+    await runInDurableObject(prefixedStub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "default",
+        null,
+        "2026-01-01T00:00:00.000Z",
+        "push",
+        0,
+        "2026-01-01T00:00:00.000Z",
+      );
+    });
+
+    const res = await prefixedStub.fetch("https://repo-coordinator.internal/stats");
+    expect(res.status).toBe(200);
+
+    await runInDurableObject(prefixedStub, (_instance, state) => {
+      const rows = state.storage.sql
+        .exec<{ last_ping_at: string; last_event_at: string; last_event: string; pings: number; updated_at: string }>(
+          "SELECT last_ping_at, last_event_at, last_event, pings, updated_at FROM webhook_connect",
+        )
+        .toArray();
+      expect(rows).toEqual([
+        {
+          last_ping_at: "2026-03-01T00:00:00.000Z",
+          last_event_at: "2026-03-01T00:00:00.000Z",
+          last_event: "pull_request",
+          pings: 2,
+          updated_at: "2026-03-01T00:00:00.000Z",
+        },
+      ]);
+    });
+  });
+
+  it("keeps the legacy ping counter when a delivery lands before a retried export succeeds (cloud-factory-cf-tgu9)", async () => {
+    const repo = "tgu9-org/retry-repo";
+    const prefixedRepo = `github:${repo}`;
+
+    const legacyStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repo));
+    await runInDurableObject(legacyStub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "default",
+        "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:00:00.000Z",
+        "ping",
+        5,
+        "2026-01-01T00:00:00.000Z",
+      );
+      // A transient schema fault: the first post-deploy export fails, so the repository
+      // cannot be sealed yet — the real-world ordering the review described.
+      state.storage.sql.exec("DROP TABLE run_trace");
+    });
+
+    const payload = JSON.stringify({
+      zen: "Keep it logically awesome.",
+      hook_id: 7,
+      hook: { type: "Repository", active: true },
+      repository: { full_name: repo },
+    });
+    const signature = await signBody(TEST_SECRET, payload);
+    const delivery = await SELF.fetch(
+      new Request(`https://example.com/webhooks/github/${repo}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-github-delivery": "tgu9-retry-1",
+          "x-github-event": "ping",
+          "x-hub-signature-256": signature,
+        },
+        body: payload,
+      }),
+    );
+    expect(delivery.status).toBe(202);
+
+    // The delivery was recorded canonically while the legacy export was unavailable.
+    const prefixedStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(prefixedRepo));
+    const before = await runInDurableObject(prefixedStub, (_instance, state) =>
+      state.storage.sql.exec<{ pings: number }>("SELECT pings FROM webhook_connect").toArray(),
+    );
+    expect(before).toEqual([{ pings: 1 }]);
+
+    // The fault clears; the next read merges the legacy evidence instead of dropping it.
+    await runInDurableObject(legacyStub, (_instance, state) => {
+      migrateRunTraceTable(state.storage.sql);
+    });
+    const res = await prefixedStub.fetch("https://repo-coordinator.internal/stats");
+    expect(res.status).toBe(200);
+
+    const after = await runInDurableObject(prefixedStub, (_instance, state) =>
+      state.storage.sql.exec<{ pings: number }>("SELECT pings FROM webhook_connect").toArray(),
+    );
+    expect(after).toEqual([{ pings: 6 }]);
   });
 
   it("fails closed without writing migration marker if export throws", async () => {
