@@ -87,6 +87,21 @@ export class GitHubPRReviewSink implements ActionSink {
         };
       }
 
+      // Inline review comments are structured objects the broker's `pr.review` action
+      // cannot carry (its body is body/event/commit_id), so refuse rather than file a
+      // review that quietly lost them (cloud-factory-cf-v1y0). A custom executor gets
+      // the whole payload and can carry them.
+      if (payload.comments !== undefined && payload.comments.length > 0) {
+        return {
+          sinkName: this.name,
+          actionId: action.id,
+          actionType: action.type,
+          success: false,
+          error: 'Invalid payload: inline comments are not forwarded by the broker\'s pr.review action; use a custom executor',
+          durationMs: Date.now() - start,
+        };
+      }
+
       const result = await ctx.credentials.executeSignedRequest<SignedBrokerResult>({
         service: 'github',
         // The broker's own action name (`pr.review`), not a GitHub-style verb: an
@@ -98,6 +113,8 @@ export class GitHubPRReviewSink implements ActionSink {
           number: payload.prNumber,
           event: payload.event,
           body: payload.body,
+          // Pins the review to the commit it describes; the policy forwards `commit_id`.
+          ...(payload.commitSha === undefined ? {} : { commit_id: payload.commitSha }),
         },
       });
 

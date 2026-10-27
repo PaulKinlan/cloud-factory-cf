@@ -1,7 +1,7 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentContext } from "@factory-cloud/sdk";
-import { SINK_TYPES, allSinks, telemetrySink } from "../src/action-sinks";
+import { SINK_TYPES, allSinks, issueCreateSink, telemetrySink } from "../src/action-sinks";
 import { actionsFor, sinksFor } from "../src/pipeline";
 import { signBody, TEST_SECRET } from "./support/webhook";
 
@@ -357,5 +357,48 @@ describe("the legacy canvas names decide actions too (cloud-factory-cf-w45)", ()
     expect(report.failed).toBe(0);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe(`https://api.github.com/repos/${REPOSITORY}/issues/21/comments`);
+  });
+});
+
+describe("sink upstream status strictness (cloud-factory-cf-g9aw follow-up)", () => {
+  function contextWith(result: { status?: number; body?: unknown }) {
+    // `includeStatus` answers are what the broker returns; `pipeline.ts` turns a missing
+    // status into 0, so a sink has to refuse anything outside 200-399 rather than trust
+    // "no throw".
+    return createAgentContext({
+      repo: { owner: "acme", name: "action-sinks" },
+      org: { id: "acme" },
+      credentials: {
+        executeSignedRequest: async () => result,
+        hasPermission: async () => true,
+      },
+    });
+  }
+
+  for (const status of [0, 101, 199, 404, 500]) {
+    it(`fails an issue.create answered ${status}`, async () => {
+      const sink = issueCreateSink();
+      const result = await sink.handle(
+        {
+          id: "strict-1",
+          type: "github:issue:create",
+          payload: { title: "Bug", body: "Steps:\n1. click" },
+          timestamp: Date.now(),
+        },
+        contextWith({ status, body: { ok: true } }),
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain(`answered ${status}`);
+    });
+  }
+
+  it("accepts a 2xx and reports its status", async () => {
+    const sink = issueCreateSink();
+    const result = await sink.handle(
+      { id: "strict-2", type: "github:issue:create", payload: { title: "Bug", body: "x" }, timestamp: Date.now() },
+      contextWith({ status: 201, body: { id: 1 } }),
+    );
+    expect(result.success).toBe(true);
+    expect(result.result).toEqual({ status: 201 });
   });
 });

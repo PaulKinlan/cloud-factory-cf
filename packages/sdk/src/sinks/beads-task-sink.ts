@@ -118,6 +118,25 @@ export class BeadsTaskSink implements ActionSink {
         };
       }
 
+      // The broker's beads actions carry title/description/priority/assignee/status, and
+      // the policy refuses parameters it does not carry, so labels and a parent cannot
+      // travel. Refuse rather than file a task that quietly lost them
+      // (cloud-factory-cf-v1y0).
+      const notForwarded = [
+        payload.labels === undefined || payload.labels.length === 0 ? null : 'labels',
+        payload.parentId === undefined ? null : 'parentId',
+      ].filter((field): field is string => field !== null);
+      if (notForwarded.length > 0) {
+        return {
+          sinkName: this.name,
+          actionId: action.id,
+          actionType: action.type,
+          success: false,
+          error: `Invalid payload: ${notForwarded.join(', ')} are not forwarded by the broker's ${isUpdate ? 'task.update' : 'task.create'} action; use a custom executor`,
+          durationMs: Date.now() - start,
+        };
+      }
+
       const result = await ctx.credentials.executeSignedRequest<SignedBrokerResult>({
         service: 'beads',
         // The broker's action names are `task.create`/`task.update`; `create_task` and

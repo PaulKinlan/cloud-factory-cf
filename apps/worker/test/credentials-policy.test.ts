@@ -122,6 +122,84 @@ describe("credential broker policy", () => {
     expect(tooLong).toMatchObject({ ok: false, status: 400 });
   });
 
+  it("accepts multi-line bodies where the action can carry one, refusing only control characters", () => {
+    // A GitHub issue and a Beads task carry reports, steps and acceptance criteria; the
+    // SDK's default sinks forward payload.body/description verbatim, so a single-line
+    // rule made them unusable (cloud-factory-cf-g9aw follow-up).
+    const issue = resolveRequest({
+      service: "github",
+      action: "issue.create",
+      repository: "acme/widgets",
+      params: { title: "Crash on save", body: "Steps:\n1. open\n2. save\n\nExpected: saved" },
+    });
+    expect(issue).toMatchObject({ ok: true, method: "POST" });
+    const issueBody = JSON.parse((issue as { body?: string }).body ?? "{}") as { body?: string };
+    expect(issueBody.body).toContain("Steps:\n1. open");
+
+    const task = resolveRequest({
+      service: "beads",
+      action: "task.create",
+      repository: "acme/widgets",
+      env: { BEADS_API_HOST: "beads.internal" },
+      params: { title: "Ship it", description: "Acceptance:\n- tests\n- review" },
+    });
+    expect(task).toMatchObject({ ok: true });
+
+    const update = resolveRequest({
+      service: "beads",
+      action: "task.update",
+      repository: "acme/widgets",
+      env: { BEADS_API_HOST: "beads.internal" },
+      params: { taskId: 7, description: "line1\nline2" },
+    });
+    expect(update).toMatchObject({ ok: true });
+
+    // Multi-line is not a licence for control characters or an unbounded body.
+    const control = resolveRequest({
+      service: "github",
+      action: "issue.create",
+      repository: "acme/widgets",
+      params: { title: "Crash", body: "bad\u0000value" },
+    });
+    expect(control).toMatchObject({ ok: false, status: 400 });
+
+    const tooLong = resolveRequest({
+      service: "github",
+      action: "issue.create",
+      repository: "acme/widgets",
+      params: { title: "Crash", body: "x".repeat(64_001) },
+    });
+    expect(tooLong).toMatchObject({ ok: false, status: 400 });
+  });
+
+  it("accepts a beads task id as a slug, and refuses one that could re-aim the route", () => {
+    // A beads task id is `cloud-factory-cf-8xzi`, not a number: the positive-integer rule
+    // refused every real task.update (cloud-factory-cf-rjei).
+    const slug = resolveRequest({
+      service: "beads",
+      action: "task.update",
+      repository: "acme/widgets",
+      env: { BEADS_API_HOST: "beads.internal" },
+      params: { taskId: "cloud-factory-cf-8xzi", title: "Fix it" },
+    });
+    expect(slug).toMatchObject({
+      ok: true,
+      method: "PATCH",
+      url: "https://beads.internal/repos/acme/widgets/tasks/cloud-factory-cf-8xzi",
+    });
+
+    for (const bad of ["../../admin", "a/b", ".hidden", "", "x".repeat(129)]) {
+      const refused = resolveRequest({
+        service: "beads",
+        action: "task.update",
+        repository: "acme/widgets",
+        env: { BEADS_API_HOST: "beads.internal" },
+        params: { taskId: bad },
+      });
+      expect(refused).toMatchObject({ ok: false, status: 400, reason: "parameter taskId must be an id" });
+    }
+  });
+
   it("maps services to their credential bindings and denies unknown services", () => {
     expect(credentialEnvFor("github")).toBe("GITHUB_TOKEN");
     expect(credentialEnvFor("gitlab")).toBe("GITLAB_TOKEN");

@@ -76,10 +76,14 @@ interface SignedResult {
 }
 
 function assertUpstreamAccepted(result: SignedResult, what: string): { status: number } {
-  if (typeof result?.status !== "number" || result.status >= 400) {
-    throw new Error(`${what} answered ${result?.status ?? "no status"}`);
+  // 200–399, not "below 400": `pipeline.ts` turns a status-less broker answer into 0, and
+  // a 1xx is not an outcome GitHub or Beads can return, so both must fail here rather
+  // than look accepted (cloud-factory-cf-g9aw follow-up).
+  const status = result?.status;
+  if (typeof status !== "number" || status < 200 || status >= 400) {
+    throw new Error(`${what} answered ${typeof status === "number" ? status : "no status"}`);
   }
-  return { status: result.status };
+  return { status };
 }
 
 /** Issue creation goes through the broker's `issue.create` action. */

@@ -173,13 +173,21 @@ test('BeadsTaskSink asks for task.create / task.update and fails a rejected writ
   assert.match(rejected.error ?? '', /beads task\.create answered 404/);
 });
 
-test('assertUpstreamAccepted: a status at or above 400, or no status, is a failure', () => {
-  assert.deepEqual(assertUpstreamAccepted({ status: 204, body: null }, 'pr.review'), { status: 204 });
+test('assertUpstreamAccepted: only 200–399 is accepted, and no status is a failure', () => {
+  assert.deepEqual(assertUpstreamAccepted({ status: 201, body: null }, 'pr.review'), { status: 201 });
+  assert.deepEqual(assertUpstreamAccepted({ status: 302, body: null }, 'pr.review'), { status: 302 });
+  assert.deepEqual(assertUpstreamAccepted({ status: 399, body: null }, 'pr.review'), { status: 399 });
   assert.throws(
     () => assertUpstreamAccepted({ status: 404, body: { error: 'unsupported action' } }, 'pr.review'),
     /pr\.review answered 404/,
   );
   assert.throws(() => assertUpstreamAccepted(undefined, 'issue.create'), /issue\.create answered no status/);
+  // The worker path coerces a status-less broker answer to 0 (pipeline.ts), and a 1xx is
+  // not an outcome any GitHub or Beads action returns: neither may look accepted
+  // (cloud-factory-cf-g9aw follow-up).
+  assert.throws(() => assertUpstreamAccepted({ status: 0, body: { ok: true } }, 'pr.review'), /answered 0/);
+  assert.throws(() => assertUpstreamAccepted({ status: 101, body: null }, 'pr.review'), /answered 101/);
+  assert.throws(() => assertUpstreamAccepted({ status: 199, body: null }, 'task.create'), /answered 199/);
 });
 
 test('a rejected default sink does not report success through the sink registry', async () => {
@@ -197,4 +205,72 @@ test('a rejected default sink does not report success through the sink registry'
   assert.equal(results.length, 1);
   assert.equal(results[0]?.success, false);
   assert.match(results[0]?.error ?? '', /answered 403/);
+});
+
+test('default sinks refuse payload fields the broker action cannot carry instead of dropping them (cloud-factory-cf-v1y0)', async () => {
+  const { broker, calls } = brokerReturning(() => ({ status: 201, body: {} }));
+
+  const issueWithLabels = await new GitHubIssueSink().handle(
+    {
+      id: 'v1',
+      type: 'github:issue:create',
+      payload: { title: 'Bug', body: 'It broke', labels: ['bug'] },
+      timestamp: 0,
+    },
+    contextWith(broker),
+  );
+  assert.equal(issueWithLabels.success, false);
+  assert.match(issueWithLabels.error ?? '', /labels are not forwarded by the broker's issue\.create action/);
+
+  const taskWithParent = await new BeadsTaskSink().handle(
+    { id: 'v2', type: 'beads:task:create', payload: { title: 'T', description: 'D', parentId: 'cf-1' }, timestamp: 0 },
+    contextWith(broker),
+  );
+  assert.equal(taskWithParent.success, false);
+  assert.match(taskWithParent.error ?? '', /parentId are not forwarded/);
+
+  const reviewWithComments = await new GitHubPRReviewSink().handle(
+    {
+      id: 'v3',
+      type: 'github:pr:review',
+      payload: { prNumber: 4, event: 'COMMENT', body: 'x', comments: [{ path: 'a.ts', line: 1, body: 'nit' }] },
+      timestamp: 0,
+    },
+    contextWith(broker),
+  );
+  assert.equal(reviewWithComments.success, false);
+  assert.match(reviewWithComments.error ?? '', /inline comments are not forwarded/);
+
+  // Nothing was dispatched for any of them: a refused payload must not reach the provider.
+  assert.equal(calls.length, 0);
+
+  // A custom executor receives the whole payload, so it can carry what the broker cannot.
+  let seen: Record<string, unknown> | undefined;
+  const custom = new GitHubIssueSink({
+    executor: async (payload) => {
+      seen = payload as unknown as Record<string, unknown>;
+      return { ok: true };
+    },
+  });
+  const customResult = await custom.handle(
+    { id: 'v4', type: 'github:issue:create', payload: { title: 'Bug', body: 'x', labels: ['bug'] }, timestamp: 0 },
+    contextWith(broker),
+  );
+  assert.equal(customResult.success, true);
+  assert.deepEqual(seen?.labels, ['bug']);
+});
+
+test('GitHubPRReviewSink forwards commitSha as the policy\'s commit_id', async () => {
+  const { broker, calls } = brokerReturning(() => ({ status: 201, body: {} }));
+  const result = await new GitHubPRReviewSink().handle(
+    {
+      id: 'c1',
+      type: 'github:pr:review',
+      payload: { prNumber: 9, event: 'APPROVE', body: 'LGTM', commitSha: 'abc123' },
+      timestamp: 0,
+    },
+    contextWith(broker),
+  );
+  assert.equal(result.success, true);
+  assert.equal(calls[0]?.params?.commit_id, 'abc123');
 });

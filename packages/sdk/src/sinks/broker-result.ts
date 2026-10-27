@@ -16,15 +16,21 @@ export interface SignedBrokerResult {
 }
 
 /**
- * Returns the upstream status for an accepted call, and throws for anything that is not
- * a 2xx/3xx — a sink that reports `success: true` for a rejected call is a false green.
+ * Returns the upstream status for an accepted call, and throws for anything that is not a
+ * 2xx/3xx — a sink that reports `success: true` for a rejected call is a false green.
+ *
+ * The band is explicit rather than "below 400": `0` is how a status-less answer reaches a
+ * sink on the worker path (`pipeline.ts` coerces a missing status to 0), and a 1xx is not
+ * an outcome any GitHub or Beads action can return. Both would otherwise pass as accepted
+ * (cloud-factory-cf-g9aw follow-up).
  */
 export function assertUpstreamAccepted(
   result: SignedBrokerResult | undefined,
   what: string,
 ): { status: number } {
-  if (typeof result?.status !== 'number' || result.status >= 400) {
-    throw new Error(`${what} answered ${result?.status ?? 'no status'}`);
+  const status = result?.status;
+  if (typeof status !== 'number' || status < 200 || status >= 400) {
+    throw new Error(`${what} answered ${typeof status === 'number' ? status : 'no status'}`);
   }
-  return { status: result.status };
+  return { status };
 }
