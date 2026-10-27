@@ -47,8 +47,7 @@ case "${1:-}" in
        [ -n "${FAKE_VITEST_HANG:-}" ] && sleep 600
        # Simulate vitest exiting while a detached workerd keeps its output pipe open.
        if [ -n "${FAKE_VITEST_LEAK_PID:-}" ]; then
-         setsid sleep 90 &
-         echo "$!" > "$FAKE_VITEST_LEAK_PID"
+         setsid bash -c 'echo $$ > "$FAKE_VITEST_LEAK_PID"; exec sleep 120' &
        fi
        [ -n "${FAKE_BUILD_LOG:-}" ] && echo "run $(basename "$PWD")" >> "$FAKE_BUILD_LOG"
        # The arguments of a run are recorded so a check can assert the gate names the
@@ -134,7 +133,7 @@ SH
 
 # run_gate [env assignments...] -- args...
 run_gate() {
-  ( cd "$FIX" && timeout -k 5 60 bash "$GATE" "$@" ) >"$OUT" 2>"$ERR"
+  ( cd "$FIX" && timeout -k 5 "${CHANGED_TESTS_SELFTEST_BOUND:-60}" bash "$GATE" "$@" ) >"$OUT" 2>"$ERR"
   RC=$?
 }
 # reset the fixture's working tree between scenarios
@@ -249,7 +248,7 @@ finally:
     proc.communicate(timeout=2)
 PY
 RC=$?
-check "a leaked runner child cannot hold the finished gate's output pipe" 'test "$RC" -eq 0 && out_has "gate-pipe-EOF-with-survivor"'
+check "a leak-child mutant cannot hold the finished gate's output pipe" 'test "$RC" -eq 0 && out_has "gate-pipe-EOF-with-survivor" && out_has "FAKE vitest run in web" && out_has "1 affected test file(s)"'
 unset FAKE_SELECT FAKE_VITEST_LEAK_PID
 reset_tree
 
@@ -266,7 +265,9 @@ reset_tree
 printf '// now failing\n' >> "$FIX/packages/nodep/tests/n.test.ts"
 printf '\n// touch\n' >> "$FIX/apps/web/src/m.ts"
 export FAKE_SELECT="apps/web/test/a.test.ts" FAKE_NPM_RC=1
-run_gate
+# Two workspaces plus a cold dist build exceed the default 60s fixture bound
+# under VM contention; give this case room without slowing the green path.
+CHANGED_TESTS_SELFTEST_BOUND=120 run_gate
 unset FAKE_SELECT FAKE_NPM_RC
 check "test change is not skipped by another workspace's source change" 'test "$RC" -ne 0 && out_has "FAKE vitest run in web" && out_has "FAKE npm test in nodep"'
 reset_tree
