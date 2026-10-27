@@ -347,7 +347,10 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
   // and then `open()` loads it again while that first fetch is still pending, so the
   // select was rendered twice for one list and `/api/repos` was fetched twice
   // (cloud-factory-cf-xxso).
-  let reposInFlight: { owner: string; promise: Promise<void> } | null = null;
+  // Keyed by owner AND the control key used for the request: an in-flight keyless load
+  // must not swallow the keyed retry that fires when the operator pastes a key while it is
+  // pending (j998 - the retry simply returned the keyless promise and nothing happened).
+  let reposInFlight: { owner: string; key: string; promise: Promise<void> } | null = null;
 
   function renderRepoSelectOptions(): void {
     if (repoSelect === null) return;
@@ -470,9 +473,12 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
 
   async function loadAuthorizedRepos(owner: string): Promise<void> {
     if (!owner || repoSelect === null) return;
-    if (reposInFlight !== null && reposInFlight.owner === owner) return reposInFlight.promise;
-    const promise = fetchAuthorizedRepos(owner);
-    reposInFlight = { owner, promise };
+    const key = keyInput?.value.trim() ?? "";
+    if (reposInFlight !== null && reposInFlight.owner === owner && reposInFlight.key === key) {
+      return reposInFlight.promise;
+    }
+    const promise = fetchAuthorizedRepos(owner, key);
+    reposInFlight = { owner, key, promise };
     try {
       await promise;
     } finally {
@@ -480,11 +486,10 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     }
   }
 
-  async function fetchAuthorizedRepos(owner: string): Promise<void> {
+  async function fetchAuthorizedRepos(owner: string, key: string): Promise<void> {
     if (!owner || repoSelect === null) return;
     try {
       const headers: Record<string, string> = {};
-      const key = keyInput?.value.trim() ?? "";
       if (key.length > 0) {
         headers["x-factory-control-key"] = key;
       }

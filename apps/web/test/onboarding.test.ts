@@ -697,4 +697,60 @@ describe("mountConnectGate and repo selector population (cloud-factory-cf-7gm)",
       vi.unstubAllGlobals();
     }
   });
+  it("retries with the control key typed while a keyless /api/repos load is still pending (j998)", async () => {
+    const { doc, elements } = createMockDom();
+    let releaseKeyless: (() => void) | null = null;
+    const calls: Array<{ url: string; key: string | undefined }> = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (!url.includes("/api/repos")) return new Response("Not found", { status: 404 });
+      const key = (init?.headers as Record<string, string> | undefined)?.["x-factory-control-key"];
+      calls.push({ url, key });
+      if (calls.length === 1) {
+        // Hold the keyless request open until the operator has typed a key.
+        await new Promise<void>((resolve) => {
+          releaseKeyless = resolve;
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          count: 1,
+          repositories: [{ fullName: "octodev/widget-service", owner: "octodev", name: "widget-service" }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const gate = mountConnectGate(doc as any, {
+      base: "https://factory.example",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      onScope: () => {},
+    });
+    expect(gate).toBeDefined();
+
+    // A keyless load starts for the owner and stays in flight.
+    elements["#connect-owner"].value = "octodev";
+    elements["#connect-owner"].dispatchEvent("change");
+    await vi.waitFor(() => {
+      expect(calls.length).toBe(1);
+    });
+    expect(calls[0]!.key).toBeUndefined();
+
+    // Type a key while that load is pending: the retry must NOT be swallowed by the
+    // keyless in-flight promise, which is what happened before j998.
+    elements["#connect-key"].value = "typed-key";
+    elements["#connect-key"].dispatchEvent("input");
+
+    await vi.waitFor(() => {
+      expect(calls.length).toBe(2);
+    });
+    expect(calls[1]!.key).toBe("typed-key");
+
+    releaseKeyless?.();
+    await vi.waitFor(() => {
+      expect(elements["#connect-repo-select"].children.length).toBe(1);
+    });
+  });
+
 });
