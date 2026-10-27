@@ -128,7 +128,10 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
     if (!match?.groups) return null;
     owner = requiredGroup(match.groups, "owner");
     repo = requiredGroup(match.groups, "repo");
-    operation = requiredGroup(match.groups, "operation");
+    // `operation` is optional in TRACE_PATH: the base route GET /trace/:owner/:repo is a
+    // documented route that forwards to the repo coordinator, so only owner and repo are
+    // mandatory groups. Reading it directly keeps the base route working (j4z4).
+    operation = match.groups.operation;
   }
 
   const platform = url.searchParams.get("platform");
