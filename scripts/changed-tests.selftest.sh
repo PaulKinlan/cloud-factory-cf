@@ -47,7 +47,7 @@ case "${1:-}" in
        [ -n "${FAKE_VITEST_HANG:-}" ] && sleep 600
        # Simulate vitest exiting while a detached workerd keeps its output pipe open.
        if [ -n "${FAKE_VITEST_LEAK_PID:-}" ]; then
-         setsid sleep 20 &
+         setsid sleep 90 &
          echo "$!" > "$FAKE_VITEST_LEAK_PID"
        fi
        [ -n "${FAKE_BUILD_LOG:-}" ] && echo "run $(basename "$PWD")" >> "$FAKE_BUILD_LOG"
@@ -228,15 +228,17 @@ proc = subprocess.Popen(["bash", gate], cwd=repo, env=os.environ.copy(),
                         start_new_session=True)
 try:
     try:
-        stdout, stderr = proc.communicate(timeout=5)
-        # The runner has exited, but the gate's pipe must already have reached EOF.
+        # Wait for the gate itself first: on a loaded VM its startup may take >5s.
+        # Once it exits, EOF must be immediate even though the child is still alive.
+        proc.wait(timeout=40)
         child = int(open(pid_path).read())
         os.kill(child, 0)
+        stdout, stderr = proc.communicate(timeout=2)
         print("gate-pipe-EOF-with-survivor" if proc.returncode == 0 else "gate-failed")
         sys.stdout.buffer.write(stdout)
         sys.stderr.buffer.write(stderr)
     except (subprocess.TimeoutExpired, FileNotFoundError, ProcessLookupError, ValueError):
-        print("gate-pipe-held-by-survivor")
+        print("gate-pipe-held-by-survivor-or-runner-did-not-start")
 finally:
     try:
         os.kill(int(open(pid_path).read()), signal.SIGKILL)
