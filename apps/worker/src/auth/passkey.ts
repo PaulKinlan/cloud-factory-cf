@@ -34,6 +34,18 @@ export function base64UrlEncode(input: ArrayBuffer | Uint8Array): string {
     .replace(/=+$/, "");
 }
 
+/**
+ * WebCrypto's BufferSource wants bytes over a plain ArrayBuffer; since TypeScript 5.7 a
+ * `Uint8Array` is generic over `ArrayBufferLike`, and a view over a SharedArrayBuffer (or a
+ * value typed as such) is not assignable. Copying into a fresh ArrayBuffer-backed array is
+ * the one conversion that satisfies both the DOM and workers types (cloud-factory-cf-6xju).
+ */
+function bufferSource(bytes: Uint8Array): BufferSource {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy;
+}
+
 export function base64UrlDecode(input: string): Uint8Array {
   let base64 = input.replace(/-/g, "+").replace(/_/g, "/");
   while (base64.length % 4 !== 0) {
@@ -285,7 +297,7 @@ export async function handlePasskeyRoute(
       if (alg === -7) {
         await crypto.subtle.importKey(
           "spki",
-          spkiBytes,
+          bufferSource(spkiBytes),
           { name: "ECDSA", namedCurve: "P-256" },
           false,
           ["verify"],
@@ -293,7 +305,7 @@ export async function handlePasskeyRoute(
       } else if (alg === -257) {
         await crypto.subtle.importKey(
           "spki",
-          spkiBytes,
+          bufferSource(spkiBytes),
           { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
           false,
           ["verify"],
@@ -453,7 +465,7 @@ export async function handlePasskeyRoute(
 
     // Compute signed payload: authenticatorData || SHA-256(clientDataJSON)
     const clientDataHash = new Uint8Array(
-      await crypto.subtle.digest("SHA-256", base64UrlDecode(String(clientDataJSON))),
+      await crypto.subtle.digest("SHA-256", bufferSource(base64UrlDecode(String(clientDataJSON)))),
     );
     const signedData = new Uint8Array(authDataBytes.length + clientDataHash.length);
     signedData.set(authDataBytes, 0);
@@ -464,7 +476,7 @@ export async function handlePasskeyRoute(
       if (alg === -7) {
         const cryptoKey = await crypto.subtle.importKey(
           "spki",
-          spkiBytes,
+          bufferSource(spkiBytes),
           { name: "ECDSA", namedCurve: "P-256" },
           false,
           ["verify"],
@@ -473,13 +485,13 @@ export async function handlePasskeyRoute(
         verified = await crypto.subtle.verify(
           { name: "ECDSA", hash: "SHA-256" },
           cryptoKey,
-          p1363Sig,
-          signedData,
+          bufferSource(p1363Sig),
+          bufferSource(signedData),
         );
       } else if (alg === -257) {
         const cryptoKey = await crypto.subtle.importKey(
           "spki",
-          spkiBytes,
+          bufferSource(spkiBytes),
           { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
           false,
           ["verify"],
@@ -487,8 +499,8 @@ export async function handlePasskeyRoute(
         verified = await crypto.subtle.verify(
           "RSASSA-PKCS1-v1_5",
           cryptoKey,
-          sigBytes,
-          signedData,
+          bufferSource(sigBytes),
+          bufferSource(signedData),
         );
       }
     } catch (err) {
@@ -541,7 +553,10 @@ export async function handlePasskeyRoute(
       return Response.json({ ok: false, error: "Authentication required" }, { status: 401 });
     }
 
-    const subject = isRoot ? (url.searchParams.get("subject") ?? "__root__") : session.login;
+    // Narrowed once: `session` is a discriminated union, and the 401 guard above is a
+    // compound condition that does not narrow it at each later use (cloud-factory-cf-6xju).
+    const sessionLogin = session.ok ? session.login : null;
+    const subject = isRoot ? (url.searchParams.get("subject") ?? "__root__") : (sessionLogin ?? "__root__");
     if (!env.CREDENTIAL_BROKER) {
       return Response.json({ ok: true, passkeys: [] });
     }
@@ -571,7 +586,7 @@ export async function handlePasskeyRoute(
       return Response.json({ ok: false, error: "Missing passkey id parameter" }, { status: 400 });
     }
 
-    const subject = isRoot ? undefined : session.login;
+    const subject = isRoot ? undefined : (session.ok ? session.login : undefined);
     if (!env.CREDENTIAL_BROKER) {
       return Response.json({ ok: false, error: "CredentialBroker not available" }, { status: 503 });
     }
