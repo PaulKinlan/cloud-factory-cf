@@ -223,11 +223,32 @@ ensure_workspace_deps() { # <workspace> — the dist its own suite needs
   esac
 }
 
+# A single suite may not eat the whole gate budget, and its output must not be the gate's
+# own stdout: when a cloudflare/workerd pool fails to start, vitest reports "no tests" and
+# leaves a runner child behind, which keeps the inherited pipe open and makes a finished
+# gate look like a hang until the wrapper's bound kills it (cloud-factory-cf-8xzi: three
+# bound-kills at 900s for a delta whose suite had already errored at 115s). The suite
+# writes to a private log that is copied out afterwards, so a leaked child holds the log,
+# never the gate's stdout, and a bound that fires names itself instead of looking like a
+# timeout of everything.
+SUITE_BOUND="${CHANGED_TESTS_SUITE_BOUND:-900}"
+
 run_ws_tests() { # <workspace> <command...> — build what it needs, then run it there
   local ws=$1
   shift
   ensure_workspace_deps "$ws" || return 1
-  ( cd "$ws" && "$@" )
+  local log rc
+  log=$(mktemp "${TMPDIR:-/tmp}/changed-tests.XXXXXX")
+  ( cd "$ws" && timeout -k 15 "$SUITE_BOUND" "$@" ) >"$log" 2>&1
+  rc=$?
+  cat "$log"
+  rm -f "$log"
+  case "$rc" in
+    124|137|143)
+      echo "changed-tests: ${ws}: suite stopped after ${SUITE_BOUND}s (bound reached; a hung runner pool or a leaked child from it)" >&2
+      return 1 ;;
+  esac
+  return "$rc"
 }
 
 run_smoke() { # <reason>

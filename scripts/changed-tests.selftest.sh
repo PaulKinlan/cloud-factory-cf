@@ -43,6 +43,8 @@ JSON
 case "${1:-}" in
   list) [ -n "${FAKE_SELECT:-}" ] && printf '%s\n' $FAKE_SELECT; exit 0 ;;
   run) echo "FAKE vitest run in $(basename "$PWD")"
+       # A pool that never comes up: the gate must bound this suite and name it.
+       [ -n "${FAKE_VITEST_HANG:-}" ] && sleep 600
        [ -n "${FAKE_BUILD_LOG:-}" ] && echo "run $(basename "$PWD")" >> "$FAKE_BUILD_LOG"
        # The arguments of a run are recorded so a check can assert the gate names the
        # affected files instead of asking vitest to re-derive them with --changed.
@@ -189,6 +191,20 @@ check "the affected suites are run by name, not by a --changed run" 'test "$RC" 
 run_gate --list
 check "--list reports affected suites for a modified test file" 'test "$RC" -eq 0 && out_has "1 affected test file(s) (test-file delta"'
 unset FAKE_SELECT FAKE_VITEST_ARGS
+
+# 3b-iii. A suite that hangs is a NAMED failure inside its own bound. In the wild the
+#         cloudflare/workerd pool failed to start, vitest reported "no tests" and left a
+#         runner child holding the inherited pipe, so a finished gate looked like a hang
+#         until the wrapper's 900s bound killed it (cloud-factory-cf-8xzi, three times).
+reset_tree
+printf '\n// touch\n' >> "$FIX/apps/web/test/a.test.ts"
+export FAKE_SELECT="apps/web/test/a.test.ts"
+bound_start=$(date +%s)
+FAKE_VITEST_HANG=1 CHANGED_TESTS_SUITE_BOUND=2 run_gate
+bound_elapsed=$(( $(date +%s) - bound_start ))
+check "a hung suite is a named failure inside its own bound, not a gate-wide hang" 'test "$RC" -ne 0 && err_has "suite stopped after 2s" && test "$bound_elapsed" -lt 60'
+unset FAKE_SELECT
+reset_tree
 reset_tree
 
 # 3c. ... while a DELETED test file keeps the workspace-wide run, because --changed cannot
