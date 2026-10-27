@@ -33,6 +33,26 @@ describe("canvas doc", () => {
     assert.equal(doc.nodes.length, 1);
   });
 
+  // The app's sample documents (apps/web/src/main.ts) build a node with its settings and
+  // label in one call, e.g. createNode(doc, "source", pos, { config: { event: "push" }, label: "Push" }).
+  // The override must land on DEFAULT_CONFIG[kind], not replace it (cloud-factory-cf-6xju).
+  it("accepts config overrides and a label alongside the kind defaults", () => {
+    const doc = createDoc();
+    const node = createNode(
+      doc,
+      "source",
+      { x: 0, y: 0 },
+      { idGen, config: { event: "pull_request.opened" }, label: "PR opened" },
+    );
+    assert.equal(node.label, "PR opened");
+    assert.equal(node.config["provider"], "github"); // untouched default
+    assert.equal(node.config["event"], "pull_request.opened"); // overridden
+    // An explicit unknown key is kept as given here; setNodeConfig is what validates keys.
+    const sink = createNode(doc, "sink", { x: 0, y: 0 }, { idGen, config: { type: "telemetry" } });
+    assert.equal(sink.config["type"], "telemetry");
+    assert.equal(doc.nodes.length, 2);
+  });
+
   it("moves, renames and configures a node, refusing invalid values", () => {
     const doc = createDoc();
     const node = createNode(doc, "source", { x: 0, y: 0 }, { idGen });

@@ -69,11 +69,18 @@ export function createDoc(): CanvasDoc {
   return { version: 1, nodes: [], edges: [], view: { x: 0, y: 0, zoom: 1 } };
 }
 
+export interface CreateNodeOptions {
+  idGen?: IdGenerator;
+  label?: string;
+  /** Node-specific settings merged over DEFAULT_CONFIG[kind] (cloud-factory-cf-6xju). */
+  config?: Record<string, string>;
+}
+
 export function createNode(
   doc: CanvasDoc,
   kind: NodeKind,
   position: { x: number; y: number },
-  options: { idGen?: IdGenerator; label?: string } = {},
+  options: CreateNodeOptions = {},
 ): CanvasNode {
   const idGen = options.idGen ?? defaultIdGenerator;
   const node: CanvasNode = {
@@ -82,7 +89,7 @@ export function createNode(
     label: options.label ?? KIND_LABELS[kind],
     x: Math.round(position.x),
     y: Math.round(position.y),
-    config: { ...DEFAULT_CONFIG[kind] },
+    config: { ...DEFAULT_CONFIG[kind], ...(options.config ?? {}) },
   };
   doc.nodes.push(node);
   return node;
