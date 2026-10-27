@@ -657,7 +657,10 @@ describe("heartbeat", () => {
         expect(session.state.reconnectAttempts).toBe(0);
         expect(session.state.status).toBe("live");
       },
-      { timeout: 1000, interval: 20 },
+      // Eventual state, not a latency budget: under a loaded VM (or with test files running
+      // in parallel) the reconnect handshake can take longer than a second, and the old
+      // 1s bound failed with reconnectAttempts 1 instead of 0 while the behaviour was fine.
+      { timeout: 5000, interval: 20 },
     );
     session.disconnect();
   });
