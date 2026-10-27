@@ -463,8 +463,26 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     }
   });
 
-  async function loadAuthorizedRepos(owner: string): Promise<void> {
-    if (!owner || repoSelect === null) return;
+  // One in-flight /api/repos request per owner (cloud-factory-cf-j998). The connected=1
+  // bootstrap loads the list and then calls open(); open() could not yet see the
+  // `loadedRepos` the first response had not written, so it loaded the same owner again.
+  // Two responses meant two renders, and because a render appends its options after
+  // resetting the placeholder, the select ended up with two entries where bead 7gm's
+  // assertion expects one. Concurrent callers now share the request; it clears on settle
+  // so a genuinely later reload (new control key, new owner) still happens.
+  let reposInFlight: { owner: string; promise: Promise<void> } | null = null;
+
+  function loadAuthorizedRepos(owner: string): Promise<void> {
+    if (!owner || repoSelect === null) return Promise.resolve();
+    if (reposInFlight !== null && reposInFlight.owner === owner) return reposInFlight.promise;
+    const promise: Promise<void> = fetchAndRenderRepos(owner).finally(() => {
+      if (reposInFlight !== null && reposInFlight.promise === promise) reposInFlight = null;
+    });
+    reposInFlight = { owner, promise };
+    return promise;
+  }
+
+  async function fetchAndRenderRepos(owner: string): Promise<void> {
     try {
       const headers: Record<string, string> = {};
       const key = keyInput?.value.trim() ?? "";
