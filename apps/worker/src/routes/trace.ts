@@ -102,22 +102,33 @@ export async function verifyTraceTicket(
   return true;
 }
 
+function requiredGroup(groups: Record<string, string | undefined>, name: string): string {
+  const value = groups[name];
+  if (value === undefined) {
+    throw new Error(`trace route pattern matched without a "${name}" group`);
+  }
+  return value;
+}
+
 export async function handleTrace(request: Request, env: Env, url: URL): Promise<Response | null> {
   let owner: string;
   let repo: string;
   let operation: string | undefined;
 
+  // `groups` is `Record<string, string | undefined>` under noUncheckedIndexedAccess, and
+  // these patterns make each group mandatory, so a missing one is a route/regex mismatch
+  // rather than an empty owner - say so instead of silently routing to "" (6xju).
   const apiMatch = API_TRACE_TICKET_PATH.exec(url.pathname);
   if (apiMatch?.groups) {
-    owner = apiMatch.groups.owner;
-    repo = apiMatch.groups.repo;
+    owner = requiredGroup(apiMatch.groups, "owner");
+    repo = requiredGroup(apiMatch.groups, "repo");
     operation = "ticket";
   } else {
     const match = TRACE_PATH.exec(url.pathname);
     if (!match?.groups) return null;
-    owner = match.groups.owner;
-    repo = match.groups.repo;
-    operation = match.groups.operation;
+    owner = requiredGroup(match.groups, "owner");
+    repo = requiredGroup(match.groups, "repo");
+    operation = requiredGroup(match.groups, "operation");
   }
 
   const platform = url.searchParams.get("platform");
@@ -165,7 +176,7 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
     }
 
     if (!socketAuthorised) {
-      if (authz && !ticket) {
+      if (authz && !authz.ok && !ticket) {
         return authzDenial(authz, { unauthorised: "not authorised to read the execution trace" });
       }
       return Response.json({ ok: false, error: "not authorised to read the execution trace" }, { status: 401 });
