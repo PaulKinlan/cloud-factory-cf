@@ -45,6 +45,12 @@ export default defineConfig({
     // regression (cloud-factory-cf-t8mu). 60s still fails a genuinely hung test but gives
     // the DO round-trips room on a busy machine.
     testTimeout: 60_000,
+    // Parallel, but BOUNDED. Each test file boots its own workerd, so letting vitest start
+    // one per selected file on a 2 vCPU VM is a startup stampede: two consecutive runs died
+    // with "Timeout starting cloudflare-pool runner" and executed no tests at all
+    // (transform 0ms, import 0ms). Two at a time still removes the serial hang (2 files:
+    // 292s in parallel versus a run killed at 351s serial) without stampeding the pool.
+    maxWorkers: 2,
     // Files run in parallel again (j998): serial execution is what turns "slow" into
     // "never starts" on this VM - two small files took 292s in parallel versus a run
     // killed at 351s serial. The read-after-write assertions that parallelism exposed
