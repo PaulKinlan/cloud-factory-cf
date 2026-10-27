@@ -17,6 +17,13 @@ export interface ServiceActionDefinition {
   route: string;
   /** Parameters that may appear in the path. */
   pathParams?: readonly string[];
+  /**
+   * Path parameters that are opaque ids rather than positive integers. A beads task id
+   * is a slug (`cloud-factory-cf-8xzi`), so the integer rule refused every real
+   * `task.update` (cloud-factory-cf-rjei). Such a value is still bounded and must not
+   * carry a path separator, so the route cannot be re-aimed.
+   */
+  idParams?: readonly string[];
   /** Parameters copied into the JSON request body. */
   bodyParams?: readonly string[];
   /** Custom headers for this specific action (e.g. accept for diff). */
@@ -72,13 +79,19 @@ export const SERVICES: Readonly<Record<string, ServiceDefinition>> = {
         method: "POST",
         route: "/repos/{repository}/pulls/{number}/reviews",
         pathParams: ["number"],
-        bodyParams: ["body", "event"],
+        // `commit_id` pins the review to the commit it describes, which the SDK's default
+        // sink forwards from `payload.commitSha` (cloud-factory-cf-v1y0).
+        bodyParams: ["body", "event", "commit_id"],
         allowMultiline: true,
       },
       "issue.create": {
         method: "POST",
         route: "/repos/{repository}/issues",
         bodyParams: ["title", "body"],
+        // An issue body is a report, not a one-liner, and the SDK's default sink
+        // forwards `payload.body` verbatim (cloud-factory-cf-g9aw follow-up: the strict
+        // single-line rule refused every realistic body).
+        allowMultiline: true,
       },
       "pr.comment": {
         method: "POST",
@@ -161,12 +174,18 @@ export const SERVICES: Readonly<Record<string, ServiceDefinition>> = {
         method: "POST",
         route: "/repos/{repository}/tasks",
         bodyParams: ["title", "description", "priority", "assignee", "status"],
+        // A task description carries steps and acceptance criteria
+        // (cloud-factory-cf-g9aw follow-up).
+        allowMultiline: true,
       },
       "task.update": {
         method: "PATCH",
         route: "/repos/{repository}/tasks/{taskId}",
         pathParams: ["taskId"],
+        // A beads task id is a slug, not a number.
+        idParams: ["taskId"],
         bodyParams: ["title", "description", "priority", "assignee", "status"],
+        allowMultiline: true,
       },
     },
   },
@@ -234,6 +253,14 @@ export function resolveRequest(input: ResolveInput): ResolvedRequest {
 
   for (const name of action.pathParams ?? []) {
     const value = params[name];
+    if ((action.idParams ?? []).includes(name)) {
+      const id = typeof value === "number" ? String(value) : typeof value === "string" ? value : "";
+      if (!isSafePathId(id)) {
+        return { ok: false, status: 400, reason: `parameter ${name} must be an id` };
+      }
+      pathValues[name] = id;
+      continue;
+    }
     const parsed =
       typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
     if (!Number.isInteger(parsed) || parsed <= 0) {
@@ -344,6 +371,14 @@ export function encodeRepository(repository: string, encoding: ServiceDefinition
 
 /** The ceiling for a builder-owned string param (a review prompt can be large). */
 const MAX_BUILT_BODY_CHARS = 400_000;
+
+/**
+ * A path parameter that is an opaque id: bounded, and free of `/`, `?`, `#` and a leading
+ * dot, so it cannot turn a policy route into a different one (cloud-factory-cf-rjei).
+ */
+function isSafePathId(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
+}
 
 /**
  * A value a body builder may carry: newlines and tabs are fine (a prompt, a review),
