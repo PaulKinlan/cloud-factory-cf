@@ -45,6 +45,11 @@ case "${1:-}" in
   run) echo "FAKE vitest run in $(basename "$PWD")"
        # A pool that never comes up: the gate must bound this suite and name it.
        [ -n "${FAKE_VITEST_HANG:-}" ] && sleep 600
+       # Simulate vitest exiting while a detached workerd keeps its output pipe open.
+       if [ -n "${FAKE_VITEST_LEAK_PID:-}" ]; then
+         setsid sleep 20 &
+         echo "$!" > "$FAKE_VITEST_LEAK_PID"
+       fi
        [ -n "${FAKE_BUILD_LOG:-}" ] && echo "run $(basename "$PWD")" >> "$FAKE_BUILD_LOG"
        # The arguments of a run are recorded so a check can assert the gate names the
        # affected files instead of asking vitest to re-derive them with --changed.
@@ -205,6 +210,45 @@ bound_elapsed=$(( $(date +%s) - bound_start ))
 check "a hung suite is a named failure inside its own bound, not a gate-wide hang" 'test "$RC" -ne 0 && err_has "suite stopped after 2s" && test "$bound_elapsed" -lt 60'
 unset FAKE_SELECT
 reset_tree
+
+# 3b-iv. The runner can EXIT while a detached child still holds its stdout/stderr.
+# Read the gate through an actual pipe: redirecting to a file would conceal this
+# regression. The Python probe always kills the survivor, including on failure.
+printf '\n// touch\n' >> "$FIX/apps/web/test/a.test.ts"
+export FAKE_SELECT="apps/web/test/a.test.ts" FAKE_VITEST_LEAK_PID="$TMP/leak.pid"
+python3 - "$FIX" "$GATE" "$FAKE_VITEST_LEAK_PID" > "$OUT" 2> "$ERR" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+repo, gate, pid_path = sys.argv[1:]
+proc = subprocess.Popen(["bash", gate], cwd=repo, env=os.environ.copy(),
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        start_new_session=True)
+try:
+    try:
+        stdout, stderr = proc.communicate(timeout=5)
+        # The runner has exited, but the gate's pipe must already have reached EOF.
+        child = int(open(pid_path).read())
+        os.kill(child, 0)
+        print("gate-pipe-EOF-with-survivor" if proc.returncode == 0 else "gate-failed")
+        sys.stdout.buffer.write(stdout)
+        sys.stderr.buffer.write(stderr)
+    except (subprocess.TimeoutExpired, FileNotFoundError, ProcessLookupError, ValueError):
+        print("gate-pipe-held-by-survivor")
+finally:
+    try:
+        os.kill(int(open(pid_path).read()), signal.SIGKILL)
+    except (FileNotFoundError, ProcessLookupError, ValueError):
+        pass
+    if proc.poll() is None:
+        os.killpg(proc.pid, signal.SIGKILL)
+    proc.communicate(timeout=2)
+PY
+RC=$?
+check "a leaked runner child cannot hold the finished gate's output pipe" 'test "$RC" -eq 0 && out_has "gate-pipe-EOF-with-survivor"'
+unset FAKE_SELECT FAKE_VITEST_LEAK_PID
 reset_tree
 
 # 3c. ... while a DELETED test file keeps the workspace-wide run, because --changed cannot
