@@ -45,6 +45,9 @@ export default defineConfig({
     // regression (cloud-factory-cf-t8mu). 60s still fails a genuinely hung test but gives
     // the DO round-trips room on a busy machine.
     testTimeout: 60_000,
-    fileParallelism: false,
+    // Files run in parallel again (j998): serial execution is what turns "slow" into
+    // "never starts" on this VM - two small files took 292s in parallel versus a run
+    // killed at 351s serial. The read-after-write assertions that parallelism exposed
+    // are fixed in the same branch (worker.test.ts) and in 8xzi (audit.test.ts).
   },
 });
