@@ -214,3 +214,33 @@ describe("tenant-bound control-plane sessions (cloud-factory-cf-e1ql)", () => {
     expect(crossTree.status).toBe(403);
   });
 });
+
+/**
+ * A GitHub login that collides with a reserved CredentialBroker scope
+ * (cloud-factory-cf-htc0).
+ *
+ * User settings are addressed by `idFromName(login.toLowerCase())`, and "default" /
+ * "global" are the reserved scopes that hold PLATFORM settings (github.private_key,
+ * webhook.secret, platform.owners). A login named "default" therefore received a
+ * delegation for `repository: "default"` and could read and write the platform scope.
+ */
+describe("reserved broker scopes are not tenant addresses (cloud-factory-cf-htc0)", () => {
+  it("refuses platform-scope names as a user-settings owner, whatever the casing", async () => {
+    for (const address of ["default", "DEFAULT", "Default", "global"]) {
+      const res = await call(`/api/admin/user-settings/${address}`, {
+        headers: { "x-factory-control-key": CONTROL_KEY },
+      });
+      expect(res.status, `${address} must be refused as a tenant`).toBe(403);
+      const body = (await res.json()) as { ok: boolean; error: string };
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain("reserved broker scope");
+    }
+  });
+
+  it("still forwards a real login to its own broker scope", async () => {
+    const res = await call("/api/admin/user-settings/octodev", {
+      headers: { "x-factory-control-key": CONTROL_KEY },
+    });
+    expect(res.status).not.toBe(403);
+  });
+});

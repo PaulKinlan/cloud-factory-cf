@@ -417,7 +417,15 @@ describe("mountConnectGate and repo selector population (cloud-factory-cf-7gm)",
       textContent: "",
       className: "",
       hidden: true,
-      innerHTML: "",
+      // Assigning innerHTML replaces the children in a real element. A plain property let a
+      // second render append a duplicate option instead, which hid a double load of
+      // /api/repos and turned the smoke set red on main (cloud-factory-cf-xxso).
+      get innerHTML(): string {
+        return "";
+      },
+      set innerHTML(_html: string) {
+        children.length = 0;
+      },
       href: "",
       dataset: {} as Record<string, string>,
       options: children,
@@ -595,6 +603,11 @@ describe("mountConnectGate and repo selector population (cloud-factory-cf-7gm)",
       await vi.waitFor(() => {
         expect(elements["#connect-repo-select"].hidden).toBe(false);
       });
+
+      // The bootstrap and open() both ask for the list while the first fetch is pending;
+      // that is one request, not two (cloud-factory-cf-xxso).
+      const repoCalls = fetchImpl.mock.calls.filter((call) => String(call[0]).includes("/api/repos"));
+      expect(repoCalls).toHaveLength(1);
 
       expect(elements["#connect-repo-select"].hidden).toBe(false);
       expect(elements["#connect-repo-select"].children.length).toBe(1);
