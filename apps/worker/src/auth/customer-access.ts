@@ -66,3 +66,18 @@ export function isLoginAllowed(
   if (isRootLogin(login, env)) return true;
   return policy.allowedUsers.includes(login.trim().toLowerCase());
 }
+
+/**
+ * The 403 a sign-in path returns when the customer policy does not admit `login`, or null
+ * when it does. One helper so every session-minting path - the OAuth callback and the two
+ * passkey paths - asks the same question, which is what rev-yvlp caught the passkey login
+ * skipping (cloud-factory-cf-yvlp).
+ */
+export async function customerAccessDenial(env: Env, login: string): Promise<Response | null> {
+  const policy = await resolveCustomerAccess(env);
+  if (isLoginAllowed(policy, login, env)) return null;
+  return Response.json(
+    { ok: false, error: "not_allowed_on_this_deployment" },
+    { status: 403 },
+  );
+}
