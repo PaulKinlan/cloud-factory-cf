@@ -121,7 +121,8 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
   }
 
   const platform = url.searchParams.get("platform");
-  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY ?? env.WEBHOOK_SECRET;
+  // Webhook credentials authenticate incoming events, never trace tickets.
+  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
 
   if (operation === "ticket") {
     if (request.method !== "POST") {
