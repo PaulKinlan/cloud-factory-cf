@@ -223,11 +223,32 @@ ensure_workspace_deps() { # <workspace> — the dist its own suite needs
   esac
 }
 
+# A single suite may not eat the whole gate budget, and its output must not be the gate's
+# own stdout: when a cloudflare/workerd pool fails to start, vitest reports "no tests" and
+# leaves a runner child behind, which keeps the inherited pipe open and makes a finished
+# gate look like a hang until the wrapper's bound kills it (cloud-factory-cf-8xzi: three
+# bound-kills at 900s for a delta whose suite had already errored at 115s). The suite
+# writes to a private log that is copied out afterwards, so a leaked child holds the log,
+# never the gate's stdout, and a bound that fires names itself instead of looking like a
+# timeout of everything.
+SUITE_BOUND="${CHANGED_TESTS_SUITE_BOUND:-900}"
+
 run_ws_tests() { # <workspace> <command...> — build what it needs, then run it there
   local ws=$1
   shift
   ensure_workspace_deps "$ws" || return 1
-  ( cd "$ws" && "$@" )
+  local log rc
+  log=$(mktemp "${TMPDIR:-/tmp}/changed-tests.XXXXXX")
+  ( cd "$ws" && timeout -k 15 "$SUITE_BOUND" "$@" ) >"$log" 2>&1
+  rc=$?
+  cat "$log"
+  rm -f "$log"
+  case "$rc" in
+    124|137|143)
+      echo "changed-tests: ${ws}: suite stopped after ${SUITE_BOUND}s (bound reached; a hung runner pool or a leaked child from it)" >&2
+      return 1 ;;
+  esac
+  return "$rc"
 }
 
 run_smoke() { # <reason>
@@ -268,13 +289,37 @@ if [ "$sources_n" -eq 0 ] && [ "$tests_n" -eq 0 ]; then
   # coverage UNKNOWN). Run a fixed smoke set so the verdict has evidence.
   echo "changed-tests: $(echo "$changed" | wc -l | tr -d ' ') changed path(s), none of them source or test:"
   echo "$changed" | sed 's/^/  /'
+  # A delta confined to the gate's own decision logic cannot change app behaviour, and the
+  # precise check for it is the self-test. The browser/workerd smoke set buys nothing there
+  # and cost a whole 900s bound on a loaded VM, which killed the gate with no verdict
+  # (cloud-factory-cf-xszd). Any other path in the delta keeps the smoke set: that is what
+  # catches a gate that fails open on a real workspace.
+  selftest_only=0
+  if [ "$selftest_wanted" -eq 1 ] && ! echo "$changed" | grep -qvxE 'scripts/changed-tests(\.selftest)?\.sh'; then
+    selftest_only=1
+  fi
   if [ "$LIST" -eq 1 ]; then
+    if [ "$selftest_only" -eq 1 ]; then
+      echo "changed-tests: ${SELFTEST}: gate self-test only (delta is confined to the gate's own logic)"
+      exit 0
+    fi
     [ "$selftest_wanted" -eq 1 ] && echo "changed-tests: ${SELFTEST}: gate self-test"
     echo "changed-tests: smoke = apps/web (whole node suite), apps/worker test/worker.test.ts test/assets.test.ts"
     exit 0
   fi
   smoke_status=0
   if [ "$selftest_wanted" -eq 1 ]; then run_selftest || smoke_status=1; fi
+  if [ "$selftest_only" -eq 1 ]; then
+    # Positive evidence of what ran. Without it the coverage reader sees a log that names
+    # no suite and reports the changed files as "NOT demonstrated to be exercised", which
+    # is the opposite of what happened: the self-test is the whole check for this delta.
+    if [ "$smoke_status" -eq 0 ]; then
+      echo "fast-gate: passed: ${SELFTEST}"
+    else
+      echo "fast-gate: failed: ${SELFTEST}"
+    fi
+    exit "$smoke_status"
+  fi
   run_smoke "nothing mapped to a suite" || smoke_status=1
   exit "$smoke_status"
 fi
@@ -360,9 +405,11 @@ for ws in "${WS_ORDER[@]}"; do
       [ -f "$path" ] || test_gone+="$path"$'\n'
     done <<< "$ws_tests"
 
+    selected_files=""
     selected=0
     if [ -z "$test_gone" ] && [ "$kind" = "vitest" ]; then
-      selected=$( (cd "$ws" && npx vitest list --changed "$BASE" --filesOnly 2>/dev/null) | grep -cE '\.(test|spec)\.[cm]?[jt]sx?$' || true)
+      selected_files=$( (cd "$ws" && npx vitest list --changed "$BASE" --filesOnly 2>/dev/null) | grep -E '\.(test|spec)\.[cm]?[jt]sx?$' || true)
+      selected=$(printf '%s' "$selected_files" | grep -c . || true)
       case "$selected" in ''|*[!0-9]*) selected=0 ;; esac
     fi
 
@@ -373,12 +420,20 @@ for ws in "${WS_ORDER[@]}"; do
       # unrelated landings KILLED at it (cloud-factory-cf-67sy).
       if [ "$LIST" -eq 1 ]; then
         echo "changed-tests: ${ws}: ${selected} affected test file(s) (test-file delta)"
-        (cd "$ws" && npx vitest list --changed "$BASE" --filesOnly 2>/dev/null) | sed 's/^/  /'
+        printf '%s\n' "$selected_files" | sed 's/^/  /'
         continue
       fi
       echo "changed-tests: ${ws}: ${selected} affected test file(s) (test-file delta: $(echo "$ws_tests" | tr '\n' ' '))"
       ran=$((ran + 1))
-      run_ws_tests "$ws" npx vitest run --changed "$BASE" || status=1
+      # Name the selected files instead of asking vitest to re-derive them with
+      # `--changed`. Two reasons: it is one whole vitest bootstrap cheaper per gate
+      # (the selection above already paid for a `list --changed`), and in apps/worker
+      # the `--changed` run never reached a test at all - the banner printed and then
+      # nothing for 900s, twice, killing the fast gate at its bound (8xzi's delta),
+      # while the very same file runs by name in about two minutes.
+      files=()
+      while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done <<< "$selected_files"
+      run_ws_tests "$ws" npx vitest run "${files[@]}" || status=1
       continue
     fi
 

@@ -43,7 +43,16 @@ JSON
 case "${1:-}" in
   list) [ -n "${FAKE_SELECT:-}" ] && printf '%s\n' $FAKE_SELECT; exit 0 ;;
   run) echo "FAKE vitest run in $(basename "$PWD")"
+       # A pool that never comes up: the gate must bound this suite and name it.
+       [ -n "${FAKE_VITEST_HANG:-}" ] && sleep 600
+       # Simulate vitest exiting while a detached workerd keeps its output pipe open.
+       if [ -n "${FAKE_VITEST_LEAK_PID:-}" ]; then
+         setsid bash -c 'echo $$ > "$FAKE_VITEST_LEAK_PID"; exec sleep 120' &
+       fi
        [ -n "${FAKE_BUILD_LOG:-}" ] && echo "run $(basename "$PWD")" >> "$FAKE_BUILD_LOG"
+       # The arguments of a run are recorded so a check can assert the gate names the
+       # affected files instead of asking vitest to re-derive them with --changed.
+       [ -n "${FAKE_VITEST_ARGS:-}" ] && echo "args $(basename "$PWD") ${*:2}" >> "$FAKE_VITEST_ARGS"
        exit "${FAKE_VITEST_RC:-0}" ;;
   *) exit 0 ;;
 esac
@@ -124,7 +133,7 @@ SH
 
 # run_gate [env assignments...] -- args...
 run_gate() {
-  ( cd "$FIX" && timeout -k 5 60 bash "$GATE" "$@" ) >"$OUT" 2>"$ERR"
+  ( cd "$FIX" && timeout -k 5 "${CHANGED_TESTS_SELFTEST_BOUND:-60}" bash "$GATE" "$@" ) >"$OUT" 2>"$ERR"
   RC=$?
 }
 # reset the fixture's working tree between scenarios
@@ -173,11 +182,74 @@ reset_tree
 #     KILLED at it (cloud-factory-cf-67sy).
 printf '\n// touch\n' >> "$FIX/apps/web/test/a.test.ts"
 export FAKE_SELECT="apps/web/test/a.test.ts"
+export FAKE_VITEST_ARGS="$TMP/vitest.args"
 run_gate
 check "a modified test file runs the affected suites, not the whole suite" 'test "$RC" -eq 0 && out_has "1 affected test file(s) (test-file delta" && out_has "FAKE vitest run in web"'
+# 3b-ii. The affected suites are passed BY NAME. A `--changed` run re-derives the
+#        selection from git inside the workspace, and in apps/worker that run never
+#        reached a test: the banner printed, then nothing for the whole 900s bound, and
+#        the fast gate was KILLED at it twice (cloud-factory-cf-8xzi's delta), while the
+#        same file runs by name in about two minutes. Naming them is also one vitest
+#        bootstrap cheaper, which is the point of the fast tier.
+check "the affected suites are run by name, not by a --changed run" 'test "$RC" -eq 0 && grep -qx "args web apps/web/test/a.test.ts" "$FAKE_VITEST_ARGS" && ! grep -q -- "--changed" "$FAKE_VITEST_ARGS"'
 run_gate --list
 check "--list reports affected suites for a modified test file" 'test "$RC" -eq 0 && out_has "1 affected test file(s) (test-file delta"'
+unset FAKE_SELECT FAKE_VITEST_ARGS
+
+# 3b-iii. A suite that hangs is a NAMED failure inside its own bound. In the wild the
+#         cloudflare/workerd pool failed to start, vitest reported "no tests" and left a
+#         runner child holding the inherited pipe, so a finished gate looked like a hang
+#         until the wrapper's 900s bound killed it (cloud-factory-cf-8xzi, three times).
+reset_tree
+printf '\n// touch\n' >> "$FIX/apps/web/test/a.test.ts"
+export FAKE_SELECT="apps/web/test/a.test.ts"
+bound_start=$(date +%s)
+FAKE_VITEST_HANG=1 CHANGED_TESTS_SUITE_BOUND=2 run_gate
+bound_elapsed=$(( $(date +%s) - bound_start ))
+check "a hung suite is a named failure inside its own bound, not a gate-wide hang" 'test "$RC" -ne 0 && err_has "suite stopped after 2s" && test "$bound_elapsed" -lt 60'
 unset FAKE_SELECT
+reset_tree
+
+# 3b-iv. The runner can EXIT while a detached child still holds its stdout/stderr.
+# Read the gate through an actual pipe: redirecting to a file would conceal this
+# regression. The Python probe always kills the survivor, including on failure.
+printf '\n// touch\n' >> "$FIX/apps/web/test/a.test.ts"
+export FAKE_SELECT="apps/web/test/a.test.ts" FAKE_VITEST_LEAK_PID="$TMP/leak.pid"
+python3 - "$FIX" "$GATE" "$FAKE_VITEST_LEAK_PID" > "$OUT" 2> "$ERR" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+repo, gate, pid_path = sys.argv[1:]
+proc = subprocess.Popen(["bash", gate], cwd=repo, env=os.environ.copy(),
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        start_new_session=True)
+try:
+    try:
+        # Wait for the gate itself first: on a loaded VM its startup may take >5s.
+        # Once it exits, EOF must be immediate even though the child is still alive.
+        proc.wait(timeout=40)
+        child = int(open(pid_path).read())
+        os.kill(child, 0)
+        stdout, stderr = proc.communicate(timeout=2)
+        print("gate-pipe-EOF-with-survivor" if proc.returncode == 0 else "gate-failed")
+        sys.stdout.buffer.write(stdout)
+        sys.stderr.buffer.write(stderr)
+    except (subprocess.TimeoutExpired, FileNotFoundError, ProcessLookupError, ValueError):
+        print("gate-pipe-held-by-survivor-or-runner-did-not-start")
+finally:
+    try:
+        os.kill(int(open(pid_path).read()), signal.SIGKILL)
+    except (FileNotFoundError, ProcessLookupError, ValueError):
+        pass
+    if proc.poll() is None:
+        os.killpg(proc.pid, signal.SIGKILL)
+    proc.communicate(timeout=2)
+PY
+RC=$?
+check "a leak-child mutant cannot hold the finished gate's output pipe" 'test "$RC" -eq 0 && out_has "gate-pipe-EOF-with-survivor" && out_has "FAKE vitest run in web" && out_has "1 affected test file(s)"'
+unset FAKE_SELECT FAKE_VITEST_LEAK_PID
 reset_tree
 
 # 3c. ... while a DELETED test file keeps the workspace-wide run, because --changed cannot
@@ -193,7 +265,9 @@ reset_tree
 printf '// now failing\n' >> "$FIX/packages/nodep/tests/n.test.ts"
 printf '\n// touch\n' >> "$FIX/apps/web/src/m.ts"
 export FAKE_SELECT="apps/web/test/a.test.ts" FAKE_NPM_RC=1
-run_gate
+# Two workspaces plus a cold dist build exceed the default 60s fixture bound
+# under VM contention; give this case room without slowing the green path.
+CHANGED_TESTS_SELFTEST_BOUND=120 run_gate
 unset FAKE_SELECT FAKE_NPM_RC
 check "test change is not skipped by another workspace's source change" 'test "$RC" -ne 0 && out_has "FAKE vitest run in web" && out_has "FAKE npm test in nodep"'
 reset_tree
@@ -287,6 +361,25 @@ reset_tree
 printf 'more docs\n' >> "$FIX/docs/speed.md"
 run_gate
 check "docs-only delta runs the smoke set" 'test "$RC" -eq 0 && out_has "FAKE vitest run in web" && out_has "FAKE vitest run in worker"'
+reset_tree
+
+# 8b. A delta confined to the gate's own logic runs the self-test and NOT the app smoke
+#     set. The smoke set (whole web suite + worker workerd suite) buys nothing for a gate
+#     change and cost a full 900s bound on a loaded VM, killing the gate with no verdict
+#     (cloud-factory-cf-xszd).
+mkdir -p "$FIX/scripts"
+printf '#!/usr/bin/env bash\necho "STUB selftest"\nexit 0\n' > "$FIX/scripts/changed-tests.selftest.sh"
+: > "$FIX/scripts/changed-tests.sh"
+( cd "$FIX" && git add scripts && git commit -qm "gate scripts" )
+printf '\n# touch\n' >> "$FIX/scripts/changed-tests.sh"
+run_gate
+check "a delta confined to the gate's own logic runs the self-test, not the app smoke set" 'test "$RC" -eq 0 && out_has "gate self-test" && out_has "STUB selftest" && out_lacks "FAKE vitest run"'
+# The run names its suite, so a coverage reader can see what was exercised instead of
+# reporting the changed files as NOT demonstrated (a log that names no suite reads as
+# "nothing ran", which for this delta is exactly backwards).
+check "the self-test-only run names the suite it executed" 'out_has "fast-gate: passed: scripts/changed-tests.selftest.sh"'
+rm -f "$FIX/scripts/changed-tests.sh" "$FIX/scripts/changed-tests.selftest.sh"
+( cd "$FIX" && git add -A scripts && git commit -qm "drop gate stubs" )
 reset_tree
 
 # 9. A test file no workspace runs is named, and the smoke set still runs (never a red).
