@@ -1,6 +1,7 @@
 import type { Env } from "../env";
 import { sameSecret } from "../secrets";
 import { mintSessionToken, SESSION_COOKIE, SESSION_TTL_SECONDS } from "../routes/auth";
+import { customerAccessDenial } from "./customer-access";
 import { readSession } from "../routes/auth";
 
 export const WEBAUTHN_CHALLENGE_COOKIE = "cf_webauthn_challenge";
@@ -303,6 +304,11 @@ export async function handlePasskeyRoute(
     }
 
     // Mint session cookie for the user
+    // A passkey proves an identity; it does not prove this deployment admits it
+    // (cloud-factory-cf-yvlp, rev-yvlp finding).
+    const deniedOnRegister = await customerAccessDenial(env, String(verifiedCookie.subject));
+    if (deniedOnRegister) return deniedOnRegister;
+
     const sessionToken = await mintSessionToken(signingKey, verifiedCookie.subject);
     const isSecure = url.protocol === "https:";
     const sessionCookieHeader = `${SESSION_COOKIE}=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}`;
@@ -483,6 +489,12 @@ export async function handlePasskeyRoute(
 
     // Mint session cookie for the passkey subject
     const subject = String(passkey.subject);
+
+    // Same customer gate as the OAuth callback and the registration path: the passkey is
+    // valid, but policy can still refuse this login (rev-yvlp).
+    const deniedOnAssertion = await customerAccessDenial(env, subject);
+    if (deniedOnAssertion) return deniedOnAssertion;
+
     const sessionToken = await mintSessionToken(signingKey, subject);
     const isSecure = url.protocol === "https:";
     const sessionCookieHeader = `${SESSION_COOKIE}=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}`;
