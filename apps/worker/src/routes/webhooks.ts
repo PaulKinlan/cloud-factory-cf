@@ -1,5 +1,5 @@
 import type { Env } from "../env";
-import { MAX_WEBHOOK_BYTES } from "../webhooks";
+import { MAX_WEBHOOK_BYTES, verifyGithubSignature } from "../webhooks";
 import { resolveRepositoryKey } from "../repo-coordinator-addressing";
 
 export const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab|gitea)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
@@ -107,6 +107,34 @@ export async function handleGlobalGithubWebhook(
   }
 
   const bodyText = await request.text();
+
+  // Verify BEFORE anything is read out of the body or recorded (cloud-factory-cf-r5ns).
+  // This endpoint has no repository in its path, so it never reaches the per-repository
+  // secret the RepoCoordinator resolves through the broker: the deployment's own app
+  // webhook secret is the only credential that can authenticate an app-level delivery
+  // (docs/deploy.md §6 - unset means 503, fail closed).
+  //
+  // The installation branch below writes repositories straight into the OrgCoordinator,
+  // with no second verifier behind it, so an unauthenticated delivery there could seed
+  // installation repositories (including their `private` flag) for any account login it
+  // named. The repository branch is verified again by the coordinator it forwards to;
+  // this check refuses the forgery at the edge instead of spending a DO invocation on it.
+  const secret = env.WEBHOOK_SECRET;
+  if (!secret) {
+    return Response.json(
+      { ok: false, error: "webhook secret not configured" },
+      { status: 503 },
+    );
+  }
+  const signed = await verifyGithubSignature(
+    secret,
+    bodyText,
+    request.headers.get("x-hub-signature-256"),
+  );
+  if (!signed) {
+    return Response.json({ ok: false, error: "invalid signature" }, { status: 401 });
+  }
+
   let payload: Record<string, any> = {};
   try {
     payload = JSON.parse(bodyText);
