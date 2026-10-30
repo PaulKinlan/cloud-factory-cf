@@ -92,29 +92,9 @@ export async function routeAdminSettings(
     bodyText = await request.text();
   }
 
-  // If saving GitHub App settings, also mirror githubApp to default broker so 1-click OAuth works
-  if (request.method === "POST" && bodyText) {
-    try {
-      const parsed = JSON.parse(bodyText) as { githubApp?: unknown };
-      if (parsed.githubApp && typeof parsed.githubApp === "object" && env.CREDENTIAL_BROKER) {
-        const defaultStub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
-        const defaultHeaders = new Headers({ "content-type": "application/json" });
-        if (env.BROKER_CONTROL_KEY) {
-          defaultHeaders.set("x-factory-control-key", env.BROKER_CONTROL_KEY);
-        } else if (authz.principal.via === "session") {
-          const defaultDelegation = await mintDelegation(env, { repository: "default", login: authz.principal.login });
-          if (defaultDelegation) defaultHeaders.set("x-factory-delegation", defaultDelegation);
-        }
-        await defaultStub.fetch("https://credential-broker.internal/settings", {
-          method: "POST",
-          headers: defaultHeaders,
-          body: JSON.stringify({ githubApp: parsed.githubApp }),
-        }).catch(() => null);
-      }
-    } catch {
-      // Ignore JSON parse errors for mirror; primary DO will validate
-    }
-  }
+  // Repository settings stay in this repository's broker. Platform-wide OAuth
+  // credentials are configured separately through the root-only /api/admin/system
+  // route; forwarding a tenant's githubApp to "default" would promote it to root.
 
   const forwarded = new Request(`https://credential-broker.internal/settings${search}`, {
     method: request.method,
