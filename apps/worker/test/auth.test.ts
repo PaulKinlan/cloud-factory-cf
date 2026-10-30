@@ -280,12 +280,23 @@ describe("GitHub OAuth & App Install Flow", () => {
     });
     expect(badKey.status).toBe(401);
 
-    // 3. Disallowed HTTP methods return 405
-    const postReq = await SELF.fetch("https://example.com/api/repos?owner=octodev", {
+    // 3. Unsupported HTTP methods return 405. POST is NOT one of them: it installs a
+    // repository through the OrgCoordinator (routes/auth.ts handleApiRepos), so the old
+    // assertion here was stale and has been red on main since that path was added.
+    const deleteReq = await SELF.fetch("https://example.com/api/repos?owner=octodev", {
+      method: "DELETE",
+      headers: { "x-factory-control-key": "test-control-key" },
+    });
+    expect(deleteReq.status).toBe(405);
+
+    // 3b. A supported POST with no body is a body-validation failure (400), which is what
+    // the stale assertion was actually observing.
+    const emptyPost = await SELF.fetch("https://example.com/api/repos?owner=octodev", {
       method: "POST",
       headers: { "x-factory-control-key": "test-control-key" },
     });
-    expect(postReq.status).toBe(405);
+    expect(emptyPost.status).toBe(400);
+    await expect(emptyPost.json()).resolves.toMatchObject({ ok: false, error: "invalid json" });
 
     // 4. Missing ?owner returns 400
     const missingOwner = await SELF.fetch("https://example.com/api/repos", {
@@ -926,7 +937,27 @@ describe("GitHub OAuth & App Install Flow", () => {
       const brokerLocation = brokerLoginRes.headers.get("location");
       expect(brokerLocation).toContain("client_id=broker-saved-client-id-123");
 
-      // 2. Fall back to default broker when no owner/org is in URL
+      // 2. Fall back to OrgCoordinator for ?org=octo-org when the broker has no key. This runs
+      // BEFORE the default-broker step below: the candidate chain tries the "default" broker
+      // too, so once the default has a client id the org lookup can never be reached and this
+      // assertion fails regardless of the org memory write (cloud-factory-cf-1wnf).
+      if (env.ORG_COORDINATOR) {
+        const orgStub = env.ORG_COORDINATOR.get(env.ORG_COORDINATOR.idFromName("octo-org"));
+        await orgStub.fetch("https://org-coordinator.internal/memory", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ key: "github.client_id", value: "org-saved-client-id-789" }),
+        });
+
+        const orgLoginRes = await SELF.fetch(
+          "https://example.com/auth/github/login?org=octo-org",
+          { redirect: "manual" },
+        );
+        expect(orgLoginRes.status).toBe(302);
+        const orgLocation = orgLoginRes.headers.get("location");
+        expect(orgLocation).toContain("client_id=org-saved-client-id-789");
+      }
+      // 3. Fall back to default broker when no owner/org is in URL
       const defaultBrokerStub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
       await defaultBrokerStub.fetch("https://credential-broker.internal/settings", {
         method: "POST",
@@ -947,23 +978,6 @@ describe("GitHub OAuth & App Install Flow", () => {
       const defaultLocation = defaultLoginRes.headers.get("location");
       expect(defaultLocation).toContain("client_id=default-broker-client-id-456");
 
-      // 3. Fall back to OrgCoordinator for ?org=octo-org when repo broker has no key
-      if (env.ORG_COORDINATOR) {
-        const orgStub = env.ORG_COORDINATOR.get(env.ORG_COORDINATOR.idFromName("octo-org"));
-        await orgStub.fetch("https://org-coordinator.internal/memory", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ key: "github.client_id", value: "org-saved-client-id-789" }),
-        });
-
-        const orgLoginRes = await SELF.fetch(
-          "https://example.com/auth/github/login?org=octo-org",
-          { redirect: "manual" },
-        );
-        expect(orgLoginRes.status).toBe(302);
-        const orgLocation = orgLoginRes.headers.get("location");
-        expect(orgLocation).toContain("client_id=org-saved-client-id-789");
-      }
     } finally {
       (env as any).GITHUB_CLIENT_ID = origId;
     }
