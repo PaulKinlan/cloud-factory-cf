@@ -222,3 +222,49 @@ These are the pathologies that turn one lane's change red for everyone else:
 - If the suite ever needs both a Node-only project and the workerd project, use
   vitest projects and keep the Node project first: it is the part that can run
   without the pool.
+
+## Worker suite cost against the fast-tier bound (measured 2026-10-30)
+
+The fast tier (`.fleet` gate, 900s bound) cannot currently gate a delta that touches a
+widely imported worker module, and this is measurable rather than mysterious. Each worker
+test file boots its own workerd, so a delta's cost is the SUM of the selected files:
+
+| suite | tests | wall clock at 60s timeout |
+|---|---|---|
+| `test/audit.test.ts` | 14 | ~70s |
+| `test/pipeline.test.ts` | 23 | ~60s |
+| `test/auth.test.ts` | 21 | ~68s |
+| `test/tenant-authz.test.ts` | 13 | ~60s |
+| `test/worker.test.ts` | 7 | ~74s |
+| `test/connect.test.ts` | 7 | ~331s |
+
+A change to `apps/worker/src/routes/auth.ts`, `src/auth/tenant.ts` or
+`src/credential-broker-object.ts` selects 7–9 of those files, i.e. ~700–1100s of work
+against a 900s budget. Four deltas died that way on 2026-10-30 (`999a5bd` 902–907s,
+`be64ee2` 907s, `htc0` 901s, `yvlp` 907s), every one of them mid-run with nothing failing
+in the log. That is not a signal about the change; it is the tier being too small for the
+selection.
+
+Two ways out, in order of cost:
+
+1. **Raise the bound for worker-touching deltas** (~1500s) while keeping 900s for web/SDK
+   deltas. Cheap, no code change, and the merger's full gate already runs for minutes.
+2. **Let worker deltas skip the fast tier** and go straight to the merger's full gate,
+   accepting that an implementer then hands off on local evidence plus review.
+
+What does NOT work is retrying the same delta at 900s: the cost is deterministic, and each
+retry spends a heavy slot that the merger needs.
+
+### Serial versus bounded parallel (supersedes the `fileParallelism: false` note above)
+
+`fileParallelism: false` was chosen for determinism, but on a saturated 2 vCPU VM it turns
+"slow" into "never": two small worker files took 292s in parallel versus a run killed at
+351s serial. Unbounded parallel then stampeded the pool - each file starts a workerd, and
+runs reported `Timeout starting cloudflare-pool runner` with `Test Files no tests`
+(transform 0ms). The setting that gates is **bounded** parallel: `maxWorkers: 2` together
+with a 60s `testTimeout`, which passed the fast tier in 491s on a tree that included the
+web smoke set (`cloud-factory-cf-t8mu`, `cloud-factory-cf-j998`). Keep the bound low; the
+point is to overlap Durable Object waits, not to start one runner per file.
+
+A 20s `testTimeout` is what makes a busy VM look like a broken branch: `connect.test.ts` is
+4/7 red at 20s (per-test 21–25s) and 7/7 at 60s with no source change.
