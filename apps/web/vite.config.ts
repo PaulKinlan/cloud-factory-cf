@@ -29,5 +29,10 @@ export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
     environment: "node",
+    // The default 5000ms is the web counterpart of the 20s worker timeout fixed in
+    // cloud-factory-cf-t8mu: a suite that drives real timers and fetch stubs takes 1.6s
+    // quiet and blows 5s under load, so a gate reports "Test timed out in 5000ms" for a
+    // branch that is fine. 60s still fails a hanging test.
+    testTimeout: 60_000,
   },
 });
