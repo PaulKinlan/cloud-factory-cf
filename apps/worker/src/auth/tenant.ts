@@ -88,6 +88,23 @@ export function sessionMayAddressPlatform(
 
 export const ROOT_SESSION_LOGIN = "__root__";
 
+/**
+ * CredentialBroker addresses that are not tenants (cloud-factory-cf-htc0).
+ *
+ * "default" and "global" are reserved broker scopes that hold PLATFORM settings
+ * (github.private_key, webhook.secret, platform.owners). A GitHub login can literally be
+ * "default", and user settings used to be addressed by `idFromName(login.toLowerCase())`,
+ * so that login received a delegation for `repository: "default"` and could read and
+ * write the platform scope. Any route that turns a login into a broker address has to
+ * refuse these names instead.
+ */
+export const RESERVED_BROKER_ADDRESSES: ReadonlySet<string> = new Set(["default", "global"]);
+
+export function isReservedBrokerAddress(name: string | null | undefined): boolean {
+  if (!name) return false;
+  return RESERVED_BROKER_ADDRESSES.has(name.trim().toLowerCase());
+}
+
 export function isRootLogin(login: string, env: Env): boolean {
   if (login.toLowerCase() === ROOT_SESSION_LOGIN) return true;
   const rawOwners = env.PLATFORM_OWNERS ?? (env as unknown as { ROOT_ADMIN_LOGINS?: string }).ROOT_ADMIN_LOGINS;

@@ -1,6 +1,12 @@
 import type { Env } from "../env";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
-import { authorizeControlPlane, authzDenial, ROOT_SESSION_LOGIN, isRootLogin } from "../auth/tenant";
+import {
+  authorizeControlPlane,
+  authzDenial,
+  isReservedBrokerAddress,
+  ROOT_SESSION_LOGIN,
+  isRootLogin,
+} from "../auth/tenant";
 import { mintDelegation } from "../auth/delegation";
 import { readSession } from "./auth";
 
@@ -411,6 +417,20 @@ export async function routeAdminUserSettings(
   }
 
   const targetRepo = owner.toLowerCase();
+
+  // A login that collides with a reserved broker scope would be delegated the PLATFORM
+  // settings (github.private_key, webhook.secret, platform.owners) instead of its own
+  // (cloud-factory-cf-htc0), so refuse it before any stub or delegation is made.
+  if (isReservedBrokerAddress(targetRepo)) {
+    return Response.json(
+      {
+        ok: false,
+        error: `"${targetRepo}" is a reserved broker scope, not a user login, and cannot hold per-user settings`,
+      },
+      { status: 403 },
+    );
+  }
+
   const brokerStub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(targetRepo));
   const headers = new Headers({ "content-type": "application/json" });
 
