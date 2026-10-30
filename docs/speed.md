@@ -268,3 +268,25 @@ point is to overlap Durable Object waits, not to start one runner per file.
 
 A 20s `testTimeout` is what makes a busy VM look like a broken branch: `connect.test.ts` is
 4/7 red at 20s (per-test 21–25s) and 7/7 at 60s with no source change.
+
+### The 90-second runner start is hard-coded (measured 2026-10-30)
+
+A run can also fail with `Error: [vitest-pool]: Timeout starting cloudflare-pool runner.`
+and `Test Files  no tests` / `Tests  no tests` with `transform 0ms, import 0ms`. That is not
+a test failure and not a pool stampede: vitest 4.1.12 hard-codes the runner start budget in
+`node_modules/vitest/dist/chunks/cli-api.*.js` as `const WORKER_START_TIMEOUT = 9e4`, i.e.
+**90 seconds**, and there is no `startupTimeout` / `poolOptions` knob in this version to
+raise it. On a loaded 2 vCPU VM, booting workerd for the first file can exceed that and the
+whole run is discarded before a single test executes.
+
+What this means in practice:
+
+- Treat `no tests` + `transform 0ms` as **no verdict**, never as a red branch. Delete the
+  cached `.fast.json` and re-run instead of "fixing" code that was never exercised. Five
+  runs and three gate slots were lost to this on 2026-10-30 before the cause was found.
+- It correlates with load, not with the delta: the same file passes in ~240s at load 9 and
+  fails to start at load 7.4 minutes later.
+- Nothing in this repository can raise the limit. The levers are the size of the selection
+  (fewer files to boot) and the machine's load, which is why the bounded-parallel setting
+  above keeps `maxWorkers` low: each worker is another workerd boot that has to fit in the
+  same 90 seconds.
