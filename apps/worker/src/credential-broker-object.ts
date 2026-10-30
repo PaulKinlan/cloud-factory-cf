@@ -987,7 +987,13 @@ export class CredentialBroker extends DurableObject<Env> {
           privateKeyFingerprint: privateKey ? await computePemFingerprint(privateKey) : null,
         },
         customers: {
-          allowAllGithubUsers: settingsMap.get("customers.allow_all") === "true",
+          // Absent is allow-all, matching the admin UI and the login gate: reporting
+          // false for a deployment that never set the flag would claim an allowlist that
+          // does not exist (cloud-factory-cf-yvlp).
+          allowAllGithubUsers:
+            settingsMap.get("customers.allow_all") === undefined
+              ? true
+              : settingsMap.get("customers.allow_all") === "true",
           allowedUsers: (settingsMap.get("customers.allowed_users") || "")
             .split(",")
             .map((s: string) => s.trim())

@@ -1,6 +1,7 @@
 import type { Env } from "../env";
 import { sameSecret } from "../secrets";
 import { importAppPrivateKey, mintAppJwt } from "../github-app";
+import { isLoginAllowed, resolveCustomerAccess } from "../auth/customer-access";
 import { isRootLogin, ROOT_SESSION_LOGIN } from "../auth/tenant";
 import { handlePasskeyRoute } from "../auth/passkey";
 
@@ -915,6 +916,19 @@ export async function handleGithubCallback(
   // (cloud-factory-cf-dnrm). Install-only callbacks still register the installation
   // (section 3) and redirect, they just do not authenticate the browser.
   const authenticatedLogin = accessToken ? accountLogin : null;
+
+  // The customer policy is enforced here, at the one place a browser credential is minted
+  // (cloud-factory-cf-yvlp). Refused logins get the redirect the UI already handles, with
+  // no session cookie, so they can read nothing even though GitHub authenticated them.
+  if (authenticatedLogin && !isLoginAllowed(await resolveCustomerAccess(env), authenticatedLogin, env)) {
+    redirectUrl.searchParams.delete("connected");
+    redirectUrl.searchParams.delete("count");
+    redirectUrl.searchParams.set("error", "not_allowed_on_this_deployment");
+    return new Response(null, {
+      status: 302,
+      headers: await successHeaders(redirectUrl, url, signingKey, null),
+    });
+  }
 
   return new Response(null, {
     status: 302,
