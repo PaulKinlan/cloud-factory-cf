@@ -77,6 +77,13 @@ if [ "${1:-}" = "run" ] && [ "${2:-}" = "build" ]; then
   esac
   exit 0
 fi
+if [ "${1:-}" = "run" ] && [ "${2:-}" = "typecheck" ]; then
+  # The gate's typecheck pass (cloud-factory-cf-m1la). --if-present keeps a workspace
+  # without a typecheck script green, so the fake must accept that form too.
+  [ -n "${FAKE_TYPECHECK_LOG:-}" ] && echo "typecheck $(basename "$PWD")" >> "$FAKE_TYPECHECK_LOG"
+  [ -n "${FAKE_TYPECHECK_ERR:-}" ] && echo "${FAKE_TYPECHECK_ERR}" >&2
+  exit "${FAKE_TYPECHECK_RC:-0}"
+fi
 echo "FAKE npm test in $(basename "$PWD")"; exit "${FAKE_NPM_RC:-0}"
 SH
     chmod +x node_modules/.bin/vitest node_modules/.bin/npm
@@ -355,6 +362,25 @@ reset_tree
 printf '\n/* touch */\n' >> "$FIX/apps/web/src/styles.css"
 run_gate
 check "declared-unverified stylesheet runs the workspace suite" 'test "$RC" -eq 0 && out_has "declared-unverified source" && out_has "FAKE vitest run in web"'
+reset_tree
+
+# 3b-v. Typecheck runs for the workspaces whose files changed, and a type error FAILS the
+#       gate even when every suite passed. That is the m1la shape exactly: 18 TS2554 errors
+#       sat on main while the fast gate reported PASS because no suite exercised the arity.
+reset_tree
+printf '\n// touch\n' >> "$FIX/apps/web/src/app.ts"
+export FAKE_TYPECHECK_LOG="${TMPDIR:-/tmp}/fake-typecheck"
+: > "$FAKE_TYPECHECK_LOG"
+FAKE_SELECT="apps/web/test/a.test.ts" FAKE_TYPECHECK_LOG="$FAKE_TYPECHECK_LOG" run_gate
+check "a changed workspace is typechecked, not only tested" 'test "$RC" -eq 0 && grep -qx "typecheck web" "$FAKE_TYPECHECK_LOG"'
+check "--list names the typecheck pass" 'run_gate --list; out_has "typecheck (npm run typecheck --if-present)"'
+
+reset_tree
+printf '\n// touch\n' >> "$FIX/apps/web/src/app.ts"
+FAKE_SELECT="apps/web/test/a.test.ts" FAKE_TYPECHECK_RC=2 \
+  FAKE_TYPECHECK_ERR="src/app.ts(1,2): error TS2554: Expected 3-4 arguments, but got 5." run_gate
+check "a type error FAILs the gate even though every suite passed" 'test "$RC" -ne 0 && err_has "typecheck failed" && out_has "TS2554"'
+unset FAKE_TYPECHECK_RC FAKE_TYPECHECK_ERR FAKE_TYPECHECK_LOG
 reset_tree
 
 # 8. Nothing source/test changed: the smoke set runs, never an empty green.
