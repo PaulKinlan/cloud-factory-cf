@@ -17,7 +17,7 @@ import {
   serializeCanvasState,
 } from "../src/sync";
 
-const target = { repository: "acme/widgets", controlKey: "test-control-key" };
+const target = { repository: "acme/widgets" };
 const origin = "https://factory.example.com/";
 
 describe("share requests", () => {
@@ -31,7 +31,10 @@ describe("share requests", () => {
     expect(request.url).toBe("https://factory.example.com/canvas/acme/widgets/documents");
     expect(request.init.method).toBe("PUT");
     const headers = request.init.headers as Record<string, string>;
-    expect(headers["x-factory-control-key"]).toBe("test-control-key");
+    // The key never travels with the request any more (cloud-factory-cf-nrvq): the
+    // operator's HttpOnly session does, so a document request cannot leak the master secret.
+    expect(headers["x-factory-control-key"]).toBeUndefined();
+    expect(request.init.credentials).toBe("same-origin");
 
     const body = JSON.parse(String(request.init.body)) as { name: string; document: { version: number; nodes: unknown[] } };
     expect(body.name).toBe("PR review");
@@ -47,9 +50,11 @@ describe("share requests", () => {
 
   it("refuses a malformed repository or a missing key instead of calling the API", () => {
     const document = createSampleDoc();
-    expect(saveRequest(origin, { repository: "acme", controlKey: "k" }, document)).toMatchObject({ error: expect.stringContaining("owner/name") });
-    expect(saveRequest(origin, { repository: "acme/widgets", controlKey: "" }, document)).toMatchObject({ error: expect.stringContaining("control key") });
-    expect(listRequest(origin, { repository: "acme/widgets/extra", controlKey: "k" })).toMatchObject({ error: expect.stringContaining("owner/name") });
+    expect(saveRequest(origin, { repository: "acme" }, document)).toMatchObject({ error: expect.stringContaining("owner/name") });
+    // A key is no longer part of the target at all (cloud-factory-cf-nrvq): the request
+    // carries the session cookie instead, so an empty key cannot be a request error.
+    expect(saveRequest(origin, { repository: "acme/widgets" }, document)).toMatchObject({ url: expect.any(String) });
+    expect(listRequest(origin, { repository: "acme/widgets/extra" })).toMatchObject({ error: expect.stringContaining("owner/name") });
     expect(documentRequest(origin, target, "")).toMatchObject({ error: expect.stringContaining("document id") });
     expect(isValidRepository("acme/widgets")).toBe(true);
     expect(isValidRepository("acme/widgets/extra")).toBe(false);
@@ -155,7 +160,7 @@ describe("share tracker (cloud-factory-cf-ci5)", () => {
   it("replays the reported repro: a second repository never reuses, or overwrites, the first id", () => {
     const tracker = createShareTracker();
     const doc = createSampleDoc();
-    const target = (repository: string) => ({ repository, controlKey: "k" });
+    const target = (repository: string) => ({ repository });
     const save = (repository: string, bound: string | null) => {
       const plan = planSave(tracker, bound, repository);
       return {
@@ -232,7 +237,7 @@ describe("canvas binding survives a reload (cloud-factory-cf-aju)", () => {
     // PUTting over alpha-original.
     const plan = planSave(tracker, restored?.bound ?? null, "owner/alpha");
     expect(plan).toEqual({ id: null, newCopy: true });
-    const request = saveRequest("https://canvas.test", { repository: "owner/alpha", controlKey: "k" }, doc, {
+    const request = saveRequest("https://canvas.test", { repository: "owner/alpha" }, doc, {
       ...(plan.id === null ? {} : { id: plan.id }),
       name: "Canvas B",
     });

@@ -6,6 +6,8 @@
  * 4. WebAuthn Passkeys for passwordless authentication.
  */
 
+import { adoptControlKeyFromInput, controlKeyHeaders } from "./control-key";
+
 export interface PemValidationResult {
   readonly valid: boolean;
   readonly error?: string;
@@ -987,7 +989,6 @@ export function initAdminDashboard(): void {
   btnLoad?.addEventListener('click', async () => {
     const owner = ownerInput?.value.trim() ?? '';
     const repo = repoInput?.value.trim() ?? '';
-    const key = keyInput?.value.trim() ?? '';
     if (!owner || !repo) {
       showStatus('Please specify owner and repo', true);
       return;
@@ -995,7 +996,11 @@ export function initAdminDashboard(): void {
     try {
       showStatus('Loading repository settings...');
       const headers: Record<string, string> = {};
-      if (key) headers['x-factory-control-key'] = key;
+      // Exchange the typed key once for the HttpOnly session instead of sending it on
+      // every settings read/write (cloud-factory-cf-nrvq). The root session is accepted by
+      // authorizeControlPlane on these routes, and a refused key is still sent so the
+      // "invalid key" message operators know is unchanged.
+      controlKeyHeaders(await adoptControlKeyFromInput(keyInput, fetch), headers);
       const res = await fetch(`/api/admin/settings/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {
         headers,
         credentials: 'same-origin',
@@ -1018,7 +1023,6 @@ export function initAdminDashboard(): void {
   btnSave?.addEventListener('click', async () => {
     const owner = ownerInput?.value.trim() ?? '';
     const repo = repoInput?.value.trim() ?? '';
-    const key = keyInput?.value.trim() ?? '';
     if (!owner || !repo) {
       showStatus('Please specify owner and repo', true);
       return;
@@ -1033,7 +1037,11 @@ export function initAdminDashboard(): void {
     try {
       showStatus('Saving repository overrides...');
       const headers: Record<string, string> = { 'content-type': 'application/json' };
-      if (key) headers['x-factory-control-key'] = key;
+      // Exchange the typed key once for the HttpOnly session instead of sending it on
+      // every settings read/write (cloud-factory-cf-nrvq). The root session is accepted by
+      // authorizeControlPlane on these routes, and a refused key is still sent so the
+      // "invalid key" message operators know is unchanged.
+      controlKeyHeaders(await adoptControlKeyFromInput(keyInput, fetch), headers);
       const res = await fetch(`/api/admin/settings/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {
         method: 'POST',
         headers,
@@ -1055,7 +1063,6 @@ export function initAdminDashboard(): void {
   btnPing?.addEventListener('click', async () => {
     const owner = ownerInput?.value.trim() ?? '';
     const repo = repoInput?.value.trim() ?? '';
-    const key = keyInput?.value.trim() ?? '';
     if (!owner || !repo) {
       showStatus('Supply owner and repo to trigger test ping', true);
       return;
@@ -1066,7 +1073,11 @@ export function initAdminDashboard(): void {
     }
     try {
       const headers: Record<string, string> = {};
-      if (key) headers['x-factory-control-key'] = key;
+      // Exchange the typed key once for the HttpOnly session instead of sending it on
+      // every settings read/write (cloud-factory-cf-nrvq). The root session is accepted by
+      // authorizeControlPlane on these routes, and a refused key is still sent so the
+      // "invalid key" message operators know is unchanged.
+      controlKeyHeaders(await adoptControlKeyFromInput(keyInput, fetch), headers);
       const res = await fetch(`/api/admin/test-ping/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {
         method: 'POST',
         headers,
