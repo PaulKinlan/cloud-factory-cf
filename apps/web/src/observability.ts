@@ -11,6 +11,8 @@
  * class owns state and takes its `fetch` and `WebSocket` from the caller.
  */
 
+import { adoptControlKeyFromInput } from "./control-key";
+
 export type TraceStatus = "info" | "ok" | "warn" | "error";
 
 export interface TraceStep {
@@ -911,11 +913,16 @@ export function initObservability(root: HTMLElement, options: MountOptions = {})
     applyLimit();
   });
 
-  form?.addEventListener("submit", (event) => {
+  form?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const owner = ownerInput?.value.trim() ?? "";
     const repo = repoInput?.value.trim() ?? "";
-    const key = keyInput?.value ?? "";
+    // The panel's key is the platform master secret if the operator pasted one, and the
+    // panel used to resend it with every poll. Exchange it once for the HttpOnly session
+    // cookie and clear the field; only a refused key stays as a header, so the route can
+    // still answer "control key rejected" (cloud-factory-cf-2gsy).
+    const adopted = await adoptControlKeyFromInput(keyInput, fetch);
+    const key = adopted.mode === "key" ? (adopted.key ?? "") : "";
     if (owner === "" || repo === "") {
       if (statusLine) {
         statusLine.textContent = "owner and repository are required";
@@ -929,7 +936,8 @@ export function initObservability(root: HTMLElement, options: MountOptions = {})
     const typed = Number(limitInput?.value ?? DEFAULT_LIMIT);
     const limit = applyLimit();
     if (announcer && typed !== limit) announcer.textContent = `Limit clamped to ${limit}`;
-    // The key lives in memory for this session only: never localStorage.
+    // The key lives in memory for this session only: never localStorage. After a
+    // successful exchange this is empty and the cookie carries the authorisation.
     session.reconfigure({ owner, repo, key, limit });
     void session.connect().catch(() => {});
   });
