@@ -42,6 +42,9 @@ export type DelegationResult =
 export const DEFAULT_DELEGATION_TTL_SECONDS = 60;
 export const MAX_DELEGATION_TTL_SECONDS = 300;
 
+/** Reserved principal for Worker/DO-to-broker calls, never a tenant session. */
+export const BROKER_INTERNAL_LOGIN = "__system__";
+
 const encoder = new TextEncoder();
 
 function base64UrlEncode(bytes: Uint8Array): string {
@@ -72,6 +75,21 @@ function signingKeyFor(env: Env): string | undefined {
  * the deployment has no signing key (the caller then has nothing to present and must say
  * so rather than silently falling back to a key it does not have).
  */
+export async function brokerInternalHeaders(
+  env: Env,
+  repository: string,
+  extra?: HeadersInit,
+): Promise<Headers> {
+  const headers = new Headers(extra);
+  if (env.BROKER_CONTROL_KEY) {
+    headers.set("x-factory-control-key", env.BROKER_CONTROL_KEY);
+  } else {
+    const delegation = await mintDelegation(env, { repository, login: BROKER_INTERNAL_LOGIN });
+    if (delegation) headers.set("x-factory-delegation", delegation);
+  }
+  return headers;
+}
+
 export async function mintDelegation(
   env: Env,
   input: { repository: string; login: string },
