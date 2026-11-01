@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:file": "vitest run",
-    "test:changed": "vitest run --changed $(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)"
+    "test:changed": "vitest run --changed $(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)",
+    "test:unit": "vitest run --config vitest.unit.config.ts"
   },
   "dependencies": {
     "@cloudflare/computer": "^0.5.1",
