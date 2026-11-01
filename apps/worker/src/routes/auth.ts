@@ -216,10 +216,17 @@ export async function handleAuth(
       authenticated: session.ok,
       login: session.ok ? session.login : null,
       isRootAdmin,
+      // Whether the deployment has a GitHub App configured decides which sign-in /
+      // first-run setup affordance the UI can offer, so it stays available before login
+      // (the app slug is public on github.com).
       githubConfigured: Boolean(creds.clientId && creds.clientSecret),
       appSlug: creds.appSlug ?? env.GITHUB_APP_SLUG ?? null,
-      hasControlKey: Boolean(env.BROKER_CONTROL_KEY),
-      signingConfigured: Boolean(signingKey),
+      // Which secrets the deployment holds is a fingerprint of its attack surface, not a
+      // fact an anonymous visitor needs: only root is told (cloud-factory-cf-gqyx). Root
+      // is also the only viewer these fields drive - the admin panels that use them are
+      // hidden for everyone else.
+      hasControlKey: isRootAdmin ? Boolean(env.BROKER_CONTROL_KEY) : undefined,
+      signingConfigured: isRootAdmin ? Boolean(signingKey) : undefined,
     });
   }
 

@@ -135,8 +135,10 @@ deployment differs from the repo.
 BASE=https://cloud-factory-cf.<subdomain>.workers.dev
 
 curl -s $BASE/health
-# 200 {"ok":true,"service":"cloud-factory-cf","environment":"development"}
-#   -> "environment" is your ENVIRONMENT var; set it per deployment for clarity.
+# 200 {"ok":true,"service":"cloud-factory-cf"}
+#   -> liveness only: the probe is unauthenticated, so it names no environment,
+#      commit, build time or version (cloud-factory-cf-gqyx). Build identity is on
+#      the authenticated admin/audit surfaces.
 
 curl -s -o /dev/null -w '%{http_code}\n' $BASE/
 # 200 -> the canvas is served from ASSETS (apps/web/dist was built and uploaded)

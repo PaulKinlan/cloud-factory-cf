@@ -9,6 +9,7 @@ import { handleRuns } from "./routes/runs";
 import { handleAudit } from "./routes/audit";
 import { handleTrace } from "./routes/trace";
 import { handleWebhooks } from "./routes/webhooks";
+import { handleHealth } from "./routes/health";
 import { serveAsset } from "./routes/assets";
 
 // Durable Object classes are resolved from the Worker's main module, so they
@@ -21,16 +22,10 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === "/health") {
-      return Response.json({
-        ok: true,
-        service: "cloud-factory-cf",
-        environment: env.ENVIRONMENT ?? "production",
-        commit: "d448b54491e2d09604e169fb61abcc0207725894",
-        build_timestamp: "2026-10-19T16:58:12Z",
-        version: "0.1.0",
-      });
-    }
+    // A liveness probe answers liveness only: no environment, commit or version
+    // fingerprint for an unauthenticated caller (cloud-factory-cf-gqyx).
+    const healthResponse = handleHealth(url, request.method);
+    if (healthResponse) return healthResponse;
 
     const brokerResponse = await handleBroker(request, env, url);
     if (brokerResponse) return brokerResponse;

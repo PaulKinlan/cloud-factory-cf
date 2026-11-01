@@ -135,8 +135,10 @@ export interface AdminSession {
   isRootAdmin: boolean;
   githubConfigured: boolean;
   appSlug: string | null;
-  hasControlKey: boolean;
-  signingConfigured: boolean;
+  // Only root is told which secrets the deployment holds; anyone else gets no value at
+  // all, so the field is absent rather than false (cloud-factory-cf-gqyx).
+  hasControlKey?: boolean;
+  signingConfigured?: boolean;
 }
 
 export function initAdminDashboard(): void {
