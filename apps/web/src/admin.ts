@@ -601,14 +601,16 @@ export function initAdminDashboard(): void {
       if (res.ok && Array.isArray(data.passkeys) && data.passkeys.length > 0) {
         userPasskeyTbody.innerHTML = '';
         for (const pk of data.passkeys) {
-          const tr = document.createElement('tr');
-          tr.innerHTML = `
-            <td><strong>${pk.label}</strong></td>
-            <td><span class="badge">${pk.role}</span></td>
-            <td>${new Date(pk.createdAt).toLocaleDateString()}</td>
-            <td><button type="button" class="button button--ghost btn-delete-passkey" data-id="${pk.credentialId}">Revoke</button></td>
-          `;
-          userPasskeyTbody.appendChild(tr);
+          userPasskeyTbody.appendChild(
+            passkeyRow(
+              [
+                { text: String(pk.label ?? ''), strong: true },
+                { text: String(pk.role ?? ''), badge: true },
+                { text: new Date(pk.createdAt).toLocaleDateString() },
+              ],
+              String(pk.credentialId ?? ''),
+            ),
+          );
         }
         wireDeletePasskeys(userPasskeyTbody, () => loadUserPasskeys());
       } else {
@@ -628,13 +630,15 @@ export function initAdminDashboard(): void {
       if (res.ok && Array.isArray(data.passkeys) && data.passkeys.length > 0) {
         rootPasskeyTbody.innerHTML = '';
         for (const pk of data.passkeys) {
-          const tr = document.createElement('tr');
-          tr.innerHTML = `
-            <td><strong>${pk.label}</strong></td>
-            <td>${new Date(pk.createdAt).toLocaleDateString()}</td>
-            <td><button type="button" class="button button--ghost btn-delete-passkey" data-id="${pk.credentialId}">Revoke</button></td>
-          `;
-          rootPasskeyTbody.appendChild(tr);
+          rootPasskeyTbody.appendChild(
+            passkeyRow(
+              [
+                { text: String(pk.label ?? ''), strong: true },
+                { text: new Date(pk.createdAt).toLocaleDateString() },
+              ],
+              String(pk.credentialId ?? ''),
+            ),
+          );
         }
         wireDeletePasskeys(rootPasskeyTbody, () => loadRootPasskeys());
       } else {
@@ -643,6 +647,40 @@ export function initAdminDashboard(): void {
     } catch {
       // ignore
     }
+  };
+
+  /**
+   * Builds one passkey row with `textContent`, never by interpolating into `innerHTML`:
+   * the label is operator-supplied text and this table is an admin surface, so rendering
+   * it as markup is stored XSS (cloud-factory-cf-khnm). `credentialId` goes into a
+   * `dataset` entry for the same reason - an attribute is still markup.
+   */
+  const passkeyRow = (
+    cells: Array<{ text: string; strong?: boolean; badge?: boolean }>,
+    credentialId: string,
+  ): HTMLTableRowElement => {
+    const tr = document.createElement('tr');
+    for (const cell of cells) {
+      const td = document.createElement('td');
+      if (cell.strong || cell.badge) {
+        const inner = document.createElement(cell.strong ? 'strong' : 'span');
+        if (cell.badge) inner.className = 'badge';
+        inner.textContent = cell.text;
+        td.appendChild(inner);
+      } else {
+        td.textContent = cell.text;
+      }
+      tr.appendChild(td);
+    }
+    const actions = document.createElement('td');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'button button--ghost btn-delete-passkey';
+    button.textContent = 'Revoke';
+    button.dataset.id = credentialId;
+    actions.appendChild(button);
+    tr.appendChild(actions);
+    return tr;
   };
 
   const wireDeletePasskeys = (container: HTMLElement, onDone: () => void) => {
