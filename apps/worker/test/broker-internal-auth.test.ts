@@ -39,10 +39,12 @@ describe("CredentialBroker internal route authorization", () => {
     expect(system.has("x-factory-control-key")).toBe(false);
     expect(system.has("x-factory-delegation")).toBe(true);
     expect((await request("/passkeys", "GET", system)).status).toBe(200);
-    expect((await request("/effective-webhook-secret", "GET", system)).status).not.toBe(401);
+    expect((await request("/effective-webhook-secret", "GET", system)).status).toBe(200);
 
     const tenant = await mintDelegation(env, { repository, login: "alice" });
-    expect((await request("/passkeys", "GET", { "x-factory-delegation": tenant })).status).toBe(401);
+    for (const path of ["/passkeys", "/internal-setting?key=platform.owners", "/effective-github-app", "/effective-webhook-secret"]) {
+      expect((await request(path, "GET", { "x-factory-delegation": tenant })).status, path).toBe(401);
+    }
     const other = await mintDelegation(env, { repository: "some-other-repo", login: BROKER_INTERNAL_LOGIN });
     expect((await request("/internal-setting?key=platform.owners", "GET", { "x-factory-delegation": other })).status).toBe(401);
   });
