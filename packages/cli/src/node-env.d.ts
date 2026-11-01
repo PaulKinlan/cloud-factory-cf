@@ -56,6 +56,19 @@ declare module 'node:child_process' {
     },
     callback: (error: Error | null, stdout: string, stderr: string) => void,
   ): void;
+
+  /** Runs one program with an argument vector - no shell is involved (cloud-factory-cf-0cdh). */
+  export function execFile(
+    file: string,
+    args: readonly string[],
+    options: {
+      cwd?: string;
+      timeout?: number;
+      maxBuffer?: number;
+      env?: Record<string, string | undefined>;
+    },
+    callback: (error: Error | null, stdout: string, stderr: string) => void,
+  ): void;
 }
 
 declare module 'node:util' {

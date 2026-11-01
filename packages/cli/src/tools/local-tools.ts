@@ -1,11 +1,12 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { ToolDefinition } from '@factory-cloud/sdk';
 import { scanWorkspaceSockets, type SocketScanOptions } from './socket-scan.ts';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export interface LocalToolsOptions {
   cwd?: string;
@@ -151,7 +152,9 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
       '/dev/stdout',
       '/dev/stderr',
     ];
-    const matches = cmd.match(/(?:^|[\s"'=><|;&])(\/[^\s"'><|;&]+)/g);
+    // `*` not `+`: a bare '/' is a path too, and `rm -rf /` used to slip through because
+    // only '/something' was collected (cloud-factory-cf-0cdh).
+    const matches = cmd.match(/(?:^|[\s"'=><|;&])(\/[^\s"'><|;&]*)/g);
     if (matches) {
       for (const rawMatch of matches) {
         const cleanPath = rawMatch.replace(/^[=\s"'><|;&]+/, '');
@@ -165,6 +168,89 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
         }
       }
     }
+  }
+
+  /**
+   * Splits a command into a program and arguments without involving a shell.
+   *
+   * Single and double quotes group; a backslash escapes the next character inside double
+   * quotes and outside quotes. Nothing is expanded: what is written is what is passed.
+   */
+  function tokenizeCommand(cmd: string): string[] {
+    const tokens: string[] = [];
+    let current = '';
+    let quote: '"' | "'" | null = null;
+    let hasCurrent = false;
+
+    for (let i = 0; i < cmd.length; i += 1) {
+      const ch = cmd[i] as string;
+      if (quote === "'") {
+        if (ch === "'") quote = null;
+        else current += ch;
+        hasCurrent = true;
+        continue;
+      }
+      if (quote === '"') {
+        if (ch === '"') quote = null;
+        else if (ch === '\\' && i + 1 < cmd.length) current += cmd[i + 1] as string, i += 1;
+        else current += ch;
+        hasCurrent = true;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch as '"' | "'";
+        hasCurrent = true;
+        continue;
+      }
+      if (ch === '\\' && i + 1 < cmd.length) {
+        current += cmd[i + 1] as string;
+        i += 1;
+        hasCurrent = true;
+        continue;
+      }
+      if (ch === ' ' || ch === '\t') {
+        if (hasCurrent) {
+          tokens.push(current);
+          current = '';
+          hasCurrent = false;
+        }
+        continue;
+      }
+      current += ch;
+      hasCurrent = true;
+    }
+
+    if (quote !== null) {
+      throw new Error(`Command containment violation: unterminated ${quote} quote`);
+    }
+    if (hasCurrent) tokens.push(current);
+    return tokens;
+  }
+
+  /**
+   * Unsandboxed mode runs ONE program with arguments, never a shell (cloud-factory-cf-0cdh).
+   *
+   * The containment checks below are a denylist over a command string, and a denylist is
+   * only worth anything if the string cannot be reinterpreted after it has been checked.
+   * Handing the checked string to `sh -c` broke exactly that: `curl … | sh` passes every
+   * check and then runs whatever it downloaded. So unsandboxed commands are tokenised and
+   * `execFile`d: shell metacharacters are refused instead of being honoured, and there is
+   * no pipeline, redirection, substitution or chaining to escape through. A program that
+   * executes other code itself (`sh -c`, `node -e`) is why the default mode is bubblewrap -
+   * an argv denylist cannot confine a program that is an interpreter.
+   */
+  function parseUnsandboxedCommand(cmd: string): { program: string; args: string[] } {
+    if (/[|&;<>$`\n\r]/.test(cmd)) {
+      throw new Error(
+        "Command containment violation: shell metacharacters ('|', '&', ';', '<', '>', '$', '`') are not permitted in unsandboxed mode - one program with arguments is executed, never a shell",
+      );
+    }
+    const tokens = tokenizeCommand(cmd);
+    const program = tokens[0];
+    if (!program) {
+      throw new Error('Command containment violation: empty command');
+    }
+    return { program, args: tokens.slice(1) };
   }
 
   function escapeArg(arg: string): string {
@@ -297,9 +383,12 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
         return { stdout, stderr, exitCode: 0 };
       }
 
-      // Unsandboxed mode (requires explicit sandbox: 'none' opt-out)
+      // Unsandboxed mode (requires explicit sandbox: 'none' opt-out). The command is
+      // tokenised and executed without a shell, so the containment checks above are
+      // evaluated on the values that actually run (cloud-factory-cf-0cdh).
       validateCommandContainment(cmdStr);
-      const { stdout, stderr } = await execAsync(cmdStr, {
+      const { program, args } = parseUnsandboxedCommand(cmdStr);
+      const { stdout, stderr } = await execFileAsync(program, args, {
         cwd: realRoot,
         timeout,
         maxBuffer: 5 * 1024 * 1024,
