@@ -249,27 +249,33 @@ export async function handlePasskeyRoute(
       return Response.json({ ok: false, error: "Missing credentialId or publicKeySpki" }, { status: 400 });
     }
 
+    // The client data is the only thing binding this registration to OUR challenge and OUR
+    // origin, and the assertion path below already refuses a request without it. Validating
+    // it only when the field was present let a caller register a credential for a challenge
+    // it never answered, from an origin we never saw (cloud-factory-cf-cuor).
+    if (!clientDataJSON) {
+      return Response.json({ ok: false, error: "Missing clientDataJSON" }, { status: 400 });
+    }
+
     // Verify clientDataJSON
-    if (clientDataJSON) {
-      try {
-        const clientDataBytes = base64UrlDecode(String(clientDataJSON));
-        const clientData = JSON.parse(new TextDecoder().decode(clientDataBytes)) as {
-          type?: string;
-          challenge?: string;
-          origin?: string;
-        };
-        if (clientData.type !== "webauthn.create") {
-          return Response.json({ ok: false, error: "Invalid clientData type" }, { status: 400 });
-        }
-        if (clientData.challenge !== verifiedCookie.challenge) {
-          return Response.json({ ok: false, error: "Challenge mismatch" }, { status: 400 });
-        }
-        if (clientData.origin !== url.origin) {
-          return Response.json({ ok: false, error: "Origin mismatch" }, { status: 400 });
-        }
-      } catch (err) {
-        return Response.json({ ok: false, error: `Failed to parse clientData: ${String(err)}` }, { status: 400 });
+    try {
+      const clientDataBytes = base64UrlDecode(String(clientDataJSON));
+      const clientData = JSON.parse(new TextDecoder().decode(clientDataBytes)) as {
+        type?: string;
+        challenge?: string;
+        origin?: string;
+      };
+      if (clientData.type !== "webauthn.create") {
+        return Response.json({ ok: false, error: "Invalid clientData type" }, { status: 400 });
       }
+      if (clientData.challenge !== verifiedCookie.challenge) {
+        return Response.json({ ok: false, error: "Challenge mismatch" }, { status: 400 });
+      }
+      if (clientData.origin !== url.origin) {
+        return Response.json({ ok: false, error: "Origin mismatch" }, { status: 400 });
+      }
+    } catch (err) {
+      return Response.json({ ok: false, error: `Failed to parse clientData: ${String(err)}` }, { status: 400 });
     }
 
     // Validate publicKeySpki can be imported
