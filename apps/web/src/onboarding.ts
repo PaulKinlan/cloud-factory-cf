@@ -27,6 +27,8 @@ export interface ConnectSummary {
 }
 
 /** A ping older than this is worth investigating rather than calling "connected". */
+import { adoptControlKeyFromInput, controlKeyHeaders } from "./control-key";
+
 export const STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 
 export interface Scope {
@@ -316,8 +318,9 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     try {
       setStatus("Sending test ping...", "muted");
       const headers: Record<string, string> = {};
-      const key = keyInput?.value.trim() ?? "";
-      if (key.length > 0) headers["x-factory-control-key"] = key;
+      // One exchange, then the HttpOnly session cookie carries the authorisation: the
+      // master key must not stay in the DOM or in memory (cloud-factory-cf-2gsy).
+      controlKeyHeaders(await adoptControlKeyFromInput(keyInput, options.fetchImpl ?? fetch), headers);
       const res = await (options.fetchImpl ?? fetch)(
         `${base}/api/admin/test-ping/${encodeURIComponent(scope.owner)}/${encodeURIComponent(scope.repo)}`,
         { method: "POST", headers, credentials: "same-origin" },
@@ -484,10 +487,7 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     if (!owner || repoSelect === null) return;
     try {
       const headers: Record<string, string> = {};
-      const key = keyInput?.value.trim() ?? "";
-      if (key.length > 0) {
-        headers["x-factory-control-key"] = key;
-      }
+      controlKeyHeaders(await adoptControlKeyFromInput(keyInput, options.fetchImpl ?? fetch), headers);
       const res = await (options.fetchImpl ?? fetch)(`${base}/api/repos?owner=${encodeURIComponent(owner)}`, {
         headers,
       });
@@ -716,6 +716,11 @@ export class ConnectPoller {
     this.update({ checking: true });
     try {
       const headers: Record<string, string> = {};
+      // A poll must not exchange anything: the operator's key is exchanged once by the
+      // dialog actions, which clear the field, so by the time the poller runs the getter
+      // usually returns "" and no header is sent (cloud-factory-cf-2gsy). If a key is
+      // still there it is sent exactly as before - one exchange per poll would be a
+      // request storm and would keep the secret in memory for the life of the poller.
       if (key !== "") {
         headers["x-factory-control-key"] = key;
       }

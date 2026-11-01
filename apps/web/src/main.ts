@@ -14,6 +14,7 @@ import {
   type ShareTarget,
 } from "./sync";
 import { initObservability } from "./observability";
+import { adoptControlKeyFromInput } from "./control-key";
 import { mountConnectGate } from "./onboarding";
 import { installLightDismiss } from "./light-dismiss";
 import { coalescePerFrame } from "./pan-frame";
@@ -485,12 +486,14 @@ required<HTMLButtonElement>("export-close").addEventListener("click", () => expo
 
 // ------------------------------------------------------------------- sharing
 
-function shareTarget(): ShareTarget {
-  const key = shareKey.value.trim();
-  return {
-    repository: shareRepository.value.trim(),
-    ...(key.length > 0 ? { controlKey: key } : {}),
-  };
+async function shareTarget(): Promise<ShareTarget> {
+  // Exchange a typed key once, then let the HttpOnly session carry the authorisation for
+  // list/save/send as well as run (cloud-factory-cf-nrvq): ShareTarget no longer carries a
+  // key at all.
+  if (shareKey.value.trim().length > 0) {
+    await adoptControlKeyFromInput(shareKey, fetch);
+  }
+  return { repository: shareRepository.value.trim() };
 }
 
 function setShareStatus(message: string): void {
@@ -554,7 +557,7 @@ required<HTMLButtonElement>("share-save").addEventListener("click", async () => 
   setShareStatus("Saving…");
   // The id comes from the repository being saved to, never from whichever
   // repository was last touched (cloud-factory-cf-ci5).
-  const target = shareTarget();
+  const target = await shareTarget();
   const plan = planSave(shareIds, boundRepository, target.repository);
   const result = await sendShare(
     saveRequest(location.origin, target, doc, {
@@ -589,7 +592,7 @@ async function refreshDocumentList(): Promise<void> {
   if (shareRepository.value.trim().length === 0) {
     return;
   }
-  const result = await sendShare(listRequest(location.origin, shareTarget()));
+  const result = await sendShare(listRequest(location.origin, await shareTarget()));
   if (!result) return;
   if (result.status !== 200) {
     setShareStatus(describeShareFailure(result.status, result.payload));
@@ -630,7 +633,7 @@ async function loadDocument(id: string, name: string): Promise<void> {
   // belongs to the repository it was asked of, even if the field is edited while
   // the request is in flight (finding cloud-factory-cf-qd6). Otherwise an alpha
   // document would be bound to beta and the next save would write it there.
-  const target = shareTarget();
+  const target = await shareTarget();
   const result = await sendShare(documentRequest(location.origin, target, id));
   if (!result) return;
   if (result.status !== 200) {
@@ -973,7 +976,7 @@ mountConnectGate(document, {
 // Run workflow button in share dialog
 const shareRunBtn = document.getElementById("share-run") as HTMLButtonElement | null;
 shareRunBtn?.addEventListener("click", async () => {
-  const target = shareTarget();
+  const target = await shareTarget();
   if (!target.repository) {
     setShareStatus("Specify a repository before running workflow");
     return;
@@ -981,7 +984,13 @@ shareRunBtn?.addEventListener("click", async () => {
   setShareStatus("Executing workflow run on worker...");
   try {
     const headers: Record<string, string> = { "content-type": "application/json" };
-    if (target.controlKey) headers["x-factory-control-key"] = target.controlKey;
+    // The share panel's key is the platform master secret: exchange it once for the
+    // HttpOnly session and clear the field rather than sending it with the run
+    // (cloud-factory-cf-2gsy). A refused key still goes through as a header so the route
+    // can say why, which is the behaviour operators already have.
+    // shareTarget() already exchanged any typed key for the session cookie
+    // (cloud-factory-cf-nrvq), so this request carries no key.
+
     const res = await fetch(`${location.origin}/canvas/${target.repository}/run`, {
       method: "POST",
       headers,
