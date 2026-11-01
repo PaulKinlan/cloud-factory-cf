@@ -1,7 +1,24 @@
 import type { Env } from "../env";
+import { authorizeControlPlane, authzDenial } from "../auth/tenant";
 
 export const BROKER_PATH =
   /^\/broker\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>capabilities|permissions|provisioning|overrides|proxy|audit|settings)$/;
+
+/**
+ * Operations the broker object authorises itself, so this route must not re-gate them:
+ * `capabilities`, `settings` and `proxy` accept a delegation header (which is not a
+ * control-plane credential), and `provisioning`, `overrides` and `audit` verify the
+ * control key inside the object. `permissions` is the one the object serves with no
+ * check of its own, which is why it is gated here (cloud-factory-cf-1osx).
+ */
+const SELF_AUTHORISED_OPERATIONS: readonly string[] = [
+  "capabilities",
+  "provisioning",
+  "overrides",
+  "proxy",
+  "audit",
+  "settings",
+];
 
 export function brokerHeaders(headers: Headers): Headers {
   const forwarded = new Headers({ "content-type": "application/json" });
@@ -26,6 +43,21 @@ export async function routeBroker(
     }
   } else if (request.method !== "POST") {
     return new Response("method not allowed", { status: 405 });
+  }
+
+  // Policy state is tenant data: an unauthenticated caller used to read whether a
+  // service/action is permitted, and whether the repository narrows it
+  // (cloud-factory-cf-1osx). Same gate as every other control-plane route, bound to
+  // the tenant in the path so a browser session cannot read another account's policy.
+  if (!SELF_AUTHORISED_OPERATIONS.includes(operation)) {
+    const platform = new URLSearchParams(search).get("platform");
+    const authz = await authorizeControlPlane(request, env, { owner, platform });
+    if (!authz.ok) {
+      return authzDenial(authz, {
+        unauthorised: `not authorised to read ${owner}/${repo} permissions`,
+        "cross-tenant": `not authorised to read another account's permissions`,
+      });
+    }
   }
 
   const stub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(`${owner}/${repo}`));

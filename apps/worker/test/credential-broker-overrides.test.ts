@@ -109,8 +109,12 @@ describe("credential broker object: per-repository overrides", () => {
     });
     expect(stillAllowed.status).toBe(200);
 
+    // The control plane reads policy state, so the request carries the control key
+    // like every other broker operation (cloud-factory-cf-1osx).
     const permissions = (await (
-      await SELF.fetch(`https://example.com/broker/${REPOSITORY}/permissions?service=github&action=pr.comment`)
+      await SELF.fetch(`https://example.com/broker/${REPOSITORY}/permissions?service=github&action=pr.comment`, {
+        headers: { "x-factory-control-key": CONTROL_KEY },
+      })
     ).json()) as { permitted: boolean; narrowedByRepository: boolean };
     expect(permissions).toMatchObject({ permitted: false, narrowedByRepository: true });
   });

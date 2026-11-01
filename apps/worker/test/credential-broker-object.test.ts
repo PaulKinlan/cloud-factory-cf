@@ -86,11 +86,30 @@ describe("credential broker object: issuance", () => {
     expect(missingFields.status).toBe(400);
   });
 
-  it("answers permission queries", async () => {
-    const permitted = (await (await brokerFetch("acme/rta5-perm", "permissions?service=github&action=pr.comment", { method: "GET" })).json()) as { permitted: boolean };
+  it("answers permission queries for the control plane, and refuses them without it", async () => {
+    // Policy state is tenant data, and the broker object's own GET /permissions answers
+    // with no check, so this route is the only gate (cloud-factory-cf-1osx). The test
+    // used to read it anonymously - it encoded the exposure rather than the contract.
+    const anonymous = await brokerFetch("acme/rta5-perm", "permissions?service=github&action=pr.comment", {
+      method: "GET",
+    });
+    expect(anonymous.status).toBe(401);
+    expect(((await anonymous.json()) as { permitted?: boolean }).permitted).toBeUndefined();
+
+    const permitted = (await (
+      await brokerFetch("acme/rta5-perm", "permissions?service=github&action=pr.comment", {
+        method: "GET",
+        controlKey: CONTROL_KEY,
+      })
+    ).json()) as { permitted: boolean };
     expect(permitted.permitted).toBe(true);
 
-    const denied = (await (await brokerFetch("acme/rta5-perm", "permissions?service=github&action=org.delete", { method: "GET" })).json()) as { permitted: boolean };
+    const denied = (await (
+      await brokerFetch("acme/rta5-perm", "permissions?service=github&action=org.delete", {
+        method: "GET",
+        controlKey: CONTROL_KEY,
+      })
+    ).json()) as { permitted: boolean };
     expect(denied.permitted).toBe(false);
   });
 });
