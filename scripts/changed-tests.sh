@@ -251,6 +251,34 @@ run_ws_tests() { # <workspace> <command...> — build what it needs, then run it
   return "$rc"
 }
 
+# Typecheck is the check no suite substitutes for. cloud-factory-cf-m1la sat red on main for
+# weeks with 18 TS2554 errors in the canvas templates while every suite stayed green and the
+# fast gate reported PASS, because the wrong arity was never exercised by a test - the
+# template code is UI wiring, not something a node suite drives. So a workspace with changed
+# files in this delta is typechecked with its own script, in the same private log and bound
+# treatment as a suite: a runner pool that leaks a child must not hold the gate's stdout.
+TYPECHECK_BOUND="${CHANGED_TESTS_TYPECHECK_BOUND:-300}"
+
+run_ws_typecheck() { # <workspace> — `npm run typecheck` if the workspace declares one
+  local ws=$1 log rc
+  ensure_workspace_deps "$ws" || return 1
+  log=$(mktemp "${TMPDIR:-/tmp}/changed-tests-typecheck.XXXXXX")
+  ( cd "$ws" && timeout -k 15 "$TYPECHECK_BOUND" npm run typecheck --if-present --silent ) >"$log" 2>&1
+  rc=$?
+  cat "$log"
+  rm -f "$log"
+  case "$rc" in
+    124|137|143)
+      echo "changed-tests: ${ws}: typecheck stopped after ${TYPECHECK_BOUND}s (bound reached)" >&2
+      return 1 ;;
+  esac
+  if [ "$rc" -ne 0 ]; then
+    echo "changed-tests: FAIL ${ws}: typecheck failed — a type error no suite exercises (cloud-factory-cf-m1la)" >&2
+    return 1
+  fi
+  return 0
+}
+
 run_smoke() { # <reason>
   echo "changed-tests: $1 — running the smoke set"
   if [ "$LIST" -eq 1 ]; then
@@ -516,6 +544,20 @@ if [ "$selftest_wanted" -eq 1 ]; then
     ran=$((ran + 1))
     run_selftest || status=1
   fi
+fi
+
+# Typecheck pass. Deliberately after the per-workspace suite loop and not inside it: every
+# branch in that loop `continue`s, and a check that a `continue` can skip is not a check.
+if [ "$sources_n" -gt 0 ] || [ "$tests_n" -gt 0 ]; then
+  for ws in "${WS_ORDER[@]}"; do
+    [ -n "${SRC_BY_WS[$ws]:-}${TEST_BY_WS[$ws]:-}" ] || continue
+    if [ "$LIST" -eq 1 ]; then
+      echo "changed-tests: ${ws}: typecheck (npm run typecheck --if-present)"
+      continue
+    fi
+    echo "changed-tests: ${ws}: typecheck"
+    run_ws_typecheck "$ws" || status=1
+  done
 fi
 
 # --list only reports; it never runs a suite, so "ran nothing" is not a failure there.

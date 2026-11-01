@@ -33,6 +33,28 @@ describe("canvas doc", () => {
     assert.equal(doc.nodes.length, 1);
   });
 
+  it("takes a template's own config and label at creation (cloud-factory-cf-m1la)", () => {
+    const doc = createDoc();
+    // A canvas template builds a fully configured node: kind-specific settings plus the
+    // label the user sees. These used to be passed as a fifth argument that createNode
+    // dropped, so the node came out with the kind's defaults and a generic label - and the
+    // web app did not typecheck either.
+    const agent = createNode(doc, "agent", { x: 0, y: 0 }, {
+      idGen,
+      label: "Issue Triager",
+      config: { model: "gpt-6-astra", prompt: "Triage inbound issue" },
+    });
+    assert.equal(agent.label, "Issue Triager");
+    assert.equal(agent.config["model"], "gpt-6-astra");
+    assert.equal(agent.config["prompt"], "Triage inbound issue");
+
+    // Anything the template does not set keeps the kind's default rather than vanishing.
+    const partial = createNode(doc, "source", { x: 0, y: 0 }, { idGen, config: { event: "issues.opened" } });
+    assert.equal(partial.config["event"], "issues.opened");
+    assert.equal(partial.config["provider"], "github");
+    assert.equal(partial.label, "Event source");
+  });
+
   it("moves, renames and configures a node, refusing invalid values", () => {
     const doc = createDoc();
     const node = createNode(doc, "source", { x: 0, y: 0 }, { idGen });
