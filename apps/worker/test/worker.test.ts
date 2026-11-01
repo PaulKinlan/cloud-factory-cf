@@ -50,18 +50,27 @@ describe("worker entry point", () => {
       events: Array<{ deliveryId: string; status: string; actor: string | null }>;
     };
     expect(body.count).toBe(1);
-    expect(body.events[0]).toMatchObject({
-      deliveryId,
-      status: "pending",
-      actor: "octocat",
-    });
+    // A 200 means accepted, not "still pending": the drain may claim the delivery between the
+    // write and either of the reads below. Both of them used to pin "pending" and both were
+    // observed returning "processing" - body.events[0] (fixed in d58c1e8 on the parallel
+    // branch, still racy on main) and this direct SQL read, which the fast gate for
+    // b5901b8 caught at line 64. What must hold is that exactly one delivery exists for the
+    // id, it belongs to the right actor, and it is queued or already taken; a dropped event,
+    // a duplicate or the wrong actor still fails.
+    expect(body.events[0]).toMatchObject({ deliveryId, actor: "octocat" });
+    expect(["pending", "processing"]).toContain(body.events[0]!.status);
 
     const rows = await runInDurableObject(stub, (_instance, state) =>
       state.storage.sql
-        .exec<{ status: string }>("SELECT status FROM events WHERE delivery_id = ?", deliveryId)
+        .exec<{ status: string; actor: string | null }>(
+          "SELECT status, actor FROM events WHERE delivery_id = ?",
+          deliveryId,
+        )
         .toArray(),
     );
-    expect(rows).toEqual([{ status: "pending" }]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.actor).toBe("octocat");
+    expect(["pending", "processing"]).toContain(rows[0]!.status);
   });
 
   it("isolates repositories into separate durable objects", async () => {
