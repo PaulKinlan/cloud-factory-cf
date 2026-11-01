@@ -198,8 +198,10 @@ in different ways, so check which one you are looking at:
 
 The Worker path only works when all four links exist, and each failure looks different:
 
-1. **A current deployment.** `GET /health` returns the commit it was built from; a
-   deployment older than the branch under review is reviewing the wrong code.
+1. **A current deployment.** `GET /health` answers `{"ok":true,"service":"cloud-factory-cf"}`
+   and nothing else (an unauthenticated probe must not fingerprint the build,
+   cloud-factory-cf-gqyx). Confirm the revision through the authenticated admin/audit
+   surfaces; a deployment older than the branch under review is reviewing the wrong code.
 2. **The webhook secret.** With `WEBHOOK_SECRET` unset the Worker answers
    `503 webhook secret not configured` and never queues the delivery (fail closed).
 3. **The provider credential and provisioning.** The review sink posts through
