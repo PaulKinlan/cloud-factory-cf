@@ -7,7 +7,7 @@ import {
   ROOT_SESSION_LOGIN,
   isRootLogin,
 } from "../auth/tenant";
-import { mintDelegation } from "../auth/delegation";
+import { brokerInternalHeaders, mintDelegation } from "../auth/delegation";
 import { readSession } from "./auth";
 
 export const ADMIN_SETTINGS_PATH = /^\/api\/admin\/settings\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
@@ -154,7 +154,9 @@ export async function routeAdminTestPing(
 
   const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository));
   try {
-    const secretRes = await broker.fetch("https://credential-broker.internal/effective-webhook-secret");
+    const secretRes = await broker.fetch("https://credential-broker.internal/effective-webhook-secret", {
+      headers: await brokerInternalHeaders(env, repository),
+    });
     if (secretRes.ok) {
       const data = (await secretRes.json().catch(() => ({}))) as { secret?: string };
       if (typeof data.secret === "string" && data.secret.length > 0) {
@@ -244,7 +246,9 @@ export async function routeAdminSystem(
       // Check if session login is in default broker's platform.owners setting
       try {
         const defaultStub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
-        const settingRes = await defaultStub.fetch("https://credential-broker.internal/internal-setting?key=platform.owners");
+        const settingRes = await defaultStub.fetch("https://credential-broker.internal/internal-setting?key=platform.owners", {
+          headers: await brokerInternalHeaders(env, "default"),
+        });
         if (settingRes.ok) {
           const data = (await settingRes.json().catch(() => null)) as { ok?: boolean; value?: string | null } | null;
           const owners = (data?.value || "")
@@ -322,7 +326,9 @@ export async function routeAdminSystemTestPing(
   if (env.CREDENTIAL_BROKER) {
     try {
       const defaultStub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
-      const res = await defaultStub.fetch("https://credential-broker.internal/effective-webhook-secret");
+      const res = await defaultStub.fetch("https://credential-broker.internal/effective-webhook-secret", {
+        headers: await brokerInternalHeaders(env, "default"),
+      });
       if (res.ok) {
         const data = (await res.json().catch(() => ({}))) as { secret?: string };
         if (typeof data.secret === "string" && data.secret.length > 0) secret = data.secret;

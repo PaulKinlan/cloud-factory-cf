@@ -9,6 +9,7 @@ import { CanvasStore, migrateCanvasTable } from "./canvas-store";
 import { GitTreeStore, migrateGitTreeTable } from "./git-tree-store";
 import { MemoryHandler, migrateMemoryTable } from "./memory";
 import { sameSecret } from "./secrets";
+import { brokerInternalHeaders } from "./auth/delegation";
 import {
   ConnectStore,
   EventQueue,
@@ -765,7 +766,9 @@ export class RepoCoordinator extends DurableObject<Env> {
           const parsed = parseRepositoryKey(repoName);
           const brokerRepo = parsed ? parsed.repository : repoName;
           const broker = this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(brokerRepo));
-          const res = await broker.fetch("https://credential-broker.internal/effective-webhook-secret");
+          const res = await broker.fetch("https://credential-broker.internal/effective-webhook-secret", {
+            headers: await brokerInternalHeaders(this.env, brokerRepo),
+          });
           if (res.ok) {
             const data = (await res.json().catch(() => ({}))) as { secret?: string };
             if (typeof data.secret === "string" && data.secret.length > 0) {

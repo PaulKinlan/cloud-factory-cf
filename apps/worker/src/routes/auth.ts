@@ -3,6 +3,7 @@ import { sameSecret } from "../secrets";
 import { importAppPrivateKey, mintAppJwt } from "../github-app";
 import { isRootLogin, ROOT_SESSION_LOGIN } from "../auth/tenant";
 import { handlePasskeyRoute } from "../auth/passkey";
+import { brokerInternalHeaders } from "../auth/delegation";
 
 export const AUTH_LOGIN_PATH = "/auth/github/login";
 export const AUTH_CALLBACK_PATH = "/auth/github/callback";
@@ -265,8 +266,10 @@ export async function resolveGithubCredentials(
       }
       try {
         const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(name));
-        // First try the internal effective endpoint (no control key needed)
-        const res = await broker.fetch("https://credential-broker.internal/effective-github-app");
+        // Read effective credentials with a server-tier credential scoped to this broker.
+        const res = await broker.fetch("https://credential-broker.internal/effective-github-app", {
+          headers: await brokerInternalHeaders(env, name),
+        });
         if (res.ok) {
           const data = (await res.json().catch(() => null)) as {
             appId?: string | null;

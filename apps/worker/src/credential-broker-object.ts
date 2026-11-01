@@ -9,7 +9,7 @@ import {
 import { executeSignedRequest, type BrokerExecution } from "./credentials/broker";
 import { credentialEnvFor, hasPermission, isApprovedCredentialBinding } from "./credentials/policy";
 import { sameSecret } from "./secrets";
-import { verifyDelegation } from "./auth/delegation";
+import { BROKER_INTERNAL_LOGIN, brokerInternalHeaders, verifyDelegation } from "./auth/delegation";
 
 /**
  * Per-repository credential broker.
@@ -67,6 +67,12 @@ export class CredentialBroker extends DurableObject<Env> {
 
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    // These DO-only routes expose secrets or can mutate root passkeys. The outer
+    // Worker's path filter is not an authorization boundary for a DO stub.
+    if (["/internal-setting", "/passkeys", "/passkeys/touch", "/effective-webhook-secret", "/effective-github-app"].includes(url.pathname) &&
+        !(await this.isInternalCaller(request))) {
+      return Response.json({ ok: false, error: "not authorised for broker internal route" }, { status: 401 });
+    }
 
     if (request.method === "POST" && url.pathname === "/capabilities") {
       return this.issue(request);
@@ -305,6 +311,13 @@ export class CredentialBroker extends DurableObject<Env> {
     if (!signingKey || !token) return { ok: false };
     const result = await verifyDelegation(signingKey, token, { repository: this.repository });
     return result.ok ? { ok: true, claims: result.claims } : { ok: false };
+  }
+
+  private async isInternalCaller(request: Request): Promise<boolean> {
+    const controlKey = this.env.BROKER_CONTROL_KEY;
+    if (controlKey && await sameSecret(controlKey, request.headers.get("x-factory-control-key"))) return true;
+    const delegated = await this.verifyDelegationHeader(request);
+    return delegated.ok && delegated.claims.login === BROKER_INTERNAL_LOGIN;
   }
 
   private async issue(request: Request): Promise<Response> {
@@ -1219,7 +1232,9 @@ export class CredentialBroker extends DurableObject<Env> {
       if (owner && this.env.CREDENTIAL_BROKER) {
         try {
           const ownerStub = this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(owner.toLowerCase()));
-          const res = await ownerStub.fetch(`https://credential-broker.internal/internal-setting?key=${encodeURIComponent(key)}`);
+          const res = await ownerStub.fetch(`https://credential-broker.internal/internal-setting?key=${encodeURIComponent(key)}`, {
+            headers: await brokerInternalHeaders(this.env, owner.toLowerCase()),
+          });
           if (res.ok) {
             const data = (await res.json().catch(() => null)) as { ok?: boolean; value?: string | null } | null;
             if (data?.ok && typeof data.value === "string" && data.value.length > 0) {
@@ -1235,7 +1250,9 @@ export class CredentialBroker extends DurableObject<Env> {
     if (repoStr !== "default" && this.env.CREDENTIAL_BROKER) {
       try {
         const defaultStub = this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName("default"));
-        const res = await defaultStub.fetch(`https://credential-broker.internal/internal-setting?key=${encodeURIComponent(key)}`);
+        const res = await defaultStub.fetch(`https://credential-broker.internal/internal-setting?key=${encodeURIComponent(key)}`, {
+          headers: await brokerInternalHeaders(this.env, "default"),
+        });
         if (res.ok) {
           const data = (await res.json().catch(() => null)) as { ok?: boolean; value?: string | null } | null;
           if (data?.ok && typeof data.value === "string" && data.value.length > 0) {

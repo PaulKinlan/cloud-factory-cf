@@ -2,6 +2,7 @@ import type { Env } from "../env";
 import { sameSecret } from "../secrets";
 import { mintSessionToken, SESSION_COOKIE, SESSION_TTL_SECONDS } from "../routes/auth";
 import { readSession } from "../routes/auth";
+import { brokerInternalHeaders } from "./delegation";
 
 export const WEBAUTHN_CHALLENGE_COOKIE = "cf_webauthn_challenge";
 
@@ -287,7 +288,7 @@ export async function handlePasskeyRoute(
     const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
     const saveRes = await broker.fetch("https://credential-broker.internal/passkeys", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: await brokerInternalHeaders(env, "default", { "content-type": "application/json" }),
       body: JSON.stringify({
         credentialId,
         subject: verifiedCookie.subject,
@@ -411,7 +412,9 @@ export async function handlePasskeyRoute(
       return Response.json({ ok: false, error: "CredentialBroker not available" }, { status: 503 });
     }
     const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
-    const getRes = await broker.fetch(`https://credential-broker.internal/passkeys?id=${encodeURIComponent(credentialId)}`);
+    const getRes = await broker.fetch(`https://credential-broker.internal/passkeys?id=${encodeURIComponent(credentialId)}`, {
+      headers: await brokerInternalHeaders(env, "default"),
+    });
     if (!getRes.ok) {
       return Response.json({ ok: false, error: "Passkey lookup failed" }, { status: 500 });
     }
@@ -477,7 +480,7 @@ export async function handlePasskeyRoute(
     // Touch last_used_at
     await broker.fetch("https://credential-broker.internal/passkeys/touch", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: await brokerInternalHeaders(env, "default", { "content-type": "application/json" }),
       body: JSON.stringify({ credentialId }),
     }).catch(() => null);
 
@@ -521,7 +524,9 @@ export async function handlePasskeyRoute(
       return Response.json({ ok: true, passkeys: [] });
     }
     const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
-    const res = await broker.fetch(`https://credential-broker.internal/passkeys?subject=${encodeURIComponent(subject)}`);
+    const res = await broker.fetch(`https://credential-broker.internal/passkeys?subject=${encodeURIComponent(subject)}`, {
+      headers: await brokerInternalHeaders(env, "default"),
+    });
     const data = await res.json();
     return Response.json(data);
   }
@@ -550,7 +555,10 @@ export async function handlePasskeyRoute(
     }
     const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
     const query = subject ? `?id=${encodeURIComponent(id)}&subject=${encodeURIComponent(subject)}` : `?id=${encodeURIComponent(id)}`;
-    const res = await broker.fetch(`https://credential-broker.internal/passkeys${query}`, { method: "DELETE" });
+    const res = await broker.fetch(`https://credential-broker.internal/passkeys${query}`, {
+      method: "DELETE",
+      headers: await brokerInternalHeaders(env, "default"),
+    });
     const data = await res.json();
     return Response.json(data);
   }
