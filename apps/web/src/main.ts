@@ -14,6 +14,7 @@ import {
   type ShareTarget,
 } from "./sync";
 import { initObservability } from "./observability";
+import { adoptControlKey, controlKeyHeaders } from "./control-key";
 import { mountConnectGate } from "./onboarding";
 import { installLightDismiss } from "./light-dismiss";
 import { coalescePerFrame } from "./pan-frame";
@@ -981,7 +982,15 @@ shareRunBtn?.addEventListener("click", async () => {
   setShareStatus("Executing workflow run on worker...");
   try {
     const headers: Record<string, string> = { "content-type": "application/json" };
-    if (target.controlKey) headers["x-factory-control-key"] = target.controlKey;
+    // The share panel's key is the platform master secret: exchange it once for the
+    // HttpOnly session and clear the field rather than sending it with the run
+    // (cloud-factory-cf-2gsy). A refused key still goes through as a header so the route
+    // can say why, which is the behaviour operators already have.
+    if (target.controlKey) {
+      const adopted = await adoptControlKey(target.controlKey);
+      controlKeyHeaders(adopted, headers);
+      if (adopted.mode === "session") shareKey.value = "";
+    }
     const res = await fetch(`${location.origin}/canvas/${target.repository}/run`, {
       method: "POST",
       headers,
