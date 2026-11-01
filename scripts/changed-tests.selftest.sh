@@ -394,6 +394,14 @@ check "a type error FAILs the gate even though every suite passed" 'test "$RC" -
 unset FAKE_TYPECHECK_RC FAKE_TYPECHECK_ERR FAKE_TYPECHECK_LOG
 reset_tree
 
+# 7c. An ambient declaration beside a changed suite is not "unreferenced": no import can
+#     name a .d.ts, so the reference rule cannot apply to it (cloud-factory-cf-0cdh).
+printf 'declare module "node:probe" { export const p: number; }\n' > "$FIX/apps/web/src/ambient.d.ts"
+printf '\n// touch\n' >> "$FIX/apps/web/test/a.test.ts"
+run_gate
+check "a .d.ts delta beside a changed suite does not fail the reference rule" 'test "$RC" -eq 0 && ! err_has "nothing in this workspace references"'
+reset_tree
+
 # 8. Nothing source/test changed: the smoke set runs, never an empty green.
 printf 'more docs\n' >> "$FIX/docs/speed.md"
 run_gate

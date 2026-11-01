@@ -164,7 +164,12 @@ source_is_referenced() { # <workspace> <source path>
     # Assets carry no module graph, so no import can vouch for them: the workspace
     # suite the caller is about to run is the only coverage that can exist
     # (cloud-factory-cf-2ng: a stylesheet delta was failing the gate by name).
-    *.css|*.html|*.htm|*.md|*.json|*.svg|*.txt) return 0 ;;
+    # An ambient declaration (`src/node-env.d.ts` and friends) is the same shape: it
+    # declares the environment the other modules are compiled against, so no import can
+    # ever name it and a source change that REQUIRED one failed the reference rule with
+    # no way to satisfy it (cloud-factory-cf-0cdh: adding execFile to the cli's node shim
+    # read as "nothing in this workspace references these changed source files").
+    *.css|*.html|*.htm|*.md|*.json|*.svg|*.txt|*.d.ts) return 0 ;;
   esac
   stem="${src#*/src/}"
   stem="${stem%.*}"
