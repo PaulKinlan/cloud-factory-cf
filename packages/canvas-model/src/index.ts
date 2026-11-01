@@ -73,7 +73,7 @@ export function createNode(
   doc: CanvasDoc,
   kind: NodeKind,
   position: { x: number; y: number },
-  options: { idGen?: IdGenerator; label?: string } = {},
+  options: { idGen?: IdGenerator; label?: string; config?: Record<string, string> } = {},
 ): CanvasNode {
   const idGen = options.idGen ?? defaultIdGenerator;
   const node: CanvasNode = {
@@ -82,7 +82,12 @@ export function createNode(
     label: options.label ?? KIND_LABELS[kind],
     x: Math.round(position.x),
     y: Math.round(position.y),
-    config: { ...DEFAULT_CONFIG[kind] },
+    // A template's own settings (model, prompt, scope, provider/event, ...) belong to the
+    // node and override its kind's defaults. They had no home in this signature, so callers
+    // passed them as a fifth argument that was silently dropped - the templates built nodes
+    // with the default config and default labels while the UI's typecheck went red
+    // (cloud-factory-cf-m1la).
+    config: { ...DEFAULT_CONFIG[kind], ...options.config },
   };
   doc.nodes.push(node);
   return node;
