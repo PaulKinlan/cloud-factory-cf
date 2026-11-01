@@ -232,19 +232,28 @@ repo, gate, pid_path = sys.argv[1:]
 proc = subprocess.Popen(["bash", gate], cwd=repo, env=os.environ.copy(),
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         start_new_session=True)
+# Two different waits, and they are not symmetric. Waiting for the GATE may be generous:
+# on a loaded VM its startup plus a suite can take minutes, and a slow gate is not the
+# defect under test - a 40s wait turned this case red at load ~6 and painted unrelated
+# deltas as failures (cloud-factory-cf-0cdh fast gate, 2026-11-01, 654s run: the only red
+# in a 42-check self-test). Waiting for EOF after the gate exits must stay short: that IS
+# the property under test, because a survivor holding the pipe never lets go.
+GATE_WAIT = float(os.environ.get("SELFTEST_PIPE_GATE_WAIT", "240"))
+EOF_WAIT = float(os.environ.get("SELFTEST_PIPE_EOF_WAIT", "10"))
 try:
     try:
-        # Wait for the gate itself first: on a loaded VM its startup may take >5s.
-        # Once it exits, EOF must be immediate even though the child is still alive.
-        proc.wait(timeout=40)
+        proc.wait(timeout=GATE_WAIT)
         child = int(open(pid_path).read())
         os.kill(child, 0)
-        stdout, stderr = proc.communicate(timeout=2)
+        stdout, stderr = proc.communicate(timeout=EOF_WAIT)
         print("gate-pipe-EOF-with-survivor" if proc.returncode == 0 else "gate-failed")
         sys.stdout.buffer.write(stdout)
         sys.stderr.buffer.write(stderr)
-    except (subprocess.TimeoutExpired, FileNotFoundError, ProcessLookupError, ValueError):
-        print("gate-pipe-held-by-survivor-or-runner-did-not-start")
+    except subprocess.TimeoutExpired as exc:
+        waited_on = "gate" if proc.poll() is None else "pipe-after-exit"
+        print(f"gate-pipe-held-or-gate-slow (waited on {waited_on})")
+    except (FileNotFoundError, ProcessLookupError, ValueError):
+        print("fake-runner-did-not-start (no pid file)")
 finally:
     try:
         os.kill(int(open(pid_path).read()), signal.SIGKILL)
