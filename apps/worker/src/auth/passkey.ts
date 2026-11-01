@@ -5,6 +5,22 @@ import { readSession } from "../routes/auth";
 
 export const WEBAUTHN_CHALLENGE_COOKIE = "cf_webauthn_challenge";
 
+/** Longest passkey label we will store and render in the admin tables. */
+export const MAX_PASSKEY_LABEL_LENGTH = 64;
+
+/**
+ * A passkey label is operator-supplied text that the admin UI displays, not markup:
+ * keep it bounded, single-line and free of control characters so no storage or layout
+ * surprise reaches the renderer (cloud-factory-cf-khnm). The renderer treats it as text
+ * (`textContent`), so markup is shown literally rather than executed.
+ */
+export function sanitizePasskeyLabel(raw: unknown, fallback: string): string {
+  if (typeof raw !== "string") return fallback;
+  const collapsed = raw.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim();
+  if (collapsed.length === 0) return fallback;
+  return collapsed.slice(0, MAX_PASSKEY_LABEL_LENGTH);
+}
+
 export function base64UrlEncode(input: ArrayBuffer | Uint8Array): string {
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
   let binary = "";
@@ -294,7 +310,7 @@ export async function handlePasskeyRoute(
         role: verifiedCookie.role,
         publicKeySpki,
         algorithm: algorithm ?? -7,
-        label: label ?? `Passkey (${new Date().toLocaleDateString()})`,
+        label: sanitizePasskeyLabel(label, `Passkey (${new Date().toLocaleDateString()})`),
       }),
     });
 
