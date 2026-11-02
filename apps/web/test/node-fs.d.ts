@@ -13,6 +13,11 @@
  */
 declare module "node:fs" {
   export function readFileSync(path: URL | string, encoding: "utf8" | "utf-8"): string;
+  /**
+   * Directory listing, for the guard that scans every file in src/ rather than a hand-kept
+   * list (cloud-factory-cf-x0xv). The defaults match Node's own: returns names only.
+   */
+  export function readdirSync(path: URL | string, options?: { withFileTypes?: false }): string[];
   export function copyFileSync(source: string, destination: string): void;
   export function existsSync(path: string): boolean;
   export function mkdirSync(path: string, options?: { recursive?: boolean }): string | undefined;

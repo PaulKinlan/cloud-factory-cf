@@ -31,7 +31,7 @@ const SINKS: Array<{ name: string; pattern: RegExp }> = [
 ];
 
 const files = readdirSync(SRC)
-  .filter((name) => name.endsWith(".ts"))
+  .filter((name: string) => name.endsWith(".ts"))
   .sort();
 
 describe("apps/web never assembles markup from data (cloud-factory-cf-o1os)", () => {
@@ -42,7 +42,9 @@ describe("apps/web never assembles markup from data (cloud-factory-cf-o1os)", ()
 
   for (const { name, pattern } of SINKS) {
     it(`has no ${name}`, () => {
-      const offenders = files.filter((file) => pattern.test(stripComments(readFileSync(new URL(file, SRC), "utf8"))));
+      const offenders = files.filter((file: string) =>
+        pattern.test(stripComments(readFileSync(new URL(file, SRC), "utf8"))),
+      );
       expect(offenders, `use textContent/setAttribute instead (see admin.ts repoItem)`).toEqual([]);
     });
   }
