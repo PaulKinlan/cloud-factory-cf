@@ -385,6 +385,14 @@ export FAKE_TYPECHECK_LOG="${TMPDIR:-/tmp}/fake-typecheck"
 FAKE_SELECT="apps/web/test/a.test.ts" FAKE_TYPECHECK_LOG="$FAKE_TYPECHECK_LOG" run_gate
 check "a changed workspace is typechecked, not only tested" 'test "$RC" -eq 0 && grep -qx "typecheck web" "$FAKE_TYPECHECK_LOG"'
 check "--list names the typecheck pass" 'run_gate --list; out_has "typecheck (npm run typecheck --if-present)"'
+# The marker gets its own scenario: a preceding --list run would leave $RC/$OUT describing
+# that run instead of the passing one, and a tree still carrying app.ts fires the reference
+# rule (which is what made this check red the first time).
+reset_tree
+printf '\n// touch\n' >> "$FIX/apps/web/test/a.test.ts"
+FAKE_SELECT="apps/web/test/a.test.ts" run_gate
+check "the gate names on stdout what it ran, so node:test coverage is attributable" \
+  'test "$RC" -eq 0 && out_has "fast-gate: passed: apps/web"'
 
 reset_tree
 printf '\n// touch\n' >> "$FIX/apps/web/src/app.ts"

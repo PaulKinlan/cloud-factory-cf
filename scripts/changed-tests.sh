@@ -233,9 +233,13 @@ ensure_workspace_deps() { # <workspace> — the dist its own suite needs
 # timeout of everything.
 SUITE_BOUND="${CHANGED_TESTS_SUITE_BOUND:-900}"
 
+RAN_LIST=""
+note_ran() { RAN_LIST="${RAN_LIST:+${RAN_LIST} }$1"; }
+
 run_ws_tests() { # <workspace> <command...> — build what it needs, then run it there
   local ws=$1
   shift
+  note_ran "$ws"
   ensure_workspace_deps "$ws" || return 1
   local log rc
   log=$(mktemp "${TMPDIR:-/tmp}/changed-tests.XXXXXX")
@@ -262,6 +266,7 @@ TYPECHECK_BOUND="${CHANGED_TESTS_TYPECHECK_BOUND:-300}"
 run_ws_typecheck() { # <workspace> — `npm run typecheck` if the workspace declares one
   local ws=$1 log rc
   ensure_workspace_deps "$ws" || return 1
+  note_ran "${ws}(typecheck)"
   log=$(mktemp "${TMPDIR:-/tmp}/changed-tests-typecheck.XXXXXX")
   ( cd "$ws" && timeout -k 15 "$TYPECHECK_BOUND" npm run typecheck --if-present --silent ) >"$log" 2>&1
   rc=$?
@@ -300,6 +305,25 @@ run_smoke() { # <reason>
   fi
   return "$smoke_status"
 }
+
+# One machine-readable line at the end of every run, naming what was executed. The fleet's
+# coverage reader can infer vitest suites from their output, but not node:test ones (packages/
+# cli, packages/sdk, packages/canvas-model print check marks and no suite banner), so a
+# node:test delta landed with coverage UNKNOWN - "not demonstrated to be exercised" - even
+# when its new test ran and passed (cloud-factory-cf-0cdh). This marker is that evidence, and
+# it is printed from a trap so it covers every exit path including the smoke and selftest ones.
+gate_marker() { # <rc>
+  local rc=$1
+  [ "$LIST" -eq 1 ] && return 0
+  [ -n "${GATE_MARKER_PRINTED:-}" ] && return 0
+  local what="${RAN_LIST:-no suite}"
+  if [ "$rc" -eq 0 ]; then
+    echo "fast-gate: passed: ${what}"
+  else
+    echo "fast-gate: failed: ${what}"
+  fi
+}
+trap 'gate_marker $?' EXIT
 
 # The gate's own decision logic has no workspace suite, so its test is the self-test
 # (fake runners in a throwaway repo, no deps). It runs whenever the gate changes.
@@ -341,6 +365,7 @@ if [ "$sources_n" -eq 0 ] && [ "$tests_n" -eq 0 ]; then
     # Positive evidence of what ran. Without it the coverage reader sees a log that names
     # no suite and reports the changed files as "NOT demonstrated to be exercised", which
     # is the opposite of what happened: the self-test is the whole check for this delta.
+    GATE_MARKER_PRINTED=1
     if [ "$smoke_status" -eq 0 ]; then
       echo "fast-gate: passed: ${SELFTEST}"
     else
