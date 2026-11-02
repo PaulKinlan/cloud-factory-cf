@@ -203,6 +203,43 @@ describe("live indicator poller", () => {
     expect(seen[0]).not.toContain("sekret");
   });
 
+  // The exchange-and-clear (cloud-factory-cf-2gsy) empties #connect-key, so "the field is
+  // empty" stopped meaning "nothing authorises this read": the session cookie does. The
+  // reviewer's repro on c306732 showed the poller going silent after a successful exchange
+  // (cloud-factory-cf-hqw3).
+  it("keeps reading after the key is exchanged for a session cookie", async () => {
+    let exchanged = false;
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      seen.push(String(input));
+      return connectResponse(evidence({ lastPingAt: iso(0), pings: 1 }));
+    });
+    const poller = new ConnectPoller({
+      base: "https://factory.example",
+      scope: () => ({ owner: "acme", repo: "widget" }),
+      key: () => "",
+      keyExchanged: () => exchanged,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+    });
+
+    // Before an exchange an empty field is still a missing credential.
+    await poller.check();
+    expect(seen).toEqual([]);
+    expect(poller.state.error).toBe("A control key is needed");
+
+    // After it, the cookie authorises the read and no key header is sent.
+    exchanged = true;
+    await poller.check();
+    expect(seen).toEqual(["https://factory.example/trace/acme/widget/connect"]);
+    expect(poller.state.error).toBeNull();
+    expect(poller.state.evidence?.pings).toBe(1);
+    const headers = (fetchImpl.mock.calls[0]?.[1] as RequestInit | undefined)?.headers as
+      | Record<string, string>
+      | undefined;
+    expect(headers?.["x-factory-control-key"]).toBeUndefined();
+  });
+
   it("polls on the dialog cadence, then the slower idle cadence", async () => {
     vi.useFakeTimers();
     const fetchImpl = vi.fn(async () => connectResponse(evidence({ lastPingAt: iso(0), pings: 1 })));

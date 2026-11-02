@@ -155,10 +155,14 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     if (pillLabelNode !== null) pillLabelNode.dataset["tone"] = tone;
   }
 
+  // Set when a typed key is exchanged for the session cookie; from then on the field is
+  // empty and the cookie is the credential (cloud-factory-cf-hqw3).
+  let keyExchanged = false;
   const poller = new ConnectPoller({
     base,
     scope: () => scope,
     ...(keyInput !== null ? { key: () => keyInput.value ?? "" } : {}),
+    keyExchanged: () => keyExchanged,
     ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
     now,
     onChange: (state) => {
@@ -204,7 +208,7 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     options.onScope?.(next);
     if (changed) {
       poller.reset();
-      if (scope !== null && (keyInput === null || (keyInput.value ?? "") !== "")) {
+      if (scope !== null && (keyInput === null || (keyInput.value ?? "") !== "" || keyExchanged)) {
         void poller.check().finally(() => {
           if (!poller.state.paused) poller.start();
         });
@@ -320,7 +324,9 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
       const headers: Record<string, string> = {};
       // One exchange, then the HttpOnly session cookie carries the authorisation: the
       // master key must not stay in the DOM or in memory (cloud-factory-cf-2gsy).
-      controlKeyHeaders(await adoptControlKeyFromInput(keyInput, options.fetchImpl ?? fetch), headers);
+      const adopted = await adoptControlKeyFromInput(keyInput, options.fetchImpl ?? fetch);
+      if (adopted.mode === "session") keyExchanged = true;
+      controlKeyHeaders(adopted, headers);
       const res = await (options.fetchImpl ?? fetch)(
         `${base}/api/admin/test-ping/${encodeURIComponent(scope.owner)}/${encodeURIComponent(scope.repo)}`,
         { method: "POST", headers, credentials: "same-origin" },
@@ -487,7 +493,9 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
     if (!owner || repoSelect === null) return;
     try {
       const headers: Record<string, string> = {};
-      controlKeyHeaders(await adoptControlKeyFromInput(keyInput, options.fetchImpl ?? fetch), headers);
+      const adopted = await adoptControlKeyFromInput(keyInput, options.fetchImpl ?? fetch);
+      if (adopted.mode === "session") keyExchanged = true;
+      controlKeyHeaders(adopted, headers);
       const res = await (options.fetchImpl ?? fetch)(`${base}/api/repos?owner=${encodeURIComponent(owner)}`, {
         headers,
       });
@@ -597,6 +605,12 @@ export interface ConnectPollerOptions {
   base: string;
   scope: () => Scope | null;
   key?: () => string;
+  /**
+   * True once the typed key has been exchanged for an HttpOnly session cookie
+   * (cloud-factory-cf-hqw3). The exchange clears the key field, so "no key in the input"
+   * no longer means "nothing authorises this read" - the cookie does.
+   */
+  keyExchanged?: () => boolean;
   fetchImpl?: typeof fetch;
   now?: () => number;
   onChange?: (state: PollerState) => void;
@@ -675,8 +689,25 @@ export class ConnectPoller {
 
   private eligible(): boolean {
     const scope = this.options.scope();
-    const hasKey = this.options.key !== undefined ? this.options.key() !== "" : true;
-    return scope !== null && hasKey && !this.state.paused;
+    return scope !== null && this.hasCredential() && !this.state.paused;
+  }
+
+  /**
+   * Whether this read is authorised at all. A key in the field, or the session cookie the
+   * exchange minted, or no key option at all (a caller that authorises another way).
+   */
+  private hasCredential(): boolean {
+    if (this.options.key === undefined) return true;
+    if (this.options.key() !== "") return true;
+    return this.options.keyExchanged?.() === true;
+  }
+
+  /** A stable name for the current credential, used to detect a change mid-read. */
+  private credential(): string {
+    if (this.options.key === undefined) return "";
+    const key = this.options.key();
+    if (key !== "") return key;
+    return this.options.keyExchanged?.() === true ? "<session>" : "";
   }
 
   /**
@@ -687,20 +718,20 @@ export class ConnectPoller {
    */
   async check(): Promise<void> {
     const scope = this.options.scope();
-    const hasKeyOption = this.options.key !== undefined;
     const key = this.options.key?.() ?? "";
     if (scope === null) {
       this.update({ evidence: null, error: "No repository selected" });
       return;
     }
-    if (hasKeyOption && key === "") {
+    if (!this.hasCredential()) {
       this.update({ evidence: null, error: "A control key is needed" });
       return;
     }
     if (this.state.checking) return; // one request at a time, however slow the network
     const generation = this.generation;
+    const capture = this.credential();
     const isStale = (): boolean => {
-      if (generation !== this.generation || (hasKeyOption && key !== this.options.key?.())) return true;
+      if (generation !== this.generation || capture !== this.credential()) return true;
       const current = this.options.scope();
       return current === null || current.owner !== scope.owner || current.repo !== scope.repo;
     };
@@ -737,7 +768,7 @@ export class ConnectPoller {
         this.update({
           checking: false,
           evidence: null,
-          error: hasKeyOption ? "control key rejected (401)" : "unauthorised (401)",
+          error: this.options.key !== undefined ? "control key rejected (401)" : "unauthorised (401)",
           paused: true,
         });
         return;
