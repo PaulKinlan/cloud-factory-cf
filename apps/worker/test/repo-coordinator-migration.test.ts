@@ -426,6 +426,124 @@ describe("RepoCoordinator legacy read-through migration (Slice 3)", () => {
     });
   });
 
+  it("imports a second un-prefixed spelling seen later instead of sealing after the first (cloud-factory-cf-ik4w)", async () => {
+    const canonical = "github:octodev/ik4w-multi";
+    const firstSpelling = "Octodev/IK4W-Multi";
+    const secondSpelling = "OCTODEV/IK4W-Multi";
+
+    // The same history, split across two objects because the DO name used to be
+    // whatever spelling the caller wrote.
+    const seed = async (name: string, pings: number) => {
+      const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(name));
+      await runInDurableObject(stub, (_instance, state) => {
+        state.storage.sql.exec(
+          "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+          "default",
+          "2026-01-01T00:00:00.000Z",
+          "2026-01-01T00:00:00.000Z",
+          "ping",
+          pings,
+          "2026-01-01T00:00:00.000Z",
+        );
+      });
+    };
+    await seed(firstSpelling, 2);
+    await seed(secondSpelling, 3);
+
+    const canonicalStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(canonical));
+
+    // First request: the caller used the mixed-case spelling, so the un-prefixed proxy
+    // carries it. Two pings arrive and the repository is sealed.
+    const first = await canonicalStub.fetch("https://repo-coordinator.internal/stats", {
+      headers: { "x-factory-legacy-repository": firstSpelling },
+    });
+    expect(first.status).toBe(200);
+
+    const pingsAfterFirst = await runInDurableObject(canonicalStub, (_instance, state) => {
+      const rows = state.storage.sql.exec<{ pings: number }>("SELECT pings FROM webhook_connect").toArray();
+      const sealed = state.storage.sql
+        .exec<{ name: string }>("SELECT name FROM _schema_migrations WHERE name = 'legacy_read_through'")
+        .toArray();
+      return { pings: rows[0]?.pings ?? 0, sealed: sealed.length };
+    });
+    expect(pingsAfterFirst).toEqual({ pings: 2, sealed: 1 });
+
+    // Second request: a different spelling of the same repository. The seal must not
+    // hide it - its three pings are imported and summed (mergeLegacyConnectRow), not
+    // discarded.
+    const second = await canonicalStub.fetch("https://repo-coordinator.internal/stats", {
+      headers: { "x-factory-legacy-repository": secondSpelling },
+    });
+    expect(second.status).toBe(200);
+
+    // A repeat of the same spelling must not double count: the probe marker is what
+    // makes the sum idempotent.
+    const repeat = await canonicalStub.fetch("https://repo-coordinator.internal/stats", {
+      headers: { "x-factory-legacy-repository": secondSpelling },
+    });
+    expect(repeat.status).toBe(200);
+
+    const final = await runInDurableObject(canonicalStub, (_instance, state) => {
+      const rows = state.storage.sql.exec<{ pings: number }>("SELECT pings FROM webhook_connect").toArray();
+      const probed = state.storage.sql
+        .exec<{ name: string }>("SELECT name FROM _schema_migrations WHERE name LIKE 'legacy_probed:%' ORDER BY name")
+        .toArray()
+        .map((row) => row.name);
+      return { pings: rows[0]?.pings ?? 0, probed };
+    });
+    expect(final.pings).toBe(5);
+    expect(final.probed).toContain(`legacy_probed:${secondSpelling}`);
+    expect(final.probed).toContain(`legacy_probed:${firstSpelling}`);
+
+    // Both legacy objects were told they are reachable now.
+    for (const name of [firstSpelling, secondSpelling]) {
+      const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(name));
+      const acked = await runInDurableObject(stub, (_instance, state) =>
+        state.storage.sql
+          .exec<{ name: string }>("SELECT name FROM _schema_migrations WHERE name = 'migrated_to_prefixed'")
+          .toArray(),
+      );
+      expect(acked).toHaveLength(1);
+    }
+  });
+
+  it("ignores a legacy-spelling hint that names a different repository (cloud-factory-cf-ik4w)", async () => {
+    const canonical = "github:octodev/ik4w-guard";
+    const victim = "victimorg/probe-secret";
+
+    const victimStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(victim));
+    await runInDurableObject(victimStub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO webhook_connect (id, last_ping_at, last_event_at, last_event, pings, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "default",
+        "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:00:00.000Z",
+        "ping",
+        9,
+        "2026-01-01T00:00:00.000Z",
+      );
+    });
+
+    const canonicalStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(canonical));
+    const res = await canonicalStub.fetch("https://repo-coordinator.internal/stats", {
+      headers: { "x-factory-legacy-repository": victim },
+    });
+    expect(res.status).toBe(200);
+
+    const imported = await runInDurableObject(canonicalStub, (_instance, state) =>
+      state.storage.sql.exec<{ pings: number }>("SELECT pings FROM webhook_connect").toArray(),
+    );
+    expect(imported).toEqual([]);
+
+    const victimStillOwnsItsData = await runInDurableObject(victimStub, (_instance, state) => ({
+      pings: state.storage.sql.exec<{ pings: number }>("SELECT pings FROM webhook_connect").toArray(),
+      migrated: state.storage.sql
+        .exec<{ name: string }>("SELECT name FROM _schema_migrations WHERE name = 'migrated_to_prefixed'")
+        .toArray().length,
+    }));
+    expect(victimStillOwnsItsData).toEqual({ pings: [{ pings: 9 }], migrated: 0 });
+  });
+
   it("fails closed with 503 when BROKER_CONTROL_KEY is unconfigured (cloud-factory-cf-1xs3)", async () => {
     const unconfRepo = "unconf-org/unconf-repo";
     const prefixedRepo = `github:${unconfRepo}`;
