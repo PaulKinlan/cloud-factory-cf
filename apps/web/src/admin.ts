@@ -806,6 +806,67 @@ export function initAdminDashboard(): void {
     }
   };
 
+  const repoAction = (
+    tag: 'a' | 'button',
+    label: string,
+    extraClass: string,
+    attributes: Record<string, string>,
+  ): HTMLElement => {
+    const element = document.createElement(tag);
+    element.className = `button button--ghost${extraClass ? ` ${extraClass}` : ''}`;
+    if (tag === 'button') (element as HTMLButtonElement).type = 'button';
+    if (tag === 'a') element.style.textDecoration = 'none';
+    element.textContent = label;
+    for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
+    return element;
+  };
+
+  /**
+   * One row of the repository list. `fullName`, `defaultBranch`, `owner` and `name` come
+   * from the GitHub API for a repository the App was installed on - so a repository named
+   * `<img src=x onerror=...>` is attacker-chosen text on an admin surface, and interpolating
+   * it into `innerHTML` is stored XSS in the operator's (possibly root's) session
+   * (cloud-factory-cf-o1os). Text goes in through `textContent`, identity through
+   * `setAttribute`/`dataset`, and the canvas link through an `href` the DOM encodes itself -
+   * the same rule `passkeyRow` follows for cloud-factory-cf-khnm.
+   */
+  type LoadedRepository = { fullName: string; owner: string; name: string; isPrivate: boolean; defaultBranch: string };
+  const repoItem = (r: LoadedRepository): HTMLDivElement => {
+    const item = document.createElement('div');
+    item.className = 'repo-item';
+
+    const meta = document.createElement('div');
+    meta.className = 'repo-item__meta';
+
+    const title = document.createElement('span');
+    title.className = 'repo-item__title';
+    title.textContent = r.fullName;
+
+    const badge = document.createElement('span');
+    badge.className = r.isPrivate ? 'badge' : 'badge badge--ok';
+    badge.textContent = r.isPrivate ? 'Private' : 'Public';
+
+    const branch = document.createElement('span');
+    branch.className = 'muted';
+    branch.style.fontSize = '0.8rem';
+    branch.textContent = `branch: ${r.defaultBranch || 'main'}`;
+
+    meta.appendChild(title);
+    meta.appendChild(badge);
+    meta.appendChild(branch);
+
+    const actions = document.createElement('div');
+    actions.className = 'repo-item__actions';
+
+    actions.appendChild(repoAction('a', 'Open in Canvas →', '', { href: `/?owner=${encodeURIComponent(r.owner)}&repo=${encodeURIComponent(r.name)}` }));
+    actions.appendChild(repoAction('button', 'Ping', 'btn-repo-ping', { 'data-owner': r.owner, 'data-repo': r.name }));
+    actions.appendChild(repoAction('button', 'Overrides', 'btn-repo-override', { 'data-owner': r.owner, 'data-repo': r.name }));
+
+    item.appendChild(meta);
+    item.appendChild(actions);
+    return item;
+  };
+
   const renderRepositories = () => {
     if (!userRepoList) return;
     const search = userRepoFilter?.value.trim().toLowerCase() ?? '';
@@ -824,21 +885,7 @@ export function initAdminDashboard(): void {
 
     userRepoList.innerHTML = '';
     for (const r of filtered) {
-      const div = document.createElement('div');
-      div.className = 'repo-item';
-      div.innerHTML = `
-        <div class="repo-item__meta">
-          <span class="repo-item__title">${r.fullName}</span>
-          <span class="badge ${r.isPrivate ? '' : 'badge--ok'}">${r.isPrivate ? 'Private' : 'Public'}</span>
-          <span class="muted" style="font-size:0.8rem;">branch: ${r.defaultBranch || 'main'}</span>
-        </div>
-        <div class="repo-item__actions">
-          <a href="/?owner=${encodeURIComponent(r.owner)}&repo=${encodeURIComponent(r.name)}" class="button button--ghost" style="text-decoration:none;">Open in Canvas →</a>
-          <button type="button" class="button button--ghost btn-repo-ping" data-owner="${r.owner}" data-repo="${r.name}">Ping</button>
-          <button type="button" class="button button--ghost btn-repo-override" data-owner="${r.owner}" data-repo="${r.name}">Overrides</button>
-        </div>
-      `;
-      userRepoList.appendChild(div);
+      userRepoList.appendChild(repoItem(r));
     }
 
     // Wire actions
