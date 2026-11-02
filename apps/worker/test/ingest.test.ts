@@ -1,6 +1,6 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { githubRequest, gitlabRequest, signBody, TEST_SECRET } from "./support/webhook";
+import { githubRequest, gitlabRequest, signBody, TEST_GITLAB_TOKEN, TEST_SECRET } from "./support/webhook";
 import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
 
 describe("webhook ingestion", () => {
@@ -38,6 +38,44 @@ describe("webhook ingestion", () => {
       }),
     );
     expect(missing.status).toBe(401);
+  });
+
+  it("refuses the deployment's GitHub webhook secret, and fails closed when its own token is unset (cloud-factory-cf-dxuh)", async () => {
+    // One deployment secret must not authenticate another provider's endpoint: the
+    // GitLab token is GITLAB_WEBHOOK_TOKEN, and WEBHOOK_SECRET belongs to GitHub.
+    const withGithubSecret = await SELF.fetch(
+      await gitlabRequest("gitlab-shared-secret", "acme/ingest-repo", { token: TEST_SECRET }),
+    );
+    expect(withGithubSecret.status).toBe(401);
+    await expect(withGithubSecret.json()).resolves.toMatchObject({ error: "invalid token" });
+
+    // Nor the Gitea secret, which is a different platform's credential again.
+    const withGiteaSecret = await SELF.fetch(
+      await gitlabRequest("gitlab-gitea-secret", "acme/ingest-repo", { token: "test-gitea-webhook-secret" }),
+    );
+    expect(withGiteaSecret.status).toBe(401);
+
+    // Unset means 503: there is no fallback to a secret that names another provider.
+    // A Durable Object's bindings are fixed at namespace level in the test runtime, so
+    // clear the token inside the instance rather than passing a binding override.
+    const unconfiguredRepo = "acme/ingest-unconfigured-dxuh";
+    const unconfiguredStub = getRepoCoordinator(env, unconfiguredRepo, "gitlab");
+    // The instance's env IS the shared binding object in this runtime, so the clear has
+    // to be undone or every later test in the file sees an unconfigured platform.
+    const setToken = (value: string | undefined) =>
+      runInDurableObject(unconfiguredStub, (instance) => {
+        (instance as unknown as { env: { GITLAB_WEBHOOK_TOKEN?: string } }).env.GITLAB_WEBHOOK_TOKEN = value;
+      });
+    await setToken(undefined);
+    try {
+      const unconfigured = await SELF.fetch(
+        await gitlabRequest("gitlab-unconfigured", unconfiguredRepo, { token: TEST_SECRET }),
+      );
+      expect(unconfigured.status).toBe(503);
+      await expect(unconfigured.json()).resolves.toMatchObject({ error: "gitlab token not configured" });
+    } finally {
+      await setToken(TEST_GITLAB_TOKEN);
+    }
   });
 
   it("rejects an unsupported provider and a missing delivery id", async () => {

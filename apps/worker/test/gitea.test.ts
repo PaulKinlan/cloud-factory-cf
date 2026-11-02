@@ -1,4 +1,4 @@
-import { env, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { decideAction, type EventFacts } from "../src/pipeline";
 import { signBody } from "./support/webhook";
@@ -113,6 +113,67 @@ describe("gitea webhooks", () => {
     const refused = await SELF.fetch(tokenOnly);
     expect(refused.status).toBe(401);
     await expect(refused.json()).resolves.toMatchObject({ error: "invalid token" });
+  });
+
+  it("refuses the deployment's GitHub webhook secret, and fails closed when its own is unset (cloud-factory-cf-dxuh)", async () => {
+    // WEBHOOK_SECRET is the GitHub App secret. A Gitea endpoint must never accept it -
+    // one platform's hook secret authenticating another platform's endpoint is how a
+    // single leaked deployment secret becomes every provider's key.
+    const body = pullRequestBody("forge/shared-secret");
+    const githubSecretSignature = (await signBody("test-webhook-secret", body)).replace(/^sha256=/, "");
+    const signedWithGithubSecret = await SELF.fetch(
+      new Request("https://example.com/webhooks/gitea/forge/shared-secret", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-gitea-delivery": "gitea-github-secret",
+          "x-gitea-event": "pull_request",
+          "x-gitea-signature": githubSecretSignature,
+        },
+        body,
+      }),
+    );
+    expect(signedWithGithubSecret.status).toBe(401);
+
+    const tokenWithGithubSecret = await giteaRequest("forge/shared-secret", {
+      delivery: "gitea-github-secret-token",
+      token: "test-webhook-secret",
+    });
+    tokenWithGithubSecret.headers.delete("x-gitea-signature");
+    const refused = await SELF.fetch(tokenWithGithubSecret);
+    expect(refused.status).toBe(401);
+
+    // With GITEA_WEBHOOK_SECRET unset there is nothing to verify against: 503, never a
+    // fallback to a secret that belongs to another provider. A Durable Object's bindings
+    // are fixed at namespace level in the test runtime, so clear it inside the instance
+    // (the same shape as the 1xs3 test) rather than passing a binding override.
+    const unconfiguredRepo = "forge/unconfigured-dxuh";
+    const unconfiguredStub = getRepoCoordinator(env, unconfiguredRepo, "gitea");
+    // The instance's env IS the shared binding object in this runtime, so the clear has
+    // to be undone or every later test in the file sees an unconfigured platform.
+    const setSecret = (value: string | undefined) =>
+      runInDurableObject(unconfiguredStub, (instance) => {
+        (instance as unknown as { env: { GITEA_WEBHOOK_SECRET?: string } }).env.GITEA_WEBHOOK_SECRET = value;
+      });
+    await setSecret(undefined);
+    try {
+      const unconfigured = await SELF.fetch(
+        new Request(`https://example.com/webhooks/gitea/${unconfiguredRepo}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-gitea-delivery": "gitea-unconfigured",
+            "x-gitea-event": "pull_request",
+            "x-gitea-token": "test-webhook-secret",
+          },
+          body: pullRequestBody(unconfiguredRepo),
+        }),
+      );
+      expect(unconfigured.status).toBe(503);
+      await expect(unconfigured.json()).resolves.toMatchObject({ error: "gitea webhook secret not configured" });
+    } finally {
+      await setSecret(GITEA_SECRET);
+    }
   });
 
   it("refuses a delivery that carries no signature and no token", async () => {
