@@ -52,12 +52,23 @@ export interface FactoryEnv {
   GITHUB_APP_SLUG?: string;
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
+  /**
+   * Legacy alias for GITHUB_APP_PRIVATE_KEY, still read as a fallback by the credential
+   * broker and the auth routes so existing deployments keep working.
+   */
+  GITHUB_PRIVATE_KEY?: string;
   GITLAB_TOKEN?: string;
   /** Beads API host and token: unset means the beads sink reports the service as unconfigured. */
   BEADS_API_HOST?: string;
   BEADS_TOKEN?: string;
   /** Where the telemetry sink exports; unset means the structured log. */
   TELEMETRY_ENDPOINT?: string;
+  /**
+   * Comma-separated logins treated as platform owners (root-equivalent) by the tenant
+   * checks. ROOT_ADMIN_LOGINS is the older name, still accepted as a fallback.
+   */
+  PLATFORM_OWNERS?: string;
+  ROOT_ADMIN_LOGINS?: string;
   ENVIRONMENT: string;
 }
 

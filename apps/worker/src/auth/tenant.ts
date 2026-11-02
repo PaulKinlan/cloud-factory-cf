@@ -107,11 +107,11 @@ export function isReservedBrokerAddress(name: string | null | undefined): boolea
 
 export function isRootLogin(login: string, env: Env): boolean {
   if (login.toLowerCase() === ROOT_SESSION_LOGIN) return true;
-  const rawOwners = env.PLATFORM_OWNERS ?? (env as unknown as { ROOT_ADMIN_LOGINS?: string }).ROOT_ADMIN_LOGINS;
+  const rawOwners = env.PLATFORM_OWNERS ?? env.ROOT_ADMIN_LOGINS;
   if (!rawOwners) return false;
   const owners = rawOwners
     .split(",")
-    .map((s) => s.trim().toLowerCase())
+    .map((entry: string) => entry.trim().toLowerCase())
     .filter(Boolean);
   return owners.includes(login.toLowerCase());
 }
