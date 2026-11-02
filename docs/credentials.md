@@ -88,11 +88,17 @@ point of the split: the control key names no tenant, so anything holding it can
 reach every repository, and a browser was never able to hold it securely.
 
 Covered today by this boundary: `/audit/*`, `/canvas/<owner>/<repo>/documents`,
-`/studio/*`, `/analysis/*/tree`. Still control-key-only, because they issue
-capabilities with the master key or forward it to a Durable Object that verifies
-it: `/runs/*`, `/canvas/.../run`, `/broker/*`, `/admin/*`, `/trace/*`. Tying
-those to a tenant identity needs per-tenant capability issuance (ADR 006), not
-just a session check.
+`/studio/*`, `/analysis/*/tree`, and every `/broker/<owner>/<repo>/*` operation
+(`permissions`, `settings`, `capabilities`). A request the Worker authenticates as
+a session is forwarded to the broker as a delegation scoped to that one
+repository, never as the master key, so the object cannot be asked to reason
+about a key that names every tenant; `provisioning`, `overrides` and `audit`
+stay machine-key-only and answer a session with 403. `proxy` is left to the
+object on purpose: it authorises a capability token in the body, which is minted
+for one repository, and that is all an agent runner holds. Still control-key-only,
+because they issue capabilities with the master key: `/runs/*`,
+`/canvas/.../run`, `/admin/*`, `/trace/*`. Tying those to a tenant identity needs
+per-tenant capability issuance (ADR 006), not just a session check.
 
 On a multi-platform deployment the owner segment is compared against the GitHub
 login, so a GitLab/Bitbucket/Gitea namespace that merely *shares a name* with a
@@ -123,6 +129,11 @@ control key because the metadata names agents and actions (the tenant-bound
   action) — see below — but the control key can still create one for any agent:
   the next step is tying provisioning to an authenticated control-plane caller
   rather than a single shared key.
+- The machine control key still names no tenant, so a holder reaches every
+  repository: `/broker/*` now binds *browser sessions* to their own tenant (and
+  refuses them on the machine-key operations), but removing the key's reach
+  itself needs per-tenant capability issuance (ADR 006 slice 3), not a route
+  check.
 - Per-repository credential bindings and action narrowing exist (see
   "Per-repository overrides"); the policy *table* itself is still static, so a
   new route is a code change.
