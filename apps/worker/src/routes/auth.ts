@@ -4,6 +4,7 @@ import { importAppPrivateKey, mintAppJwt } from "../github-app";
 import { isRootLogin, ROOT_SESSION_LOGIN } from "../auth/tenant";
 import { handlePasskeyRoute } from "../auth/passkey";
 import { brokerInternalHeaders } from "../auth/delegation";
+import { clientIdentity, controlKeyThrottle } from "../auth/throttle";
 
 export const AUTH_LOGIN_PATH = "/auth/github/login";
 export const AUTH_CALLBACK_PATH = "/auth/github/callback";
@@ -171,6 +172,23 @@ export async function handleAuth(
     if (!controlKey) {
       return Response.json({ ok: false, error: "Root broker control key not configured on server" }, { status: 503 });
     }
+
+    // This route turns the deployment's control key into a root session, and it is
+    // internet-facing, so a wrong guess must cost the guesser something
+    // (cloud-factory-cf-vhns). The counter lives in the broker (the only durable state
+    // the Worker has) and is keyed by client address; a correct key clears the streak.
+    // One atomic reservation per attempt, taken BEFORE the key is compared: check and
+    // record as separate calls let a parallel burst have every guess evaluated
+    // (cloud-factory-cf-1f8m), and a slot taken before the comparison is what makes the
+    // limit true for concurrent callers too. A success clears the streak.
+    const throttleIdentity = clientIdentity(request);
+    const reservation = await controlKeyThrottle(env, throttleIdentity, "attempt");
+    if (reservation && !reservation.allowed) {
+      return Response.json(
+        { ok: false, error: "Too many root login attempts; try again later" },
+        { status: 429, headers: { "retry-after": String(reservation.retryAfterSec) } },
+      );
+    }
     const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
     if (!signingKey) {
       return Response.json({ ok: false, error: "Signing key not configured" }, { status: 503 });
@@ -187,8 +205,11 @@ export async function handleAuth(
     }
 
     if (!presented || !(await sameSecret(controlKey, presented))) {
+      // The reservation already counted this attempt; nothing else to record.
       return Response.json({ ok: false, error: "Invalid root bootstrap password / control key" }, { status: 401 });
     }
+
+    await controlKeyThrottle(env, throttleIdentity, "success");
 
     const token = await mintSessionToken(signingKey, ROOT_SESSION_LOGIN);
     const isSecure = url.protocol === "https:";
@@ -1077,3 +1098,4 @@ export async function handleApiRepos(
 
   return Response.json(data, { status: reposRes.status });
 }
+

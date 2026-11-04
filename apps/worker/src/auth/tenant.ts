@@ -1,6 +1,7 @@
 import type { Env } from "../env";
 import { sameSecret } from "../secrets";
 import { readSession } from "../routes/auth";
+import { clientIdentity, controlKeyThrottle } from "./throttle";
 
 /**
  * Tenant-aware control-plane authorisation (cloud-factory-cf-e1ql).
@@ -127,8 +128,15 @@ export async function authorizeControlPlane(
 ): Promise<ControlAuthz> {
   const controlKey = env.BROKER_CONTROL_KEY;
   const presented = request.headers.get("x-factory-control-key");
-  if (controlKey && presented && (await sameSecret(controlKey, presented))) {
-    return { ok: true, principal: { via: "control-key" } };
+  if (controlKey && presented) {
+    // This is where every machine-key comparison happens (admin, broker, audit, trace,
+    // passkey, the legacy proxy), so a rejection is recorded here rather than inferred
+    // from a response status: the entry-point gate in index.ts refuses a locked address
+    // before it reaches this function (cloud-factory-cf-m5dk).
+    if (await sameSecret(controlKey, presented)) {
+      return { ok: true, principal: { via: "control-key" } };
+    }
+    await controlKeyThrottle(env, clientIdentity(request), "failure");
   }
 
   const signingKey = sessionSigningKey(env);
