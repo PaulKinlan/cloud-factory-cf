@@ -129,15 +129,22 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
 
     if (isUnprefixed) {
-      // Legacy un-prefixed DO: proxy request to platform-prefixed DO (ADR 003 Slice 3)
+      // Legacy un-prefixed DO: proxy request to platform-prefixed DO (ADR 003 Slice 3).
+      // Carry this object's own name: it is the only surviving record of the spelling
+      // the caller used, so the prefixed object can probe it as a migration candidate
+      // instead of orphaning its history (cloud-factory-cf-ik4w).
+      const headers = new Headers(request.headers);
+      headers.set(LEGACY_REPOSITORY_HEADER, name);
       const targetStub = this.env.REPO_COORDINATOR.get(
         this.env.REPO_COORDINATOR.idFromName(`github:${name}`),
       );
-      return targetStub.fetch(request);
+      return targetStub.fetch(new Request(request, { headers }));
     }
 
     try {
-      await this.withSchemaRetry(() => this.ensureMigrated());
+      await this.withSchemaRetry(() =>
+        this.ensureMigrated(request.headers.get(LEGACY_REPOSITORY_HEADER)),
+      );
     } catch (err) {
       return Response.json(
         { ok: false, error: err instanceof Error ? err.message : String(err) },
@@ -202,31 +209,87 @@ export class RepoCoordinator extends DurableObject<Env> {
     return Response.json({ ok: true });
   }
 
-  private async ensureMigrated(): Promise<void> {
+  /**
+   * Legacy read-through migration (ADR 003 Slice 3).
+   *
+   * A repository's history may sit in an un-prefixed Durable Object - and in more than
+   * one of them, because before the addressing was canonicalised the object name was
+   * whatever spelling the caller used, so `Octodev/Probe-Multi` and `OCTODEV/Probe-Multi`
+   * are two objects holding two halves of the same history. Two rules follow, and both
+   * are why this is a loop rather than a single probe (cloud-factory-cf-ik4w, -71la):
+   *
+   * * A candidate is probed at most once - `legacy_probed:<name>` records it. The merge
+   *   *sums* the `webhook_connect` ping counter (`mergeLegacyConnectRow`), so probing the
+   *   same object twice would double count real evidence.
+   * * The seal (`legacy_read_through`) is written only when every known candidate has
+   *   been probed and every merge was lossless (cloud-factory-cf-tgu9). An empty probe
+   *   never seals, and an existing seal never stops a spelling that is seen later.
+   *
+   * The candidates are this object's own un-prefixed name and the spelling the caller
+   * used, which the un-prefixed proxy in `fetch` carries in `x-factory-legacy-repository`.
+   * That header can only name the same repository (a case variant of it), so it can
+   * never point the migration at another tenant's object.
+   */
+  private async ensureMigrated(legacyHint?: string | null): Promise<void> {
     const name = this.ctx.id.name ?? "";
     const parsed = parseRepositoryKey(name);
     if (!parsed || parsed.platform !== "github") return;
 
-    const migrationRow = this.sql.exec<{ name: string }>(
-      "SELECT name FROM _schema_migrations WHERE name = 'legacy_read_through'",
-    ).toArray();
-    if (migrationRow.length > 0) return;
-
     const controlKey = this.env.BROKER_CONTROL_KEY;
-    const legacyName = parsed.repository;
     if (!controlKey) {
-      console.error(`Migration blocked for ${legacyName}: BROKER_CONTROL_KEY is unconfigured`);
-      throw new Error(`BROKER_CONTROL_KEY is unconfigured: migration for ${legacyName} cannot proceed`);
+      console.error(`Migration blocked for ${parsed.repository}: BROKER_CONTROL_KEY is unconfigured`);
+      throw new Error(`BROKER_CONTROL_KEY is unconfigured: migration for ${parsed.repository} cannot proceed`);
     }
 
+    const candidates = legacyCandidateNames(parsed.repository, legacyHint);
+    // Set once a candidate could not be merged losslessly, or could not be reached at
+    // all: either way the repository must stay unsealed so the evidence stays reachable.
+    let sealSafe = !this.hasMigration("legacy_lossy");
+
+    for (const candidate of candidates) {
+      if (this.hasMigration(`legacy_probed:${candidate}`)) continue;
+      const outcome = await this.importLegacyCandidate(candidate, controlKey);
+      if (outcome === "unreachable") {
+        // No marker: a later request retries this spelling rather than sealing over it.
+        sealSafe = false;
+        continue;
+      }
+      this.markMigration(`legacy_probed:${candidate}`);
+      if (outcome === "lossy") {
+        sealSafe = false;
+        this.markMigration("legacy_lossy");
+      }
+    }
+
+    const everyCandidateProbed = candidates.every((candidate) =>
+      this.hasMigration(`legacy_probed:${candidate}`),
+    );
+    if (sealSafe && everyCandidateProbed) {
+      this.markMigration("legacy_read_through");
+    } else if (!sealSafe) {
+      console.error(
+        `Legacy read-through for ${parsed.repository} left unsealed: a candidate could not be merged losslessly or reached`,
+      );
+    }
+  }
+
+  /**
+   * Probes one un-prefixed legacy object and merges everything it holds. A throw is
+   * logged and reported as unreachable: a migration problem must never 503 the whole
+   * request (cloud-factory-cf-bi7l).
+   */
+  private async importLegacyCandidate(
+    candidate: string,
+    controlKey: string,
+  ): Promise<"empty" | "merged" | "lossy" | "unreachable"> {
     try {
-      const legacyStub = this.env.REPO_COORDINATOR.get(this.env.REPO_COORDINATOR.idFromName(legacyName));
+      const legacyStub = this.env.REPO_COORDINATOR.get(this.env.REPO_COORDINATOR.idFromName(candidate));
       const res = await legacyStub.fetch("https://repo-coordinator.internal/legacy/export", {
         headers: { "x-factory-control-key": controlKey },
       });
       if (!res.ok) {
-        console.error(`Legacy export failed for ${legacyName} with status ${res.status}`);
-        return;
+        console.error(`Legacy export failed for ${candidate} with status ${res.status}`);
+        return "unreachable";
       }
       const body = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
@@ -234,35 +297,21 @@ export class RepoCoordinator extends DurableObject<Env> {
         state?: Record<string, unknown[]>;
       };
       if (!body.ok) {
-        console.error(`Legacy export returned not ok for ${legacyName}`);
-        return;
+        console.error(`Legacy export returned not ok for ${candidate}`);
+        return "unreachable";
       }
 
       if (body.empty) {
-        this.sql.exec(
-          "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
-          Date.now(),
-        );
-        try {
-          const ackRes = await legacyStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
-            method: "POST",
-            headers: { "x-factory-control-key": controlKey },
-          });
-          if (!ackRes.ok) {
-            console.error(`Legacy ack-migrated failed on empty path for ${legacyName} with status ${ackRes.status}`);
-          }
-        } catch (ackErr) {
-          console.error(`Legacy ack-migrated network error on empty path for ${legacyName}:`, ackErr);
-        }
-        return;
+        await this.ackLegacy(candidate, controlKey);
+        return "empty";
       }
 
       const s = body.state;
-      if (!s) return;
+      if (!s) return "unreachable";
 
       // A legacy value we cannot represent must not disappear behind the seal
-      // (cloud-factory-cf-tgu9): if anything was dropped, stay unsealed and say so
-      // rather than making the loss permanent and silent.
+      // (cloud-factory-cf-tgu9): stay unsealed and say so rather than making the loss
+      // permanent and silent.
       let mergedLosslessly = true;
 
       this.ctx.storage.transactionSync(() => {
@@ -307,39 +356,57 @@ export class RepoCoordinator extends DurableObject<Env> {
             t.id, t.delivery_id, t.sequence, t.step, t.status, t.detail, t.artifact, t.created_at, t.ms,
           );
         }
-        if (mergedLosslessly) {
-          this.sql.exec(
-            "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES ('legacy_read_through', ?)",
-            Date.now(),
-          );
-        }
       });
 
-      if (!mergedLosslessly) {
-        console.error(
-          `Legacy merge for ${legacyName} dropped a webhook_connect value it could not represent; leaving the repository unsealed so the evidence stays reachable`,
-        );
-      }
-
-      // Tell legacy DO to cancel its alarm and mark itself migrated
-      try {
-        const ackRes = await legacyStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
-          method: "POST",
-          headers: { "x-factory-control-key": controlKey },
-        });
-        if (!ackRes.ok) {
-          console.error(`Legacy ack-migrated failed for ${legacyName} with status ${ackRes.status}`);
-        }
-      } catch (ackErr) {
-        console.error(`Legacy ack-migrated network error for ${legacyName}:`, ackErr);
-      }
+      await this.ackLegacy(candidate, controlKey);
 
       if (this.eventQueue.hasDue()) {
         await this.eventQueue.armAlarm();
       }
+
+      if (!mergedLosslessly) {
+        console.error(
+          `Legacy merge for ${candidate} dropped a webhook_connect value it could not represent; leaving the repository unsealed so the evidence stays reachable`,
+        );
+        return "lossy";
+      }
+      return "merged";
     } catch (err) {
-      console.error(`Migration error for ${legacyName}:`, err);
+      console.error(`Migration error for ${candidate}:`, err);
+      return "unreachable";
     }
+  }
+
+  /** Tells a legacy object its history is now reachable: cancel its alarm, mark it migrated. */
+  private async ackLegacy(candidate: string, controlKey: string): Promise<void> {
+    try {
+      const legacyStub = this.env.REPO_COORDINATOR.get(this.env.REPO_COORDINATOR.idFromName(candidate));
+      const ackRes = await legacyStub.fetch("https://repo-coordinator.internal/legacy/ack-migrated", {
+        method: "POST",
+        headers: { "x-factory-control-key": controlKey },
+      });
+      if (!ackRes.ok) {
+        console.error(`Legacy ack-migrated failed for ${candidate} with status ${ackRes.status}`);
+      }
+    } catch (ackErr) {
+      console.error(`Legacy ack-migrated network error for ${candidate}:`, ackErr);
+    }
+  }
+
+  private hasMigration(name: string): boolean {
+    return (
+      this.sql
+        .exec<{ name: string }>("SELECT name FROM _schema_migrations WHERE name = ?", name)
+        .toArray().length > 0
+    );
+  }
+
+  private markMigration(name: string): void {
+    this.sql.exec(
+      "INSERT OR REPLACE INTO _schema_migrations (name, migrated_at) VALUES (?, ?)",
+      name,
+      Date.now(),
+    );
   }
 
   /**
@@ -902,6 +969,41 @@ async function readJson(request: Request): Promise<unknown> {
   } catch {
     return {};
   }
+}
+
+/** Header the un-prefixed proxy uses to hand its own name to the prefixed object. */
+const LEGACY_REPOSITORY_HEADER = "x-factory-legacy-repository";
+
+/**
+ * Un-prefixed object names this repository's history could be sitting under, most
+ * specific first (cloud-factory-cf-ik4w).
+ *
+ * The names were built from whatever spelling the caller used, and a DO namespace cannot
+ * be enumerated, so a second spelling can only be learned from a request. The hint is the
+ * name the un-prefixed proxy carried; a hint that names a *different* repository is
+ * ignored, so a caller cannot point the migration at another tenant's object.
+ */
+function legacyCandidateNames(repository: string, hint?: string | null): string[] {
+  const names: string[] = [];
+  const add = (value: string | null | undefined) => {
+    const trimmed = value?.trim();
+    if (!trimmed || names.includes(trimmed)) return;
+    names.push(trimmed);
+  };
+
+  const hintName = hint?.trim();
+  if (hintName) {
+    const parsedHint = parseRepositoryKey(hintName);
+    const plain = parsedHint ? parsedHint.repository : hintName;
+    if (plain.toLowerCase() === repository.toLowerCase()) {
+      add(plain);
+      add(plain.toLowerCase());
+    }
+  }
+
+  add(repository);
+  add(repository.toLowerCase());
+  return names;
 }
 
 function sameRepository(a: string, b: string): boolean {
