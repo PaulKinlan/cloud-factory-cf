@@ -1,5 +1,6 @@
 import type { Env } from "../env";
 import { MAX_WEBHOOK_BYTES, verifyGithubSignature } from "../webhooks";
+import { type DevPlatform, repositoryKey } from "@factory-cloud/sdk";
 import { resolveRepositoryKey } from "../repo-coordinator-addressing";
 
 export const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab|gitea)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
@@ -57,7 +58,20 @@ export async function routeWebhooks(
 
   // One Durable Object per repository: the coordinator serialises every
   // event for a repo, which is what makes dedupe cheap and ordering real.
-  const repoKey = resolveRepositoryKey(`${owner}/${repo}`, provider);
+  //
+  // The platform here comes from the PATH, so it is the authority on which provider this
+  // delivery belongs to - and the repository text must not be able to contradict it.
+  // `resolveRepositoryKey` returns an already-prefixed key unchanged, which is right for
+  // `?platform=` and for internal callers but wrong at the edge: `/webhooks/gitlab/github:acme
+  // /widgets` builds the string `github:acme/widgets`, which parses as a prefixed key, so a
+  // GITLAB delivery was addressed to the GITHUB coordinator for acme/widgets - cross-provider
+  // key spoofing from URL text alone (cloud-factory-cf-6eqm). A colon is the key separator, so
+  // an owner or repository segment may not contain one at all.
+  const repository = `${owner}/${repo}`;
+  if (repository.includes(":")) {
+    return Response.json({ ok: false, error: "invalid repository" }, { status: 400 });
+  }
+  const repoKey = repositoryKey(provider as DevPlatform, repository);
   const stub = env.REPO_COORDINATOR.get(
     env.REPO_COORDINATOR.idFromName(repoKey),
   );
@@ -143,10 +157,16 @@ export async function handleGlobalGithubWebhook(
   }
 
   // 1. If payload contains repository.full_name, forward to that repository's RepoCoordinator
+  //
+  // The name comes from the BODY, and it is shaped like the path segments: one owner, one
+  // repository, no separators of our own inside either half. A `full_name` of
+  // `github:acme/widgets` would otherwise build a key whose repository part still carries a
+  // prefix, addressing a coordinator that is not the repository the event names - the same
+  // class as cloud-factory-cf-6eqm, at the other entry point. The signature check above is
+  // what authenticates the caller; this is what stops the key drifting from what it names.
   const repoFullName = payload.repository?.full_name;
-  if (typeof repoFullName === "string" && repoFullName.includes("/")) {
-    const [owner, repo] = repoFullName.split("/") as [string, string];
-    const repoKey = resolveRepositoryKey(`${owner}/${repo}`, "github");
+  if (typeof repoFullName === "string" && /^[^/:\s]+\/[^/:\s]+$/.test(repoFullName)) {
+    const repoKey = resolveRepositoryKey(repoFullName, "github");
     const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repoKey));
     const forwarded = new Request(
       `https://repo-coordinator.internal/events?provider=github`,

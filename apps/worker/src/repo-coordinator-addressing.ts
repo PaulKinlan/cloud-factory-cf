@@ -18,12 +18,20 @@ import type { RepoCoordinator } from "./repo-coordinator";
  */
 export function resolveRepositoryKey(repository: string, platformHint?: string | null): string {
   const trimmed = repository.trim();
-  if (parseRepositoryKey(trimmed)) {
-    return trimmed;
+  const parsed = parseRepositoryKey(trimmed);
+  const hinted: DevPlatform | null =
+    platformHint && isDevPlatform(platformHint) ? platformHint : null;
+
+  if (parsed) {
+    // A prefix written into the text is authoritative only when nothing contradicts it. An
+    // explicit hint means the caller routed on that platform - an API path segment or
+    // `?platform=` - so a prefix naming a DIFFERENT platform must not win: returning it
+    // unchanged is how a delivery or request addressed to one provider reached the other
+    // provider's coordinator for the same owner/repo (cloud-factory-cf-6eqm).
+    if (!hinted || parsed.platform === hinted) return trimmed;
+    return repositoryKey(hinted, parsed.repository);
   }
-  const platform: DevPlatform =
-    platformHint && isDevPlatform(platformHint) ? platformHint : "github";
-  return repositoryKey(platform, trimmed);
+  return repositoryKey(hinted ?? "github", trimmed);
 }
 
 /**
