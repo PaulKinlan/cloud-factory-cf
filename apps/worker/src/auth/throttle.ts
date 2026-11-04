@@ -1,5 +1,6 @@
 import type { Env } from "../env";
 import { brokerInternalHeaders } from "./delegation";
+import { sameSecret } from "../secrets";
 
 /**
  * Failed-control-key throttling (cloud-factory-cf-vhns, cloud-factory-cf-m5dk).
@@ -84,4 +85,26 @@ export async function controlKeyThrottle(
   } catch {
     return null;
   }
+}
+
+/**
+ * The one control-key comparison for routes that accept the key directly instead of going
+ * through `authorizeControlPlane` (the passkey administration routes and the repo list).
+ * Without this they are uncounted oracles: the same secret, compared at full speed, with
+ * nothing incrementing the counter the entry gate reads (cloud-factory-cf-96mr).
+ */
+export async function acceptPresentedControlKey(
+  request: Request,
+  env: Env,
+  presented: string | null,
+): Promise<boolean> {
+  const controlKey = env.BROKER_CONTROL_KEY;
+  if (!controlKey || !presented) return false;
+  const identity = clientIdentity(request);
+  const gate = await controlKeyThrottle(env, identity, "check");
+  // Already locked: do not compare, and do not record again (the window is spent).
+  if (gate && !gate.allowed) return false;
+  if (await sameSecret(controlKey, presented)) return true;
+  await controlKeyThrottle(env, identity, "failure");
+  return false;
 }
