@@ -135,6 +135,22 @@ describe("webhook ingestion", () => {
     await expect(response.json()).resolves.toMatchObject({ error: "payload too large" });
   });
 
+  it("refuses a length-less oversized body at the per-repository edge route (cloud-factory-cf-vtmf)", async () => {
+    // The edge route forwards to the repository's Durable Object, so it is the first place
+    // an unauthenticated body lands. It used to read the whole thing into a string before
+    // the object ever saw it, which made the object-side cap cosmetic.
+    const response = await SELF.fetch(
+      new Request("https://example.com/webhooks/gitlab/acme/edge-oversize", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-gitlab-event-uuid": "gitlab-edge-oversize" },
+        body: new Uint8Array(MAX_WEBHOOK_BYTES + 1024),
+      }),
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({ error: "payload too large" });
+  });
+
   it("rejects malformed json and oversized payloads at the object boundary", async () => {
     const signed = await githubRequest("malformed-1");
     const body = "{not json";

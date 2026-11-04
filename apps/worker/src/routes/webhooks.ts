@@ -50,9 +50,15 @@ export async function routeWebhooks(
     return new Response("method not allowed", { status: 405 });
   }
 
-  // Refuse oversized payloads before buffering them into a string.
+  // Refuse oversized payloads before buffering them into a string - and enforce the
+  // same cap while reading, because a chunked request declares no length at all
+  // (cloud-factory-cf-v0xd / cloud-factory-cf-vtmf).
   const declared = Number(request.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > MAX_WEBHOOK_BYTES) {
+    return Response.json({ ok: false, error: "payload too large" }, { status: 413 });
+  }
+  const bodyText = await readBodyWithinLimit(request, MAX_WEBHOOK_BYTES);
+  if (bodyText === null) {
     return Response.json({ ok: false, error: "payload too large" }, { status: 413 });
   }
 
@@ -68,7 +74,7 @@ export async function routeWebhooks(
     {
       method: "POST",
       headers: forwardableHeaders(request.headers, repoKey),
-      body: await request.text(),
+      body: bodyText,
     },
   );
 
