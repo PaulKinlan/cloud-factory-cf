@@ -4,7 +4,7 @@ import { importAppPrivateKey, mintAppJwt } from "../github-app";
 import { isRootLogin, ROOT_SESSION_LOGIN } from "../auth/tenant";
 import { handlePasskeyRoute } from "../auth/passkey";
 import { brokerInternalHeaders } from "../auth/delegation";
-import { clientIdentity, controlKeyThrottle } from "../auth/throttle";
+import { acceptPresentedControlKey, clientIdentity, controlKeyThrottle } from "../auth/throttle";
 
 export const AUTH_LOGIN_PATH = "/auth/github/login";
 export const AUTH_CALLBACK_PATH = "/auth/github/callback";
@@ -991,7 +991,8 @@ export async function handleApiRepos(
 
   // Machine callers present the control key (unchanged contract).
   const presented = request.headers.get("x-factory-control-key");
-  if (presented && controlKey && (await sameSecret(controlKey, presented))) {
+  // Counted, like every other control-key comparison (cloud-factory-cf-96mr).
+  if (presented && (await acceptPresentedControlKey(request, env, presented))) {
     authorised = true;
   }
 

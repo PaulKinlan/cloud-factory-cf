@@ -106,6 +106,44 @@ describe("root login throttle", () => {
     expect(afterWindow.allowed).toBe(true);
   });
 
+  it("counts rejections on the routes that compare the key directly (cloud-factory-cf-96mr)", async () => {
+    // The passkey administration routes and the repo list compare the header themselves
+    // rather than through authorizeControlPlane, so they were uncounted oracles: the same
+    // secret, guessed at full speed, with the entry gate always reading zero.
+    const identity = "203.0.113.70";
+    const passkeys = () =>
+      SELF.fetch(
+        new Request("https://example.com/api/auth/passkeys", {
+          headers: { "cf-connecting-ip": identity, "x-factory-control-key": "not-the-control-key" },
+        }),
+      );
+
+    for (let attempt = 0; attempt < CONTROL_KEY_ATTEMPT_LIMIT; attempt += 1) {
+      expect((await passkeys()).status).toBe(401);
+    }
+
+    // Now the entry gate sees a spent window, whatever route is asked for.
+    const refused = await passkeys();
+    expect(refused.status).toBe(429);
+    expect(Number(refused.headers.get("retry-after"))).toBeGreaterThan(0);
+
+    const deleteRoute = await SELF.fetch(
+      new Request("https://example.com/api/auth/passkeys", {
+        method: "DELETE",
+        headers: { "cf-connecting-ip": identity, "x-factory-control-key": CONTROL_KEY },
+      }),
+    );
+    expect(deleteRoute.status).toBe(429);
+
+    // Another address can still administer passkeys with the right key.
+    const other = await SELF.fetch(
+      new Request("https://example.com/api/auth/passkeys", {
+        headers: { "cf-connecting-ip": "203.0.113.71", "x-factory-control-key": CONTROL_KEY },
+      }),
+    );
+    expect(other.status).not.toBe(429);
+  });
+
   it("does not count a 401 that was not about the control key", async () => {
     // The counter must only move when the control key was actually rejected. Counting
     // every 401 on the control plane would lock out honest machine traffic, whose 401s
