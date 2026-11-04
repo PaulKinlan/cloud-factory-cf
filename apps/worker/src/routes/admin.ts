@@ -253,6 +253,13 @@ export async function routeAdminSystem(
     }
   }
 
+  if (!authz.ok) {
+    // Pass the real reason through: a throttle refusal must answer 429 (with its
+    // Retry-After), not be flattened into a 403 that looks like an ordinary denial
+    // (cloud-factory-cf-yu3v).
+    return authzDenial(authz, { "cross-tenant": "Root administrator privileges required" });
+  }
+
   if (!isRoot) {
     return authzDenial(
       { ok: false, reason: "cross-tenant" },

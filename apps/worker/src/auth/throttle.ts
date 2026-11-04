@@ -101,10 +101,14 @@ export async function acceptPresentedControlKey(
   const controlKey = env.BROKER_CONTROL_KEY;
   if (!controlKey || !presented) return false;
   const identity = clientIdentity(request);
-  const gate = await controlKeyThrottle(env, identity, "check");
-  // Already locked: do not compare, and do not record again (the window is spent).
-  if (gate && !gate.allowed) return false;
-  if (await sameSecret(controlKey, presented)) return true;
-  await controlKeyThrottle(env, identity, "failure");
+  // Reserve before comparing, release on a match: the slot is atomic, so concurrent
+  // guesses cannot all be compared, and only rejections spend the window
+  // (cloud-factory-cf-yu3v / cloud-factory-cf-96mr).
+  const reservation = await controlKeyThrottle(env, identity, "attempt");
+  if (reservation && !reservation.allowed) return false;
+  if (await sameSecret(controlKey, presented)) {
+    await controlKeyThrottle(env, identity, "success");
+    return true;
+  }
   return false;
 }

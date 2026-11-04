@@ -35,11 +35,11 @@ export type ControlPrincipal =
   | { via: "control-key" }
   | { via: "session"; login: string };
 
-export type ControlDenialReason = "unconfigured" | "unauthorised" | "cross-tenant";
+export type ControlDenialReason = "unconfigured" | "unauthorised" | "cross-tenant" | "throttled";
 
 export type ControlAuthz =
   | { ok: true; principal: ControlPrincipal }
-  | { ok: false; reason: ControlDenialReason };
+  | { ok: false; reason: ControlDenialReason; retryAfterSec?: number };
 
 /**
  * The key that signs and verifies `cf_session` — the same precedence `routes/auth.ts` mints
@@ -130,13 +130,20 @@ export async function authorizeControlPlane(
   const presented = request.headers.get("x-factory-control-key");
   if (controlKey && presented) {
     // This is where every machine-key comparison happens (admin, broker, audit, trace,
-    // passkey, the legacy proxy), so a rejection is recorded here rather than inferred
-    // from a response status: the entry-point gate in index.ts refuses a locked address
-    // before it reaches this function (cloud-factory-cf-m5dk).
+    // passkey, the legacy proxy). The slot is taken atomically BEFORE the comparison, so a
+    // parallel burst cannot have every guess compared (cloud-factory-cf-yu3v), and a
+    // matching key releases it again - only rejections spend the window. Reserving here
+    // rather than at the entry point matters: a caller that presents a key to a route
+    // which never compares it must not burn its own budget.
+    const identity = clientIdentity(request);
+    const reservation = await controlKeyThrottle(env, identity, "attempt");
+    if (reservation && !reservation.allowed) {
+      return { ok: false, reason: "throttled", retryAfterSec: reservation.retryAfterSec };
+    }
     if (await sameSecret(controlKey, presented)) {
+      await controlKeyThrottle(env, identity, "success");
       return { ok: true, principal: { via: "control-key" } };
     }
-    await controlKeyThrottle(env, clientIdentity(request), "failure");
   }
 
   const signingKey = sessionSigningKey(env);
@@ -170,12 +177,14 @@ const DEFAULT_MESSAGES: Record<ControlDenialReason, string> = {
   unconfigured: "control key not configured",
   unauthorised: "not authorised",
   "cross-tenant": "not authorised for another account's tenancy",
+  throttled: "too many control key attempts; try again later",
 };
 
 const STATUS: Record<ControlDenialReason, number> = {
   unconfigured: 503,
   unauthorised: 401,
   "cross-tenant": 403,
+  throttled: 429,
 };
 
 /**
@@ -186,8 +195,12 @@ export function authzDenial(
   result: Extract<ControlAuthz, { ok: false }>,
   messages: Partial<Record<ControlDenialReason, string>> = {},
 ): Response {
-  return Response.json(
-    { ok: false, error: messages[result.reason] ?? DEFAULT_MESSAGES[result.reason] },
-    { status: STATUS[result.reason] },
+  const headers = new Headers({ "content-type": "application/json" });
+  if (result.reason === "throttled" && result.retryAfterSec !== undefined) {
+    headers.set("retry-after", String(result.retryAfterSec));
+  }
+  return new Response(
+    JSON.stringify({ ok: false, error: messages[result.reason] ?? DEFAULT_MESSAGES[result.reason] }),
+    { status: STATUS[result.reason], headers },
   );
 }
