@@ -1,6 +1,7 @@
 import type { Env } from "../env";
 import { MAX_WEBHOOK_BYTES, verifyGithubSignature } from "../webhooks";
 import { type DevPlatform, repositoryKey } from "@factory-cloud/sdk";
+import { readBodyWithinLimit } from "../events/helpers";
 import { resolveRepositoryKey } from "../repo-coordinator-addressing";
 
 export const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab|gitea)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
@@ -120,7 +121,12 @@ export async function handleGlobalGithubWebhook(
     return Response.json({ ok: false, error: "payload too large" }, { status: 413 });
   }
 
-  const bodyText = await request.text();
+  // A chunked request declares no length, so the cap must also hold while reading: this
+  // delivery is unauthenticated until the signature check below (cloud-factory-cf-v0xd).
+  const bodyText = await readBodyWithinLimit(request, MAX_WEBHOOK_BYTES);
+  if (bodyText === null) {
+    return Response.json({ ok: false, error: "payload too large" }, { status: 413 });
+  }
 
   // Verify BEFORE anything is read out of the body or recorded (cloud-factory-cf-r5ns).
   // This endpoint has no repository in its path, so it never reaches the per-repository

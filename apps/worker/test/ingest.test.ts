@@ -2,6 +2,8 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { githubRequest, gitlabRequest, signBody, TEST_GITLAB_TOKEN, TEST_SECRET } from "./support/webhook";
 import { getRepoCoordinator } from "../src/repo-coordinator-addressing";
+import { MAX_WEBHOOK_BYTES } from "../src/webhooks";
+import { readBodyWithinLimit } from "../src/events/helpers";
 
 describe("webhook ingestion", () => {
   it("accepts a GitLab webhook authenticated with X-Gitlab-Token", async () => {
@@ -106,6 +108,69 @@ describe("webhook ingestion", () => {
       body: signedBody,
     });
     expect(noDelivery.status).toBe(400);
+  });
+
+  it("stops reading an unauthenticated body at the size cap instead of buffering it (cloud-factory-cf-v0xd)", async () => {
+    // 1. End to end: a chunked delivery declares no content-length, so only the read can
+    // stop it - it is refused with 413 rather than buffered.
+    const oversized = new Uint8Array(MAX_WEBHOOK_BYTES + 1024);
+    const chunked = await SELF.fetch(
+      new Request("https://example.com/webhooks/gitlab/acme/ingest-repo", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-gitlab-event-uuid": "gitlab-oversize" },
+        body: oversized,
+      }),
+    );
+    expect(chunked.status).toBe(413);
+    await expect(chunked.json()).resolves.toMatchObject({ error: "payload too large" });
+
+    // 2. The reader itself stops at the cap and cancels: driven directly, because the
+    // test runtime materialises a request body before the Worker (or this suite) sees
+    // the stream, so an end-to-end assertion cannot observe where reading stopped.
+    const CHUNK = 64 * 1024;
+    const TOTAL_CHUNKS = 48;
+    let produced = 0;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (produced >= TOTAL_CHUNKS) {
+          controller.close();
+          return;
+        }
+        produced += 1;
+        controller.enqueue(new Uint8Array(CHUNK));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const direct = new Request("https://example.com/webhooks/gitlab/acme/ingest-repo", {
+      method: "POST",
+      body: stream,
+      duplex: "half",
+    } as RequestInit);
+
+    const read = await readBodyWithinLimit(direct, 1024 * 1024);
+
+    expect(read).toBeNull();
+    expect(cancelled).toBe(true);
+    // 1 MiB / 64 KiB is 16 chunks: nowhere near the 48 the stream would have produced.
+    expect(produced).toBeLessThanOrEqual(20);
+  });
+
+  it("refuses a length-less oversized body at the app-level GitHub endpoint too (cloud-factory-cf-v0xd)", async () => {
+    // Same rule on the other unauthenticated entry point: no content-length means the
+    // read has to stop, not the declared-length check.
+    const response = await SELF.fetch(
+      new Request("https://example.com/webhooks/github", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-github-event": "push" },
+        body: new Uint8Array(MAX_WEBHOOK_BYTES + 1024),
+      }),
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({ error: "payload too large" });
   });
 
   it("rejects malformed json and oversized payloads at the object boundary", async () => {
