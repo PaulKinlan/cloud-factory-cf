@@ -73,7 +73,13 @@ export async function routeAdminSettings(
   repo: string,
   search = "",
 ): Promise<Response> {
-  const authz = await authorizeControlPlane(request, env, { owner });
+  // `?platform=` names a different provider, and ADR 003 makes `github:acme/x` and
+  // `gitlab:acme/x` different tenants while the broker object is keyed by `owner/repo`
+  // alone. Without this the hint was dropped, so a GitHub session could address the
+  // GitLab tenant's settings (a GitHub session only ever speaks for GitHub); the
+  // machine control key keeps its any-provider contract (cloud-factory-cf-9xc0).
+  const platform = new URLSearchParams(search).get("platform");
+  const authz = await authorizeControlPlane(request, env, { owner, platform });
   if (!authz.ok) {
     return authzDenial(authz, {
       unauthorised: "not authorised to manage settings",
@@ -121,7 +127,10 @@ export async function routeAdminTestPing(
     return new Response("method not allowed", { status: 405 });
   }
 
-  const authz = await authorizeControlPlane(request, env, { owner });
+  // Same tenant rule as settings: a session speaks for its own provider only, the
+  // machine key for any (cloud-factory-cf-9xc0).
+  const platform = new URL(request.url).searchParams.get("platform");
+  const authz = await authorizeControlPlane(request, env, { owner, platform });
   if (!authz.ok) {
     return authzDenial(authz, {
       unauthorised: "not authorised to trigger test ping",
@@ -185,7 +194,6 @@ export async function routeAdminTestPing(
   const signature = await signHmacSha256(secret, payload);
 
   const url = new URL(request.url);
-  const platform = url.searchParams.get("platform");
   const coordinator = getRepoCoordinator(env, repository, platform);
   const webhookReq = new Request("https://repo-coordinator.internal/events?provider=github", {
     method: "POST",
@@ -390,7 +398,10 @@ export async function routeAdminUserSettings(
     return Response.json({ ok: false, error: "owner / account parameter or active session required" }, { status: 400 });
   }
 
-  const authz = await authorizeControlPlane(request, env, { owner });
+  // Same tenant rule as the repository settings route (cloud-factory-cf-9xc0): a
+  // session speaks for its own provider only, the machine key for any.
+  const platform = new URLSearchParams(search).get("platform");
+  const authz = await authorizeControlPlane(request, env, { owner, platform });
   if (!authz.ok) {
     return authzDenial(authz, {
       unauthorised: "not authorised to manage user settings",
