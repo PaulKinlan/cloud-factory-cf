@@ -69,7 +69,7 @@ export class CredentialBroker extends DurableObject<Env> {
     const url = new URL(request.url);
     // These DO-only routes expose secrets or can mutate root passkeys. The outer
     // Worker's path filter is not an authorization boundary for a DO stub.
-    if (["/internal-setting", "/passkeys", "/passkeys/touch", "/passkeys/challenge", "/passkeys/challenge/consume", "/effective-webhook-secret", "/effective-github-app"].includes(url.pathname) &&
+    if (["/internal-setting", "/passkeys", "/passkeys/touch", "/passkeys/challenge", "/passkeys/challenge/consume", "/effective-webhook-secret", "/effective-github-app", "/auth-throttle/attempt", "/auth-throttle/record"].includes(url.pathname) &&
         !(await this.isInternalCaller(request))) {
       return Response.json({ ok: false, error: "not authorised for broker internal route" }, { status: 401 });
     }
@@ -146,6 +146,74 @@ export class CredentialBroker extends DurableObject<Env> {
         return Response.json({ ok: false, error: "challenge expired" }, { status: 409 });
       }
       return Response.json({ ok: true });
+    }
+    if (request.method === "POST" && url.pathname === "/auth-throttle/attempt") {
+      const body = (await readJson(request)) as Record<string, any>;
+      const identity = typeof body.identity === "string" ? body.identity.trim() : "";
+      const limit = Number(body.limit);
+      const windowMs = Number(body.windowMs);
+      if (!identity || !Number.isFinite(limit) || !Number.isFinite(windowMs) || limit <= 0 || windowMs <= 0) {
+        return Response.json({ ok: false, error: "identity, limit and windowMs are required" }, { status: 400 });
+      }
+      const now = Date.now();
+      const row = this.sql
+        .exec<{ window_start: number; failures: number }>(
+          "SELECT window_start, failures FROM auth_throttle WHERE identity = ?",
+          identity,
+        )
+        .toArray()[0];
+      // One Durable Object call does the read and the write, so a parallel burst cannot
+      // have every request see the same count before any of them records
+      // (cloud-factory-cf-1f8m).
+      if (row === undefined || row.window_start + windowMs <= now) {
+        this.sql.exec(
+          "INSERT OR REPLACE INTO auth_throttle (identity, window_start, failures) VALUES (?, ?, 1)",
+          identity,
+          now,
+        );
+        return Response.json({ ok: true, allowed: true, failures: 1, retryAfterSec: 0 });
+      }
+      if (row.failures >= limit) {
+        const retryAfterSec = Math.max(1, Math.ceil((row.window_start + windowMs - now) / 1000));
+        return Response.json({ ok: true, allowed: false, failures: row.failures, retryAfterSec });
+      }
+      const failures = row.failures + 1;
+      this.sql.exec("UPDATE auth_throttle SET failures = ? WHERE identity = ?", failures, identity);
+      return Response.json({ ok: true, allowed: true, failures, retryAfterSec: 0 });
+    }
+    if (request.method === "POST" && url.pathname === "/auth-throttle/record") {
+      const body = (await readJson(request)) as Record<string, any>;
+      const identity = typeof body.identity === "string" ? body.identity.trim() : "";
+      const outcome = body.outcome === "success" ? "success" : body.outcome === "failure" ? "failure" : "";
+      const windowMs = Number(body.windowMs);
+      if (!identity || !outcome || !Number.isFinite(windowMs) || windowMs <= 0) {
+        return Response.json({ ok: false, error: "identity, outcome and windowMs are required" }, { status: 400 });
+      }
+      const now = Date.now();
+      if (outcome === "success") {
+        // A correct key ends the streak: the caller has proved it is not guessing.
+        this.sql.exec("DELETE FROM auth_throttle WHERE identity = ?", identity);
+        return Response.json({ ok: true, failures: 0 });
+      }
+      const row = this.sql
+        .exec<{ window_start: number; failures: number }>(
+          "SELECT window_start, failures FROM auth_throttle WHERE identity = ?",
+          identity,
+        )
+        .toArray()[0];
+      if (row === undefined || row.window_start + windowMs <= now) {
+        this.sql.exec(
+          "INSERT OR REPLACE INTO auth_throttle (identity, window_start, failures) VALUES (?, ?, 1)",
+          identity,
+          now,
+        );
+        return Response.json({ ok: true, failures: 1 });
+      }
+      const failures = row.failures + 1;
+      this.sql.exec("UPDATE auth_throttle SET failures = ? WHERE identity = ?", failures, identity);
+      // Keep the table bounded: a counter whose window expired long ago is useless.
+      this.sql.exec("DELETE FROM auth_throttle WHERE window_start < ?", now - 24 * 60 * 60 * 1000);
+      return Response.json({ ok: true, failures });
     }
     if (request.method === "GET" && url.pathname === "/passkeys") {
       const id = url.searchParams.get("id");
@@ -267,6 +335,14 @@ export class CredentialBroker extends DurableObject<Env> {
   }
 
   private migrate(): void {
+    // Failed-root-login counters, keyed by client address (cloud-factory-cf-vhns).
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS auth_throttle (
+        identity TEXT PRIMARY KEY,
+        window_start INTEGER NOT NULL,
+        failures INTEGER NOT NULL
+      )
+    `);
     // WebAuthn challenges are single-use: the route stores one when it hands the browser
     // its options and consumes it when the answer comes back, so a captured assertion
     // (and its cookie) cannot be replayed (cloud-factory-cf-zl0a).
