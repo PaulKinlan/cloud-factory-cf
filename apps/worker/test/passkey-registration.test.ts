@@ -23,18 +23,37 @@ function base64Url(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+const CHALLENGE_URL = "https://credential-broker.internal/passkeys/challenge";
+const CONSUME_URL = `${CHALLENGE_URL}/consume`;
+
 function testEnv() {
   const saved: unknown[] = [];
+  // The broker's challenge table, in memory: store on issue, delete on consume, so the
+  // single-use rule is what these cases observe (cloud-factory-cf-zl0a).
+  const challenges = new Set<string>();
   const broker = {
-    fetch: async (input: RequestInfo | URL) => {
-      if (String(input) === SAVE_URL) return Response.json({ ok: true });
+    fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+      const target = String(input);
+      if (target === CHALLENGE_URL) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { challenge?: string };
+        if (typeof body.challenge === "string") challenges.add(body.challenge);
+        return Response.json({ ok: true });
+      }
+      if (target === CONSUME_URL) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { challenge?: string };
+        const consumed = typeof body.challenge === "string" && challenges.delete(body.challenge);
+        return consumed
+          ? Response.json({ ok: true })
+          : Response.json({ ok: false, error: "unknown or already used challenge" }, { status: 409 });
+      }
+      if (target === SAVE_URL) return Response.json({ ok: true });
       return Response.json({ ok: false, error: "unexpected broker path" }, { status: 404 });
     },
   };
   const saveRequest = {
     fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input) === SAVE_URL && init?.body) saved.push(JSON.parse(String(init.body)));
-      return broker.fetch(input);
+      return broker.fetch(input, init);
     },
   };
   return {
@@ -178,5 +197,92 @@ describe("passkey registration client data", () => {
     expect(saved[0]).toMatchObject({ credentialId: "cred-valid", publicKeySpki });
     // A passkey session is only minted for a registration that passed every check.
     expect(response?.headers.get("set-cookie")).toContain("cf_session=");
+  });
+});
+
+/**
+ * A WebAuthn challenge is good for exactly one attempt (cloud-factory-cf-zl0a). The signed
+ * cookie proves we minted it, but nothing stopped the same assertion and cookie being
+ * presented twice inside the five-minute window - so the challenge is registered in the
+ * broker when the options are handed out and consumed when the answer comes back, before
+ * the answer is judged. A failed attempt therefore burns it: a challenge that survives a
+ * failure is one an attacker still holds.
+ */
+describe("passkey challenges are single use", () => {
+  it("burns a registration challenge even when the first attempt fails", async () => {
+    const { env } = testEnv();
+    const { challenge, cookie } = await startRegistration(env);
+
+    // Attempt 1: no client data - refused after the challenge was consumed.
+    const first = await handlePasskeyRoute(
+      post("/api/auth/passkey/register/verify", { credentialId: "cred-1", publicKeySpki: await es256PublicKeySpki() }, { cookie }),
+      env,
+      new URL(VERIFY_URL),
+    );
+    expect(first?.status).toBe(400);
+
+    // Attempt 2: a complete, well-formed answer for the same challenge. It must be
+    // refused because the challenge is spent, not because anything else is wrong.
+    const second = await handlePasskeyRoute(
+      post(
+        "/api/auth/passkey/register/verify",
+        {
+          credentialId: "cred-1",
+          publicKeySpki: await es256PublicKeySpki(),
+          clientDataJSON: clientData({ challenge, type: "webauthn.create" }),
+        },
+        { cookie },
+      ),
+      env,
+      new URL(VERIFY_URL),
+    );
+    expect(second?.status).toBe(401);
+    expect(await second!.json()).toMatchObject({ ok: false, error: expect.stringContaining("already used") });
+  });
+
+  it("burns a login challenge the same way", async () => {
+    const { env } = testEnv();
+
+    const optionsResponse = await handlePasskeyRoute(
+      post("/api/auth/passkey/login/options", {}),
+      env,
+      new URL(`${ORIGIN}/api/auth/passkey/login/options`),
+    );
+    expect(optionsResponse?.status).toBe(200);
+    const cookie = (optionsResponse!.headers.get("set-cookie") ?? "").split(";")[0] as string;
+
+    const assertion = { credentialId: "unknown-credential", authenticatorData: "AAAA", clientDataJSON: "AAAA", signature: "AAAA" };
+    const verifyUrl = new URL(`${ORIGIN}/api/auth/passkey/login/verify`);
+
+    // Attempt 1 is judged after the challenge is consumed (here: the credential is not
+    // found), attempt 2 is refused for the spent challenge itself.
+    const first = await handlePasskeyRoute(post("/api/auth/passkey/login/verify", assertion, { cookie }), env, verifyUrl);
+    expect(first?.status).not.toBe(200);
+
+    const second = await handlePasskeyRoute(post("/api/auth/passkey/login/verify", assertion, { cookie }), env, verifyUrl);
+    expect(second?.status).toBe(401);
+    expect(await second!.json()).toMatchObject({ ok: false, error: expect.stringContaining("already used") });
+  });
+
+  it("refuses to hand out options when the challenge cannot be recorded", async () => {
+    const env = {
+      BROKER_SIGNING_KEY: SIGNING_KEY,
+      BROKER_CONTROL_KEY: CONTROL_KEY,
+      CREDENTIAL_BROKER: {
+        idFromName: (name: string) => name,
+        get: () => ({ fetch: async () => Response.json({ ok: false }, { status: 503 }) }),
+      },
+    } as never;
+
+    const response = await handlePasskeyRoute(
+      post("/api/auth/passkey/register/options", {}, { "x-factory-control-key": CONTROL_KEY }),
+      env,
+      new URL(`${ORIGIN}/api/auth/passkey/register/options`),
+    );
+
+    // Failing closed: a challenge the broker never recorded could never be consumed, so
+    // the flow would only fail later with a worse message.
+    expect(response?.status).toBe(503);
+    expect(response?.headers.get("set-cookie")).toBeNull();
   });
 });

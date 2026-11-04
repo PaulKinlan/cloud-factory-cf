@@ -69,7 +69,7 @@ export class CredentialBroker extends DurableObject<Env> {
     const url = new URL(request.url);
     // These DO-only routes expose secrets or can mutate root passkeys. The outer
     // Worker's path filter is not an authorization boundary for a DO stub.
-    if (["/internal-setting", "/passkeys", "/passkeys/touch", "/effective-webhook-secret", "/effective-github-app"].includes(url.pathname) &&
+    if (["/internal-setting", "/passkeys", "/passkeys/touch", "/passkeys/challenge", "/passkeys/challenge/consume", "/effective-webhook-secret", "/effective-github-app"].includes(url.pathname) &&
         !(await this.isInternalCaller(request))) {
       return Response.json({ ok: false, error: "not authorised for broker internal route" }, { status: 401 });
     }
@@ -100,6 +100,52 @@ export class CredentialBroker extends DurableObject<Env> {
     if (request.method === "GET" && url.pathname === "/internal-setting") {
       const key = url.searchParams.get("key");
       return Response.json({ ok: true, value: key ? this.getSetting(key) : null });
+    }
+    if (request.method === "POST" && url.pathname === "/passkeys/challenge") {
+      const body = (await readJson(request)) as Record<string, any>;
+      const challenge = typeof body.challenge === "string" ? body.challenge.trim() : "";
+      const flow = body.flow === "create" || body.flow === "get" ? body.flow : "";
+      const expiresAt = Number(body.expiresAt);
+      if (!challenge || !flow || !Number.isFinite(expiresAt)) {
+        return Response.json({ ok: false, error: "challenge, flow and expiresAt are required" }, { status: 400 });
+      }
+      const now = Date.now();
+      this.sql.exec("DELETE FROM passkey_challenges WHERE expires_at < ?", now);
+      this.sql.exec(
+        "INSERT OR REPLACE INTO passkey_challenges (challenge, subject, role, flow, expires_at) VALUES (?, ?, ?, ?, ?)",
+        challenge,
+        String(body.subject ?? ""),
+        String(body.role ?? ""),
+        flow,
+        Math.trunc(expiresAt),
+      );
+      return Response.json({ ok: true });
+    }
+    if (request.method === "POST" && url.pathname === "/passkeys/challenge/consume") {
+      const body = (await readJson(request)) as Record<string, any>;
+      const challenge = typeof body.challenge === "string" ? body.challenge.trim() : "";
+      const flow = body.flow === "create" || body.flow === "get" ? body.flow : "";
+      if (!challenge || !flow) {
+        return Response.json({ ok: false, error: "challenge and flow are required" }, { status: 400 });
+      }
+      const row = this.sql
+        .exec<{ expires_at: number }>(
+          "SELECT expires_at FROM passkey_challenges WHERE challenge = ? AND flow = ?",
+          challenge,
+          flow,
+        )
+        .toArray()[0];
+      if (row === undefined) {
+        // Never issued here, already used, or for the other flow: all the same answer.
+        return Response.json({ ok: false, error: "unknown or already used challenge" }, { status: 409 });
+      }
+      // Consumed whether or not the verification that follows succeeds: a failed attempt
+      // must not leave the challenge available for a second try.
+      this.sql.exec("DELETE FROM passkey_challenges WHERE challenge = ?", challenge);
+      if (row.expires_at < Date.now()) {
+        return Response.json({ ok: false, error: "challenge expired" }, { status: 409 });
+      }
+      return Response.json({ ok: true });
     }
     if (request.method === "GET" && url.pathname === "/passkeys") {
       const id = url.searchParams.get("id");
@@ -221,6 +267,18 @@ export class CredentialBroker extends DurableObject<Env> {
   }
 
   private migrate(): void {
+    // WebAuthn challenges are single-use: the route stores one when it hands the browser
+    // its options and consumes it when the answer comes back, so a captured assertion
+    // (and its cookie) cannot be replayed (cloud-factory-cf-zl0a).
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS passkey_challenges (
+        challenge TEXT PRIMARY KEY,
+        subject TEXT NOT NULL,
+        role TEXT NOT NULL,
+        flow TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      )
+    `);
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS credential_audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

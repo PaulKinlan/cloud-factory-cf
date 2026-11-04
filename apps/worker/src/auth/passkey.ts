@@ -123,6 +123,9 @@ function getCookie(headers: Headers, name: string): string | null {
   }
 }
 
+/** How long a WebAuthn challenge stays valid, in seconds. The broker row uses the same. */
+export const CHALLENGE_TTL_SECONDS = 300;
+
 export async function mintChallengeCookie(
   signingKey: string,
   challenge: string,
@@ -131,7 +134,7 @@ export async function mintChallengeCookie(
   flowType: "create" | "get",
   url: URL,
 ): Promise<string> {
-  const exp = Math.floor(Date.now() / 1000) + 300; // 5 min TTL
+  const exp = Math.floor(Date.now() / 1000) + CHALLENGE_TTL_SECONDS;
   const payload = `${challenge}.${exp}.${subject}.${role}.${flowType}`;
   const sig = await signHmacSha256(signingKey, payload);
   const cookieVal = `${payload}.${sig}`;
@@ -166,6 +169,62 @@ export async function verifyChallengeCookie(
   }
 
   return { ok: true, challenge, subject, role };
+}
+
+/**
+ * Single-use challenge bookkeeping (cloud-factory-cf-zl0a).
+ *
+ * The cookie is signed, but a signature only proves *we* minted the challenge - it does
+ * not stop the same assertion (and the same cookie) being presented twice inside its
+ * five-minute window. So the challenge is registered in the broker when it is handed
+ * out and consumed exactly once when the answer comes back, before any cryptographic
+ * check: a failed attempt burns it, because a challenge that survives a failure is a
+ * challenge an attacker still holds.
+ */
+async function rememberChallenge(
+  env: Env,
+  challenge: string,
+  subject: string,
+  role: string,
+  flowType: "create" | "get",
+): Promise<boolean> {
+  if (!env.CREDENTIAL_BROKER) return false;
+  const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
+  try {
+    const res = await broker.fetch("https://credential-broker.internal/passkeys/challenge", {
+      method: "POST",
+      headers: await brokerInternalHeaders(env, "default", { "content-type": "application/json" }),
+      body: JSON.stringify({
+        challenge,
+        subject,
+        role,
+        flow: flowType,
+        expiresAt: Date.now() + CHALLENGE_TTL_SECONDS * 1000,
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function consumeChallenge(
+  env: Env,
+  challenge: string,
+  flowType: "create" | "get",
+): Promise<boolean> {
+  if (!env.CREDENTIAL_BROKER) return false;
+  const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
+  try {
+    const res = await broker.fetch("https://credential-broker.internal/passkeys/challenge/consume", {
+      method: "POST",
+      headers: await brokerInternalHeaders(env, "default", { "content-type": "application/json" }),
+      body: JSON.stringify({ challenge, flow: flowType }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 export async function handlePasskeyRoute(
@@ -215,6 +274,9 @@ export async function handlePasskeyRoute(
     const userId = base64UrlEncode(userBytes);
 
     const challengeCookie = await mintChallengeCookie(signingKey, challenge, subject, role, "create", url);
+    if (!(await rememberChallenge(env, challenge, subject, role, "create"))) {
+      return Response.json({ ok: false, error: "Could not record the WebAuthn challenge" }, { status: 503 });
+    }
 
     const options = {
       challenge,
@@ -247,6 +309,14 @@ export async function handlePasskeyRoute(
     const verifiedCookie = await verifyChallengeCookie(request, signingKey, "create");
     if (!verifiedCookie.ok) {
       return Response.json({ ok: false, error: verifiedCookie.error }, { status: 400 });
+    }
+    // Consume before the client data is judged: a challenge is good for exactly one
+    // attempt, successful or not (cloud-factory-cf-zl0a).
+    if (!(await consumeChallenge(env, verifiedCookie.challenge, "create"))) {
+      return Response.json(
+        { ok: false, error: "WebAuthn challenge already used or expired" },
+        { status: 401 },
+      );
     }
 
     let body: Record<string, any>;
@@ -365,6 +435,9 @@ export async function handlePasskeyRoute(
     const challenge = base64UrlEncode(challengeBytes);
 
     const challengeCookie = await mintChallengeCookie(signingKey, challenge, "", "", "get", url);
+    if (!(await rememberChallenge(env, challenge, "", "", "get"))) {
+      return Response.json({ ok: false, error: "Could not record the WebAuthn challenge" }, { status: 503 });
+    }
 
     const options = {
       challenge,
@@ -381,6 +454,15 @@ export async function handlePasskeyRoute(
     const verifiedCookie = await verifyChallengeCookie(request, signingKey, "get");
     if (!verifiedCookie.ok) {
       return Response.json({ ok: false, error: verifiedCookie.error }, { status: 400 });
+    }
+    // Single use, and burned even when the assertion that follows fails
+    // (cloud-factory-cf-zl0a): otherwise a captured assertion stays replayable for the
+    // whole five-minute window.
+    if (!(await consumeChallenge(env, verifiedCookie.challenge, "get"))) {
+      return Response.json(
+        { ok: false, error: "WebAuthn challenge already used or expired" },
+        { status: 401 },
+      );
     }
 
     let body: Record<string, any>;
