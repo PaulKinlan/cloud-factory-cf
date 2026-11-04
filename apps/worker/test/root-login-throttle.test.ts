@@ -95,15 +95,45 @@ describe("root login throttle", () => {
       await post("/auth-throttle/record", { identity, outcome: "failure", windowMs });
     }
     const blocked = (await (
-      await post("/auth-throttle/attempt", { identity, limit: CONTROL_KEY_ATTEMPT_LIMIT, windowMs })
+      await post("/auth-throttle/check", { identity, limit: CONTROL_KEY_ATTEMPT_LIMIT, windowMs })
     ).json()) as { allowed: boolean };
     expect(blocked.allowed).toBe(false);
 
     await new Promise((resolve) => setTimeout(resolve, windowMs + 100));
     const afterWindow = (await (
-      await post("/auth-throttle/attempt", { identity, limit: CONTROL_KEY_ATTEMPT_LIMIT, windowMs })
+      await post("/auth-throttle/check", { identity, limit: CONTROL_KEY_ATTEMPT_LIMIT, windowMs })
     ).json()) as { allowed: boolean };
     expect(afterWindow.allowed).toBe(true);
+  });
+
+  it("does not count a 401 that was not about the control key", async () => {
+    // The counter must only move when the control key was actually rejected. Counting
+    // every 401 on the control plane would lock out honest machine traffic, whose 401s
+    // are about capabilities and sessions (found while this was recording from response
+    // status in index.ts).
+    const identity = "203.0.113.55";
+    for (let attempt = 0; attempt < CONTROL_KEY_ATTEMPT_LIMIT + 3; attempt += 1) {
+      const response = await SELF.fetch(
+        new Request("https://example.com/broker/acme/unrelated-401/proxy", {
+          method: "POST",
+          headers: {
+            "cf-connecting-ip": identity,
+            "x-factory-control-key": CONTROL_KEY,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ capability: "not-a-token" }),
+        }),
+      );
+      expect(response.status).toBe(401);
+    }
+
+    // Still able to authenticate with the right key: nothing was counted.
+    const after = await SELF.fetch(
+      new Request("https://example.com/api/admin/system", {
+        headers: { "cf-connecting-ip": identity, "x-factory-control-key": CONTROL_KEY },
+      }),
+    );
+    expect(after.status).not.toBe(429);
   });
 
   it("bounds a parallel burst, not just a sequential run (cloud-factory-cf-1f8m)", async () => {
@@ -117,6 +147,44 @@ describe("root login throttle", () => {
     const statuses = responses.map((response) => response.status);
     expect(statuses.filter((status) => status === 401)).toHaveLength(CONTROL_KEY_ATTEMPT_LIMIT);
     expect(statuses.filter((status) => status === 429)).toHaveLength(20 - CONTROL_KEY_ATTEMPT_LIMIT);
+  });
+
+  it("locks the whole control plane, not just root login (cloud-factory-cf-m5dk)", async () => {
+    // The same secret is accepted by authorizeControlPlane for every admin/broker/audit
+    // route, so throttling root-login alone left it guessable at full speed there.
+    const identity = "203.0.113.60";
+    for (let attempt = 0; attempt < CONTROL_KEY_ATTEMPT_LIMIT; attempt += 1) {
+      // Five rejections anywhere in the control plane exhaust the window.
+      const response = await SELF.fetch(
+        new Request("https://example.com/api/admin/system", {
+          headers: { "cf-connecting-ip": identity, "x-factory-control-key": "not-the-control-key" },
+        }),
+      );
+      expect(response.status).not.toBe(429);
+    }
+
+    const lockedWrong = await SELF.fetch(
+      new Request("https://example.com/api/admin/system", {
+        headers: { "cf-connecting-ip": identity, "x-factory-control-key": "not-the-control-key" },
+      }),
+    );
+    expect(lockedWrong.status).toBe(429);
+    expect(Number(lockedWrong.headers.get("retry-after"))).toBeGreaterThan(0);
+
+    const lockedCorrect = await SELF.fetch(
+      new Request("https://example.com/api/admin/system", {
+        headers: { "cf-connecting-ip": identity, "x-factory-control-key": CONTROL_KEY },
+      }),
+    );
+    expect(lockedCorrect.status).toBe(429);
+
+    // A different address is unaffected.
+    const otherAddress = await SELF.fetch(
+      new Request("https://example.com/api/admin/system", {
+        headers: { "cf-connecting-ip": "203.0.113.61", "x-factory-control-key": CONTROL_KEY },
+      }),
+    );
+    expect(otherAddress.status).not.toBe(429);
   });
 
   it("is not bypassable by omitting the client address (one shared bucket)", async () => {

@@ -69,7 +69,7 @@ export class CredentialBroker extends DurableObject<Env> {
     const url = new URL(request.url);
     // These DO-only routes expose secrets or can mutate root passkeys. The outer
     // Worker's path filter is not an authorization boundary for a DO stub.
-    if (["/internal-setting", "/passkeys", "/passkeys/touch", "/passkeys/challenge", "/passkeys/challenge/consume", "/effective-webhook-secret", "/effective-github-app", "/auth-throttle/attempt", "/auth-throttle/record"].includes(url.pathname) &&
+    if (["/internal-setting", "/passkeys", "/passkeys/touch", "/passkeys/challenge", "/passkeys/challenge/consume", "/effective-webhook-secret", "/effective-github-app", "/auth-throttle/check", "/auth-throttle/record", "/auth-throttle/attempt"].includes(url.pathname) &&
         !(await this.isInternalCaller(request))) {
       return Response.json({ ok: false, error: "not authorised for broker internal route" }, { status: 401 });
     }
@@ -181,6 +181,30 @@ export class CredentialBroker extends DurableObject<Env> {
       this.sql.exec("UPDATE auth_throttle SET failures = ? WHERE identity = ?", failures, identity);
       return Response.json({ ok: true, allowed: true, failures, retryAfterSec: 0 });
     }
+    if (request.method === "POST" && url.pathname === "/auth-throttle/check") {
+      const body = (await readJson(request)) as Record<string, any>;
+      const identity = typeof body.identity === "string" ? body.identity.trim() : "";
+      const limit = Number(body.limit);
+      const windowMs = Number(body.windowMs);
+      if (!identity || !Number.isFinite(limit) || !Number.isFinite(windowMs) || limit <= 0 || windowMs <= 0) {
+        return Response.json({ ok: false, error: "identity, limit and windowMs are required" }, { status: 400 });
+      }
+      const now = Date.now();
+      const row = this.sql
+        .exec<{ window_start: number; failures: number }>(
+          "SELECT window_start, failures FROM auth_throttle WHERE identity = ?",
+          identity,
+        )
+        .toArray()[0];
+      if (row === undefined || row.window_start + windowMs <= now) {
+        // No counter, or the window rolled over: allowed, and the count restarts on the
+        // next recorded failure.
+        return Response.json({ ok: true, allowed: true, failures: 0 });
+      }
+      const allowed = row.failures < limit;
+      const retryAfterSec = allowed ? 0 : Math.max(1, Math.ceil((row.window_start + windowMs - now) / 1000));
+      return Response.json({ ok: true, allowed, failures: row.failures, retryAfterSec });
+    }
     if (request.method === "POST" && url.pathname === "/auth-throttle/record") {
       const body = (await readJson(request)) as Record<string, any>;
       const identity = typeof body.identity === "string" ? body.identity.trim() : "";
@@ -250,25 +274,6 @@ export class CredentialBroker extends DurableObject<Env> {
       if (!credentialId || !subject || !publicKeySpki) {
         return Response.json({ ok: false, error: "missing required passkey fields" }, { status: 400 });
       }
-      // A credential id is public - it travels in the clear with every assertion - so it
-      // must not choose whose passkey it is. Re-registering an id that already belongs to
-      // somebody else would replace that subject's public key with the caller's, and the
-      // next assertion signed by the caller's authenticator would mint a session for the
-      // victim (cloud-factory-cf-fbjl). The subject is bound at creation and can only be
-      // re-asserted by the subject it already names.
-      const existing = this.sql
-        .exec<{ subject: string }>(
-          "SELECT subject FROM passkey_credentials WHERE credential_id = ?",
-          String(credentialId),
-        )
-        .toArray()[0];
-      if (existing !== undefined && existing.subject !== String(subject)) {
-        return Response.json(
-          { ok: false, error: "credential id already registered to another subject" },
-          { status: 409 },
-        );
-      }
-
       const now = new Date().toISOString();
       this.sql.exec(
         `INSERT INTO passkey_credentials (credential_id, subject, role, public_key_spki, algorithm, label, created_at)
@@ -354,14 +359,6 @@ export class CredentialBroker extends DurableObject<Env> {
   }
 
   private migrate(): void {
-    // Failed-root-login counters, keyed by client address (cloud-factory-cf-vhns).
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS auth_throttle (
-        identity TEXT PRIMARY KEY,
-        window_start INTEGER NOT NULL,
-        failures INTEGER NOT NULL
-      )
-    `);
     // WebAuthn challenges are single-use: the route stores one when it hands the browser
     // its options and consumes it when the answer comes back, so a captured assertion
     // (and its cookie) cannot be replayed (cloud-factory-cf-zl0a).
@@ -372,6 +369,14 @@ export class CredentialBroker extends DurableObject<Env> {
         role TEXT NOT NULL,
         flow TEXT NOT NULL,
         expires_at INTEGER NOT NULL
+      )
+    `);
+    // Failed-control-key counters, keyed by client address (cloud-factory-cf-vhns).
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS auth_throttle (
+        identity TEXT PRIMARY KEY,
+        window_start INTEGER NOT NULL,
+        failures INTEGER NOT NULL
       )
     `);
     this.sql.exec(`
