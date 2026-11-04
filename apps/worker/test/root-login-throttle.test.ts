@@ -106,6 +106,26 @@ describe("root login throttle", () => {
     expect(afterWindow.allowed).toBe(true);
   });
 
+  it("bounds a parallel burst on the general control plane too (cloud-factory-cf-yu3v)", async () => {
+    // The entry gate's check and the comparison's record were separate operations, so
+    // forty concurrent guesses were all compared (forty 403s, no 429). The comparison now
+    // reserves its slot atomically, so the limit holds here as it does on root-login.
+    const identity = "203.0.113.80";
+    const responses = await Promise.all(
+      Array.from({ length: 40 }, () =>
+        SELF.fetch(
+          new Request("https://example.com/api/admin/system", {
+            headers: { "cf-connecting-ip": identity, "x-factory-control-key": "not-the-control-key" },
+          }),
+        ),
+      ),
+    );
+    const statuses = responses.filter((response) => response.status !== 429);
+    // At most the window's worth of guesses is ever compared; the rest are refused.
+    expect(statuses.length).toBeLessThanOrEqual(CONTROL_KEY_ATTEMPT_LIMIT);
+    expect(responses.length - statuses.length).toBeGreaterThanOrEqual(40 - CONTROL_KEY_ATTEMPT_LIMIT);
+  });
+
   it("counts rejections on the routes that compare the key directly (cloud-factory-cf-96mr)", async () => {
     // The passkey administration routes and the repo list compare the header themselves
     // rather than through authorizeControlPlane, so they were uncounted oracles: the same
