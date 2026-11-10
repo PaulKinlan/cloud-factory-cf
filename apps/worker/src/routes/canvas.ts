@@ -4,7 +4,7 @@ import { runCanvasDocument } from "../canvas-runs";
 import { authorizeControlPlane, authzDenial, sessionMayAddressPlatform } from "../auth/tenant";
 import { mintDelegation } from "../auth/delegation";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
-import { MAX_CANVAS_BODY_BYTES } from "../canvas-store";
+import { MAX_CANVAS_BODY_BYTES, MAX_CANVAS_RUN_BODY_BYTES } from "../canvas-store";
 import { readBodyWithinLimit } from "../events/helpers";
 
 export const CANVAS_PATH = /^\/canvas\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/documents(?:\/(?<id>[^/]+))?$/;
@@ -40,7 +40,23 @@ export async function routeCanvasRun(
   if (delegation === undefined && sessionLogin !== undefined) {
     return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
   }
-  const body = (await request.json().catch(() => ({}))) as { limit?: unknown };
+  // The only thing this endpoint reads out of the body is an optional number, so the body is
+  // read against a small bound rather than buffered whole: request.json() would hold an
+  // arbitrarily large body in memory (and parse it) just to look for `limit`
+  // (cloud-factory-cf-i9u7). MAX_CANVAS_RUN_BODY_BYTES is generous for {"limit":100}.
+  const rawBody = await readBodyWithinLimit(request, MAX_CANVAS_RUN_BODY_BYTES);
+  if (rawBody === null) {
+    return Response.json({ ok: false, error: "request body exceeds size limit" }, { status: 413 });
+  }
+  let body: { limit?: unknown } = {};
+  if (rawBody.trim().length > 0) {
+    try {
+      body = JSON.parse(rawBody) as { limit?: unknown };
+    } catch {
+      // An unreadable body used to fall back to {}; keep that, but only within the bound.
+      body = {};
+    }
+  }
   const limit = typeof body.limit === "number" && Number.isFinite(body.limit) ? Math.trunc(body.limit) : undefined;
   const coordinator = getRepoCoordinator(env, repository, platform);
 
