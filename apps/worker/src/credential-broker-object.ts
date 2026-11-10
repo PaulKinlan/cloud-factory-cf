@@ -602,6 +602,21 @@ export class CredentialBroker extends DurableObject<Env> {
     this.sql.exec(`
       CREATE INDEX IF NOT EXISTS session_revocations_at_idx ON session_revocations (revoked_at_ms);
     `);
+    // System delegations the Worker used to reach this object, so a second use of the same
+    // `jti` can be refused (cloud-factory-cf-sd6u). `auth/delegation.ts` states the intent —
+    // one delegation per request — and `brokerInternalHeaders` mints one per call, so this
+    // is the object that turns that intent into a rule. Rows expire with the delegation
+    // itself and are pruned on write.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS delegation_replays (
+        jti TEXT PRIMARY KEY,
+        exp INTEGER NOT NULL,
+        first_seen_ms INTEGER NOT NULL
+      );
+    `);
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS delegation_replays_exp_idx ON delegation_replays (exp);
+    `);
   }
 
   // ------------------------------------------------------------- issuance
@@ -621,7 +636,36 @@ export class CredentialBroker extends DurableObject<Env> {
     const controlKey = this.env.BROKER_CONTROL_KEY;
     if (controlKey && await sameSecret(controlKey, request.headers.get("x-factory-control-key"))) return true;
     const delegated = await this.verifyDelegationHeader(request);
-    return delegated.ok && delegated.claims.login === BROKER_INTERNAL_LOGIN;
+    if (!delegated.ok || delegated.claims.login !== BROKER_INTERNAL_LOGIN) return false;
+    // A system delegation is single-use: `brokerInternalHeaders` mints one per request, and
+    // a token that can be replayed for its whole 60s window is a bearer credential for every
+    // internal route it can reach (settings, passkeys, the effective raw secrets). Tenant
+    // delegations are not touched here — the pipeline mints one per run by design
+    // (`pipeline.ts`), so they stay bearer tokens until that path changes.
+    return this.consumeDelegation(delegated.claims.jti, delegated.claims.exp);
+  }
+
+  /**
+   * Marks a system delegation used, answering false the second time (cloud-factory-cf-sd6u).
+   *
+   * `SELECT` then `INSERT` with no `await` between them: a Durable Object runs one turn at a
+   * time, so the pair is atomic here and two concurrent replays cannot both win.
+   */
+  private consumeDelegation(jti: string, exp: number): boolean {
+    const nowMs = Date.now();
+    // Anything past its expiry can no longer authenticate, so pruning keeps this table to
+    // the delegations still inside their window instead of growing with traffic.
+    this.sql.exec(`DELETE FROM delegation_replays WHERE exp < ?`, Math.floor(nowMs / 1000));
+    if (this.sql.exec(`SELECT 1 FROM delegation_replays WHERE jti = ?`, jti).toArray().length > 0) {
+      return false;
+    }
+    this.sql.exec(
+      `INSERT OR IGNORE INTO delegation_replays (jti, exp, first_seen_ms) VALUES (?, ?, ?)`,
+      jti,
+      exp,
+      nowMs,
+    );
+    return true;
   }
 
   private async issue(request: Request): Promise<Response> {
