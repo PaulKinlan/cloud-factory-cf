@@ -699,7 +699,10 @@ export function initAdminDashboard(): void {
             credentials: 'same-origin',
           });
           if (res.ok) {
-            showStatus('Passkey revoked');
+            // Revoking a passkey also revokes the sessions it could have minted
+            // (cloud-factory-cf-2lbm), so a user revoking their own is signed out here.
+            const data = (await res.json().catch(() => ({}))) as { signedOut?: boolean };
+            showStatus(data?.signedOut ? 'Passkey revoked — you have been signed out' : 'Passkey revoked');
             onDone();
           }
         } catch {

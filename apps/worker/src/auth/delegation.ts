@@ -18,6 +18,19 @@
  *
  * The TTL is deliberately short: this is a bearer credential for one request, and the
  * capability it produces is itself short-lived.
+ *
+ * **Single use, and who enforces it** (cloud-factory-cf-sd6u). The `jti` is not decorative
+ * for the internal principal: `brokerInternalHeaders` mints a fresh delegation per call,
+ * and the broker records each `__system__` `jti` it accepts, refusing a second use of the
+ * same token (see `consumeDelegation` in `credential-broker-object.ts`). That is why a
+ * token that leaks — or a header a bug forwards — is worth one request and not sixty
+ * seconds of every internal route.
+ *
+ * Tenant delegations are the exception, and it is a known gap rather than a design: the
+ * pipeline holds one delegation for a whole run and mints several capabilities with it
+ * (`pipeline.ts`, `capabilityFor`), so the broker cannot refuse a repeat without breaking
+ * that path. Making them single-use means minting per request there first — tracked as
+ * follow-up work rather than guessed at here.
  */
 
 import type { Env } from "../env";
@@ -30,7 +43,7 @@ export interface DelegationClaims {
   login: string;
   /** Expiry, seconds since epoch. */
   exp: number;
-  /** Unique id, for audit correlation. */
+  /** Unique id: audit correlation, and the key a `__system__` token is spent under. */
   jti: string;
 }
 

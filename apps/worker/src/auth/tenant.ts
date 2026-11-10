@@ -1,6 +1,7 @@
 import type { Env } from "../env";
 import { sameSecret } from "../secrets";
 import { readSession } from "../routes/auth";
+import { sessionSigningKey } from "./sessions";
 import { CONTROL_KEY_ATTEMPT_LIMIT_MACHINE, clientIdentity, controlKeyThrottle } from "./throttle";
 
 /**
@@ -42,17 +43,15 @@ export type ControlAuthz =
   | { ok: false; reason: ControlDenialReason; retryAfterSec?: number };
 
 /**
- * The key that signs and verifies `cf_session` — the same precedence `routes/auth.ts` mints
- * with, so a session minted at login verifies here.
+ * The key that signs and verifies `cf_session` — re-exported from `auth/sessions.ts`, the
+ * one place that defines the token, so a session minted at login verifies here.
  *
  * `WEBHOOK_SECRET` is deliberately **not** in this list (cloud-factory-cf-8e7r): the mint
  * path stopped accepting it in `owqq`, and a webhook secret is not a session key. Accepting
  * it on the verification side would be dead code today and a hole the day someone mints
  * with it, so the two sides state the same rule.
  */
-export function sessionSigningKey(env: Env): string | undefined {
-  return env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
-}
+export { sessionSigningKey };
 
 export interface ControlAuthzOptions {
   /**
@@ -155,7 +154,7 @@ export async function authorizeControlPlane(
 
   const signingKey = sessionSigningKey(env);
   if (signingKey) {
-    const session = await readSession(request.headers, signingKey);
+    const session = await readSession(request.headers, env);
     if (session.ok) {
       if (isRootLogin(session.login, env)) {
         return { ok: true, principal: { via: "control-key" } };

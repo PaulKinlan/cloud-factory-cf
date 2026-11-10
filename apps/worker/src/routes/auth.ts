@@ -5,6 +5,16 @@ import { isRootLogin, ROOT_SESSION_LOGIN } from "../auth/tenant";
 import { handlePasskeyRoute } from "../auth/passkey";
 import { brokerInternalHeaders } from "../auth/delegation";
 import { acceptPresentedControlKey, clientIdentity, controlKeyThrottle } from "../auth/throttle";
+import {
+  isSessionRevoked,
+  mintSessionToken,
+  revokeAllSessions,
+  revokeSession,
+  SESSION_COOKIE,
+  SESSION_TTL_SECONDS,
+  sessionSigningKey,
+  verifySessionToken,
+} from "../auth/sessions";
 
 export const AUTH_LOGIN_PATH = "/auth/github/login";
 export const AUTH_CALLBACK_PATH = "/auth/github/callback";
@@ -18,9 +28,11 @@ export const API_REPOS_PATH = "/api/repos";
  * repository list unless an operator pasted the key into the dialog. The callback now
  * mints a signed, HttpOnly session for the connected login and `/api/repos` accepts
  * either that session (for its own login only) or the control key (machine callers).
+ *
+ * Minting, verification and revocation live in `auth/sessions.ts` (cloud-factory-cf-2lbm)
+ * and are re-exported here, where the routes and tests have always imported them.
  */
-export const SESSION_COOKIE = "cf_session";
-export const SESSION_TTL_SECONDS = 8 * 3600;
+export { SESSION_COOKIE, SESSION_TTL_SECONDS, mintSessionToken };
 
 async function signHmacSha256(secret: string, data: string): Promise<string> {
   const enc = new TextEncoder();
@@ -54,43 +66,29 @@ function cookieAttrs(url: URL, path: string): string {
   return `HttpOnly; ${secure}SameSite=Lax; Path=${path}`;
 }
 
-/** `<login>.<exp>.<hmac>`, signed over the login and its expiry. */
-export async function mintSessionToken(
-  signingKey: string,
-  login: string,
-  nowMs: number = Date.now(),
-): Promise<string> {
-  const exp = Math.floor(nowMs / 1000) + SESSION_TTL_SECONDS;
-  const data = `${login}.${exp}`;
-  return `${data}.${await signHmacSha256(signingKey, data)}`;
-}
-
 function sessionCookie(token: string, url: URL): string {
   return `${SESSION_COOKIE}=${encodeURIComponent(token)}; ${cookieAttrs(url, "/")}; Max-Age=${SESSION_TTL_SECONDS}`;
 }
 
 /**
- * Reads and verifies the session cookie; a failure reason is never surfaced to the caller.
+ * Reads, verifies **and authorises** the session cookie: signature and expiry from the
+ * token itself, then the deployment's revocation list (cloud-factory-cf-2lbm).
  *
- * Exported for `auth/tenant.ts`, which uses the same session as a tenant-bound
- * control-plane credential (cloud-factory-cf-e1ql).
+ * A failure reason is never surfaced to the caller. Exported for `auth/tenant.ts`, which
+ * uses the same session as a tenant-bound control-plane credential
+ * (cloud-factory-cf-e1ql), and for the control-plane routes.
  */
 export async function readSession(
   headers: Headers,
-  signingKey: string,
+  env: Env,
   nowMs: number = Date.now(),
 ): Promise<{ ok: true; login: string } | { ok: false }> {
-  const raw = getCookie(headers, SESSION_COOKIE);
-  if (!raw) return { ok: false };
-  const parts = raw.split(".");
-  if (parts.length !== 3) return { ok: false };
-  const [login, expStr, sig] = parts as [string, string, string];
-  if (!login || !expStr || !sig) return { ok: false };
-  const expected = await signHmacSha256(signingKey, `${login}.${expStr}`);
-  if (!(await sameSecret(expected, sig))) return { ok: false };
-  const exp = Number.parseInt(expStr, 10);
-  if (Number.isNaN(exp) || Math.floor(nowMs / 1000) > exp) return { ok: false };
-  return { ok: true, login };
+  const signingKey = sessionSigningKey(env);
+  if (!signingKey) return { ok: false };
+  const claims = await verifySessionToken(getCookie(headers, SESSION_COOKIE), signingKey, nowMs);
+  if (!claims) return { ok: false };
+  if (await isSessionRevoked(env, claims)) return { ok: false };
+  return { ok: true, login: claims.login };
 }
 
 /**
@@ -227,12 +225,68 @@ export async function handleAuth(
   if (url.pathname === "/api/auth/logout" && request.method === "POST") {
     const isSecure = url.protocol === "https:";
     const clearSession = `${SESSION_COOKIE}=; Path=/; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=0`;
-    return Response.json({ ok: true }, { headers: { "set-cookie": clearSession } });
+    const headers = new Headers({ "set-cookie": clearSession });
+
+    // Clearing the cookie only un-issues the token in *this* browser. Logging out is a
+    // revocation, so the token that is being discarded is added to the deny list too
+    // (cloud-factory-cf-2lbm); with `all`, every session for the login goes.
+    const signingKey = sessionSigningKey(env);
+    const claims = signingKey
+      ? await verifySessionToken(getCookie(request.headers, SESSION_COOKIE), signingKey)
+      : null;
+    if (!claims) return Response.json({ ok: true, revoked: false }, { headers });
+
+    let all = url.searchParams.get("all") === "1" || url.searchParams.get("all") === "true";
+    if (!all) {
+      try {
+        const body = (await request.json()) as { all?: unknown } | null;
+        all = body?.all === true;
+      } catch {
+        // no body (or not JSON): revoke just this session
+      }
+    }
+
+    const revoked = all ? await revokeAllSessions(env, claims.login) : await revokeSession(env, claims);
+    return Response.json({ ok: true, revoked, all }, { headers });
+  }
+
+  if (url.pathname === "/api/auth/sessions/revoke" && request.method === "POST") {
+    // The operator lever for removing an account from the allowlist: removing a login
+    // from `PLATFORM_OWNERS` already drops its root rights (`isRootLogin` is re-checked
+    // on every request), but the session itself still authenticates. This ends it.
+    let authorised = await acceptPresentedControlKey(
+      request,
+      env,
+      request.headers.get("x-factory-control-key"),
+    );
+    if (!authorised) {
+      const session = await readSession(request.headers, env);
+      authorised = Boolean(session.ok && (isRootLogin(session.login, env) || session.login === ROOT_SESSION_LOGIN));
+    }
+    if (!authorised) {
+      return Response.json({ ok: false, error: "not authorised to revoke sessions" }, { status: 401 });
+    }
+
+    let login = url.searchParams.get("login")?.trim() ?? "";
+    if (!login) {
+      try {
+        const body = (await request.json()) as { login?: unknown } | null;
+        login = typeof body?.login === "string" ? body.login.trim() : "";
+      } catch {
+        // no body
+      }
+    }
+    if (!login) {
+      return Response.json({ ok: false, error: "missing login" }, { status: 400 });
+    }
+
+    const revoked = await revokeAllSessions(env, login);
+    return Response.json({ ok: revoked, login, revoked }, { status: revoked ? 200 : 503 });
   }
 
   if (url.pathname === "/api/auth/session") {
-    const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
-    const session = signingKey ? await readSession(request.headers, signingKey) : { ok: false as const };
+    const signingKey = sessionSigningKey(env);
+    const session = await readSession(request.headers, env);
     const creds = await resolveGithubCredentials(env);
     const isRootAdmin = Boolean(session.ok && (isRootLogin(session.login, env) || session.login === ROOT_SESSION_LOGIN));
     return Response.json({
@@ -983,7 +1037,7 @@ export async function handleApiRepos(
   url: URL,
 ): Promise<Response> {
   const controlKey = env.BROKER_CONTROL_KEY;
-  const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
+  const signingKey = sessionSigningKey(env);
 
   if (!controlKey && !signingKey) {
     return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
@@ -1000,7 +1054,7 @@ export async function handleApiRepos(
   }
 
   if (!authorised && signingKey) {
-    const session = await readSession(request.headers, signingKey);
+    const session = await readSession(request.headers, env);
     if (session.ok) {
       const isRoot = isRootLogin(session.login, env) || session.login === ROOT_SESSION_LOGIN;
       if (isRoot) {

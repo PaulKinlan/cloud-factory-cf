@@ -394,11 +394,8 @@ export async function routeAdminUserSettings(
 ): Promise<Response> {
   let owner = ownerParam?.trim();
   if (!owner) {
-    const signingKey = env.BROKER_SIGNING_KEY ?? env.BROKER_CONTROL_KEY;
-    if (signingKey) {
-      const session = await readSession(request.headers, signingKey);
-      if (session.ok) owner = session.login;
-    }
+    const session = await readSession(request.headers, env);
+    if (session.ok) owner = session.login;
   }
 
   if (!owner) {

@@ -29,17 +29,19 @@ describe("CredentialBroker internal route authorization", () => {
   });
 
   it("accepts the control key or a repository-bound system delegation, not a tenant delegation", async () => {
-    const machine = await brokerInternalHeaders(env, repository);
-    expect((await request("/internal-setting?key=platform.owners", "GET", machine)).status).toBe(200);
-    expect((await request("/passkeys", "GET", machine)).status).toBe(200);
-    expect((await request("/effective-github-app", "GET", machine)).status).toBe(200);
+    // A system delegation is single-use (cloud-factory-cf-sd6u), so every case mints its own
+    // - exactly what `brokerInternalHeaders` does per request in the Worker.
+    const machine = () => brokerInternalHeaders(env, repository);
+    expect((await request("/internal-setting?key=platform.owners", "GET", await machine())).status).toBe(200);
+    expect((await request("/passkeys", "GET", await machine())).status).toBe(200);
+    expect((await request("/effective-github-app", "GET", await machine())).status).toBe(200);
 
     const keyless = { ...env, BROKER_CONTROL_KEY: undefined };
     const system = await brokerInternalHeaders(keyless, repository);
     expect(system.has("x-factory-control-key")).toBe(false);
     expect(system.has("x-factory-delegation")).toBe(true);
     expect((await request("/passkeys", "GET", system)).status).toBe(200);
-    expect((await request("/effective-webhook-secret", "GET", system)).status).toBe(200);
+    expect((await request("/effective-webhook-secret", "GET", await brokerInternalHeaders(keyless, repository))).status).toBe(200);
 
     // mintDelegation returns undefined when the deployment has no signing key, and the point
     // of these cases is that a TENANT-scoped token is refused - so a missing token would make
@@ -56,5 +58,39 @@ describe("CredentialBroker internal route authorization", () => {
     }
     const other = await delegationOrFail({ repository: "some-other-repo", login: BROKER_INTERNAL_LOGIN });
     expect((await request("/internal-setting?key=platform.owners", "GET", { "x-factory-delegation": other })).status).toBe(401);
+  });
+
+  /**
+   * `jti` is spent, not decorative (cloud-factory-cf-sd6u). A system delegation is minted
+   * per request, so accepting the same one twice would make it a 60s bearer credential for
+   * settings, passkeys and the effective raw secrets.
+   */
+  it("refuses a second use of the same system delegation, and keeps the control key repeatable", async () => {
+    const keyless = { ...env, BROKER_CONTROL_KEY: undefined };
+    const once = await brokerInternalHeaders(keyless, repository);
+    expect((await request("/passkeys", "GET", once)).status).toBe(200);
+    expect((await request("/passkeys", "GET", once)).status).toBe(401);
+    // The replay is refused, not merged into the first answer: nothing sensitive is returned
+    // a second time.
+    const replay = await request("/effective-webhook-secret", "GET", once);
+    expect(replay.status).toBe(401);
+    expect(((await replay.json()) as { secret?: string }).secret).toBeUndefined();
+
+    // A fresh delegation for the same repository still works, and the machine key is not
+    // affected at all - it is a key, not a token.
+    expect((await request("/passkeys", "GET", await brokerInternalHeaders(keyless, repository))).status).toBe(200);
+    const key = await brokerInternalHeaders(env, repository);
+    expect((await request("/passkeys", "GET", key)).status).toBe(200);
+    expect((await request("/passkeys", "GET", key)).status).toBe(200);
+  });
+
+  it("does not spend a tenant delegation's jti, so ordinary tenant reads keep working", async () => {
+    // The pipeline holds one tenant delegation for a whole run (it mints several capabilities
+    // with it), so tenant tokens stay bearer credentials - see `auth/delegation.ts`.
+    const token = await mintDelegation(env, { repository, login: "alice" });
+    if (!token) throw new Error("mintDelegation returned no token for this test's environment");
+    const headers = { "x-factory-delegation": token };
+    expect((await request("/settings", "GET", headers)).status).toBe(200);
+    expect((await request("/settings", "GET", headers)).status).toBe(200);
   });
 });
