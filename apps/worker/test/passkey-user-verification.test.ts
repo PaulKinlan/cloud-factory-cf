@@ -58,7 +58,7 @@ interface StoredCredential {
   algorithm: number;
 }
 
-function testEnv(credential: StoredCredential) {
+function testEnv(credential: StoredCredential, extra: Record<string, unknown> = {}) {
   const challenges = new Set<string>();
   const broker = {
     fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -90,6 +90,7 @@ function testEnv(credential: StoredCredential) {
     BROKER_SIGNING_KEY: SIGNING_KEY,
     BROKER_CONTROL_KEY: "test-passkey-control-key",
     CREDENTIAL_BROKER: { idFromName: (name: string) => name, get: () => broker },
+    ...extra,
   } as never;
 }
 
@@ -241,6 +242,56 @@ describe("a root passkey requires user verification", () => {
       verifyUrl,
     );
     expect(response?.status).toBe(401);
+  });
+
+  /**
+   * "Root" is the control plane's predicate, not the credential's role (cloud-factory-cf-bgjb).
+   * A deployment lists its operators in PLATFORM_OWNERS (ADR 006), and those logins get
+   * deployment-wide authority from `authorizeControlPlane` while their passkey is stored with
+   * `role: "user"`. A touch-only assertion for one of them would have minted exactly that
+   * session, so the UV requirement has to follow the same predicate.
+   */
+  it("requires UV of a platform owner's passkey, not only of the __root__ subject", async () => {
+    const { privateKey, credential } = await makeCredential("user", "alice");
+    const env = testEnv(credential, { PLATFORM_OWNERS: "alice" });
+
+    const first = await startLogin(env);
+    const touchOnly = await assertion(privateKey, credential.credentialId, first.challenge, 0x01); // UP only
+    const refused = await handlePasskeyRoute(
+      post("/api/auth/passkey/login/verify", touchOnly, { cookie: first.cookie }),
+      env,
+      verifyUrl,
+    );
+    expect(refused?.status).toBe(401);
+    await expect(refused!.json()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("User verification required"),
+    });
+    expect(refused!.headers.get("set-cookie") ?? "").not.toContain("cf_session");
+
+    // The same owner with a verified authenticator still signs in.
+    const second = await startLogin(env);
+    const withUv = await assertion(privateKey, credential.credentialId, second.challenge, 0x05); // UP | UV
+    const accepted = await handlePasskeyRoute(
+      post("/api/auth/passkey/login/verify", withUv, { cookie: second.cookie }),
+      env,
+      verifyUrl,
+    );
+    expect(accepted?.status).toBe(200);
+    expect(accepted!.headers.get("set-cookie") ?? "").toContain("cf_session");
+
+    // A login that is NOT on the platform-owner list keeps the ordinary rule: UP alone is
+    // enough, so this fix does not make every passkey a UV-gated one.
+    const { privateKey: bobKey, credential: bob } = await makeCredential("user", "bob");
+    const bobEnv = testEnv(bob, { PLATFORM_OWNERS: "alice" });
+    const third = await startLogin(bobEnv);
+    const bobTouchOnly = await assertion(bobKey, bob.credentialId, third.challenge, 0x01);
+    const bobAccepted = await handlePasskeyRoute(
+      post("/api/auth/passkey/login/verify", bobTouchOnly, { cookie: third.cookie }),
+      bobEnv,
+      verifyUrl,
+    );
+    expect(bobAccepted?.status).toBe(200);
   });
 
   it("asks a root registration for user verification, and a user registration for preferred", async () => {

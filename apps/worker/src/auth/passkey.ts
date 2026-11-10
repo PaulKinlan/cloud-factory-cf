@@ -5,6 +5,7 @@ import { readSession } from "../routes/auth";
 import { brokerInternalHeaders } from "./delegation";
 import { acceptPresentedControlKey } from "./throttle";
 import { revokeAllSessions } from "./sessions";
+import { isRootLogin } from "./tenant";
 
 export const WEBAUTHN_CHALLENGE_COOKIE = "cf_webauthn_challenge";
 
@@ -565,8 +566,17 @@ export async function handlePasskeyRoute(
     // (0x04) proves the human unlocked the authenticator, and the admin console's
     // 'required' policy lived only in client JavaScript that an attacker never runs
     // (cloud-factory-cf-dxy4).
+    // "Root" is not one credential role, it is whatever the control plane treats as root:
+    // `role === "root"`, the `__root__` bootstrap subject, AND every login the deployment
+    // lists in PLATFORM_OWNERS / ROOT_ADMIN_LOGINS (ADR 006) — `authorizeControlPlane` grants
+    // those deployment-wide authority, so a touch-only assertion for one of them would unlock
+    // the control plane while the check here believed it was an ordinary user
+    // (cloud-factory-cf-bgjb).
+    const credentialSubject = String(passkey.subject ?? "");
     const credentialIsRoot =
-      String(passkey.role ?? "user") === "root" || String(passkey.subject ?? "") === "__root__";
+      String(passkey.role ?? "user") === "root" ||
+      credentialSubject === "__root__" ||
+      (credentialSubject !== "" && isRootLogin(credentialSubject, env));
     if (credentialIsRoot && (flags & 0x04) === 0) {
       return Response.json(
         { ok: false, error: "User verification required for this passkey" },
