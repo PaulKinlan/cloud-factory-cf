@@ -3,6 +3,7 @@ import { sameSecret } from "../secrets";
 import { mintSessionToken, SESSION_COOKIE, SESSION_TTL_SECONDS } from "../routes/auth";
 import { readSession } from "../routes/auth";
 import { brokerInternalHeaders } from "./delegation";
+import { verifyRegistrationAttestation } from "./webauthn-attestation";
 
 export const WEBAUTHN_CHALLENGE_COOKIE = "cf_webauthn_challenge";
 
@@ -326,9 +327,12 @@ export async function handlePasskeyRoute(
       return Response.json({ ok: false, error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const { credentialId, publicKeySpki, algorithm, clientDataJSON, label } = body;
-    if (!credentialId || !publicKeySpki) {
-      return Response.json({ ok: false, error: "Missing credentialId or publicKeySpki" }, { status: 400 });
+    // publicKeySpki is no longer required: the key that gets stored is the one inside the
+    // authenticator data (cloud-factory-cf-evbe). When a client still sends it, it is checked
+    // against the attested key, which turns a browser-side bug into a clear failure here.
+    const { credentialId, publicKeySpki, clientDataJSON, label } = body;
+    if (!credentialId) {
+      return Response.json({ ok: false, error: "Missing credentialId" }, { status: 400 });
     }
 
     // The client data is the only thing binding this registration to OUR challenge and OUR
@@ -360,30 +364,41 @@ export async function handlePasskeyRoute(
       return Response.json({ ok: false, error: `Failed to parse clientData: ${String(err)}` }, { status: 400 });
     }
 
-    // Validate publicKeySpki can be imported
-    try {
-      const spkiBytes = base64UrlDecode(String(publicKeySpki));
-      const alg = Number(algorithm ?? -7);
-      if (alg === -7) {
-        await crypto.subtle.importKey(
-          "spki",
-          bufferSource(spkiBytes),
-          { name: "ECDSA", namedCurve: "P-256" },
-          false,
-          ["verify"],
-        );
-      } else if (alg === -257) {
-        await crypto.subtle.importKey(
-          "spki",
-          bufferSource(spkiBytes),
-          { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-          false,
-          ["verify"],
-        );
-      }
-    } catch (err) {
-      return Response.json({ ok: false, error: `Invalid SPKI public key: ${String(err)}` }, { status: 400 });
+    // Verify what the AUTHENTICATOR returned, not what the client claims about it
+    // (cloud-factory-cf-evbe). Until this, registration filed whatever credentialId and
+    // publicKeySpki arrived: nothing tied the key to this relying party, to a user-presence
+    // check, or to the credential id it was stored under - the assertion path below has always
+    // checked those, registration never did.
+    const attestationObject = body.attestationObject ?? body.response?.attestationObject;
+    if (typeof attestationObject !== "string" || attestationObject.length === 0) {
+      return Response.json({ ok: false, error: "Missing attestationObject" }, { status: 400 });
     }
+
+    let attested;
+    try {
+      attested = await verifyRegistrationAttestation({
+        attestationObject,
+        expectedRpId: url.hostname,
+        expectedCredentialId: String(credentialId),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return Response.json({ ok: false, error: `Invalid attestation: ${message}` }, { status: 400 });
+    }
+
+    // If the client also sent the key it thinks it registered, it must be the same key - a
+    // mismatch is a client bug worth failing on rather than discovering at the next login.
+    if (publicKeySpki && String(publicKeySpki) !== attested.publicKeySpki) {
+      return Response.json(
+        { ok: false, error: "publicKeySpki does not match the attested credential public key" },
+        { status: 400 },
+      );
+    }
+
+    // The stored credential is the attested one: key and algorithm come from the authenticator
+    // data, never from the request body.
+    const storedPublicKeySpki = attested.publicKeySpki;
+    const storedAlgorithm = attested.algorithm;
 
     // Store in root CredentialBroker ("default")
     if (!env.CREDENTIAL_BROKER) {
@@ -397,8 +412,9 @@ export async function handlePasskeyRoute(
         credentialId,
         subject: verifiedCookie.subject,
         role: verifiedCookie.role,
-        publicKeySpki,
-        algorithm: algorithm ?? -7,
+        publicKeySpki: storedPublicKeySpki,
+        algorithm: storedAlgorithm,
+        signCount: attested.signCount,
         label: sanitizePasskeyLabel(label, `Passkey (${new Date().toLocaleDateString()})`),
       }),
     });

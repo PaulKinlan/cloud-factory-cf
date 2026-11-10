@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { handlePasskeyRoute } from "../src/auth/passkey";
 import { mintSessionToken } from "../src/routes/auth";
+import { buildAttestationObject, es256KeyPair } from "./support/webauthn";
 
 /**
  * Passkey registration binds a credential to OUR challenge and OUR origin, and it does
@@ -179,12 +180,18 @@ describe("passkey registration client data", () => {
   it("registers a credential whose client data answers this challenge from this origin", async () => {
     const { env, saved } = testEnv();
     const { challenge, cookie } = await startRegistration(env);
-    const publicKeySpki = await es256PublicKeySpki();
+    const key = await es256KeyPair();
+    const credentialId = base64Url(key.credentialId);
+    const attestationObject = await buildAttestationObject({
+      rpId: "example.com",
+      credentialId: key.credentialId,
+      spki: key.spki,
+    });
 
     const response = await handlePasskeyRoute(
       post(
         "/api/auth/passkey/register/verify",
-        { credentialId: "cred-valid", publicKeySpki, clientDataJSON: clientData({ challenge }) },
+        { credentialId, attestationObject, clientDataJSON: clientData({ challenge }) },
         { cookie },
       ),
       env,
@@ -192,11 +199,73 @@ describe("passkey registration client data", () => {
     );
 
     expect(response?.status).toBe(200);
-    expect(await response!.json()).toMatchObject({ ok: true, credentialId: "cred-valid" });
+    expect(await response!.json()).toMatchObject({ ok: true, credentialId });
     expect(saved).toHaveLength(1);
-    expect(saved[0]).toMatchObject({ credentialId: "cred-valid", publicKeySpki });
+    // The stored key is the one in the authenticator data, which is the same SPKI the
+    // registration was built from - so the derivation is byte-exact, not merely accepted.
+    expect(saved[0]).toMatchObject({ credentialId, publicKeySpki: key.spkiBase64Url, algorithm: -7 });
     // A passkey session is only minted for a registration that passed every check.
     expect(response?.headers.get("set-cookie")).toContain("cf_session=");
+  });
+
+  it("refuses a registration that never presented an attestation object", async () => {
+    // The reported hole (cloud-factory-cf-evbe): credentialId and publicKeySpki were taken on
+    // trust, so a caller could file any key under any credential id without an authenticator
+    // ever being involved.
+    const { env, saved } = testEnv();
+    const { challenge, cookie } = await startRegistration(env);
+
+    const response = await handlePasskeyRoute(
+      post(
+        "/api/auth/passkey/register/verify",
+        {
+          credentialId: "cred-no-attestation",
+          publicKeySpki: await es256PublicKeySpki(),
+          clientDataJSON: clientData({ challenge }),
+        },
+        { cookie },
+      ),
+      env,
+      new URL(VERIFY_URL),
+    );
+
+    expect(response?.status).toBe(400);
+    expect(await response!.json()).toMatchObject({ ok: false, error: "Missing attestationObject" });
+    expect(saved).toHaveLength(0);
+    expect(response?.headers.get("set-cookie") ?? "").not.toContain("cf_session=");
+  });
+
+  it("refuses an attestation object for a different credential id", async () => {
+    const { env, saved } = testEnv();
+    const { challenge, cookie } = await startRegistration(env);
+    const key = await es256KeyPair();
+    const other = await es256KeyPair();
+    const attestationObject = await buildAttestationObject({
+      rpId: "example.com",
+      credentialId: other.credentialId,
+      spki: key.spki,
+    });
+
+    const response = await handlePasskeyRoute(
+      post(
+        "/api/auth/passkey/register/verify",
+        {
+          credentialId: base64Url(key.credentialId),
+          attestationObject,
+          clientDataJSON: clientData({ challenge }),
+        },
+        { cookie },
+      ),
+      env,
+      new URL(VERIFY_URL),
+    );
+
+    expect(response?.status).toBe(400);
+    expect(await response!.json()).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("credential id does not match"),
+    });
+    expect(saved).toHaveLength(0);
   });
 });
 

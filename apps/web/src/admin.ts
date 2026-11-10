@@ -570,6 +570,11 @@ export function initAdminDashboard(): void {
         body: JSON.stringify({
           credentialId: bufferToBase64Url(credential.rawId),
           clientDataJSON: bufferToBase64Url(response.clientDataJSON),
+          // The attestation object is what the server verifies: it carries the rpId hash, the
+          // user-presence and attested-credential-data flags, and the credential's own COSE
+          // public key (cloud-factory-cf-evbe). publicKeySpki is sent too, and the server now
+          // checks it against the attested key rather than trusting it.
+          attestationObject: bufferToBase64Url(response.attestationObject),
           publicKeySpki,
           algorithm,
           label,
