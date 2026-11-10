@@ -24,14 +24,34 @@ export const TRACE_PATH =
 export const API_TRACE_TICKET_PATH =
   /^\/api\/repos\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/trace-ticket$/;
 
-const usedTicketNonces = new Map<string, number>();
+/**
+ * Records a ticket nonce as spent and reports whether this caller was the first.
+ *
+ * Single-use cannot live in a module-scoped Map: the map is per isolate, so a ticket
+ * replayed to another isolate (or after an eviction) was accepted again - a bearer
+ * credential with a 60s window and no real one-shot property (cloud-factory-cf-il5w).
+ * The consumer is supplied by the caller and is backed by the repository's coordinator,
+ * shared by every isolate.
+ */
+export type TraceTicketNonceConsumer = (nonce: string, expiresAt: number) => Promise<boolean>;
 
-function cleanUsedTicketNonces(now = Date.now()): void {
-  for (const [nonce, expiresAt] of usedTicketNonces.entries()) {
-    if (now > expiresAt) {
-      usedTicketNonces.delete(nonce);
+/** Consumer backed by the repository's coordinator; fails closed if the store is unreachable. */
+export function coordinatorTicketConsumer(stub: { fetch: typeof fetch }): TraceTicketNonceConsumer {
+  return async (nonce, expiresAt) => {
+    try {
+      const res = await stub.fetch("https://repo-coordinator.internal/trace-ticket-nonces/consume", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ nonce, expiresAt }),
+      });
+      if (!res.ok) return false;
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      return data.ok === true;
+    } catch {
+      // Fails closed: a ticket we cannot prove is fresh is not accepted.
+      return false;
     }
-  }
+  };
 }
 
 async function signHmacSha256(secret: string, data: string): Promise<string> {
@@ -55,7 +75,6 @@ export async function mintTraceTicket(
   repo: string,
   now = Date.now(),
 ): Promise<{ ticket: string; expiresAt: number }> {
-  cleanUsedTicketNonces(now);
   const expiresAt = now + 60_000;
   const nonce = crypto.randomUUID().replace(/-/g, "");
   const payload = `${owner.toLowerCase()}:${repo.toLowerCase()}:${expiresAt}:${nonce}`;
@@ -70,8 +89,8 @@ export async function verifyTraceTicket(
   owner: string,
   repo: string,
   now = Date.now(),
+  consumeNonce: TraceTicketNonceConsumer,
 ): Promise<boolean> {
-  cleanUsedTicketNonces(now);
   const dotIndex = ticket.lastIndexOf(".");
   if (dotIndex < 0) return false;
   const payload = ticket.slice(0, dotIndex);
@@ -88,18 +107,15 @@ export async function verifyTraceTicket(
   if (ticketOwner !== owner.toLowerCase() || ticketRepo !== repo.toLowerCase()) {
     return false;
   }
-  if (usedTicketNonces.has(nonce)) {
-    return false; // Replay prevention: single-use ticket
-  }
-
   const expectedSig = await signHmacSha256(secret, payload);
   if (!(await sameSecret(expectedSig, sig))) {
     return false;
   }
 
-  // Mark nonce as used
-  usedTicketNonces.set(nonce, expiresAt);
-  return true;
+  // Spend the nonce only after the signature checks out, so a forged ticket cannot burn a
+  // legitimate one. The consumer is the repository's durable store, so this is the single
+  // point where a ticket becomes unusable - for every isolate (cloud-factory-cf-il5w).
+  return consumeNonce(nonce, expiresAt);
 }
 
 function requiredGroup(groups: Record<string, string | undefined>, name: string): string {
@@ -171,7 +187,14 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
     let socketAuthorised = false;
     const ticket = url.searchParams.get("ticket");
     if (ticket && signingKey) {
-      socketAuthorised = await verifyTraceTicket(signingKey, ticket, owner, repo);
+      socketAuthorised = await verifyTraceTicket(
+        signingKey,
+        ticket,
+        owner,
+        repo,
+        Date.now(),
+        coordinatorTicketConsumer(stub),
+      );
     }
     let authz: Awaited<ReturnType<typeof authorizeControlPlane>> | undefined;
     if (!socketAuthorised) {
