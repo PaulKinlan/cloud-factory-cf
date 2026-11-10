@@ -290,14 +290,21 @@ export class CredentialBroker extends DurableObject<Env> {
       const id = url.searchParams.get("id");
       const subject = url.searchParams.get("subject");
       let query = "SELECT credential_id, subject, role, public_key_spki, algorithm, label, created_at, last_used_at FROM passkey_credentials";
+      const filters: string[] = [];
       const params: string[] = [];
+      // Both filters apply when both are given (cloud-factory-cf-plc4). This used to be
+      // `if (id) … else if (subject)`, so a caller that asked for "this credential, and only
+      // if it belongs to me" silently got an unscoped lookup by id — which is how a non-root
+      // caller could read another account's subject.
       if (id) {
-        query += " WHERE credential_id = ?";
+        filters.push("credential_id = ?");
         params.push(id);
-      } else if (subject) {
-        query += " WHERE subject = ?";
+      }
+      if (subject) {
+        filters.push("subject = ?");
         params.push(subject);
       }
+      if (filters.length > 0) query += ` WHERE ${filters.join(" AND ")}`;
       query += " ORDER BY created_at DESC";
       const rows = this.sql.exec<any>(query, ...params).toArray();
       return Response.json({
@@ -377,7 +384,12 @@ export class CredentialBroker extends DurableObject<Env> {
         } else {
           this.sql.exec(`DELETE FROM passkey_credentials WHERE credential_id = ?`, id);
         }
-        return Response.json({ ok: true, deleted: id });
+        // Report what actually happened (cloud-factory-cf-plc4): a scoped delete that matches
+        // nothing is a refusal, and the caller must not read `ok: true` and act on it.
+        const deletedCount = Number(
+          this.sql.exec<{ n: number }>(`SELECT changes() AS n`).one().n,
+        );
+        return Response.json({ ok: deletedCount > 0, deleted: id, deletedCount });
       }
       return Response.json({ ok: false, error: "missing id" }, { status: 400 });
     }

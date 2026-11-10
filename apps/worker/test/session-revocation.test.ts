@@ -235,6 +235,64 @@ describe("revoking a passkey's sessions (cloud-factory-cf-2lbm)", () => {
     expect(await isAuthenticated(root)).toBe(true);
   });
 
+  /**
+   * A non-root caller must not be able to name someone else's credential
+   * (cloud-factory-cf-plc4). The lookup that decides whose sessions to revoke is scoped to
+   * the caller, and the answer is checked again before anything is revoked, so an id that
+   * belongs to another account is simply "not found" here.
+   */
+  it("does not let one login revoke another login's sessions with their credential id", async () => {
+    await putPasskey("pk-victim-9", "passkey-victim");
+    const victimSession = await mintSessionToken(SIGNING_KEY, "passkey-victim");
+    const attackerSession = await mintSessionToken(SIGNING_KEY, "passkey-attacker");
+
+    const res = await call("/api/auth/passkeys?id=pk-victim-9", { method: "DELETE", headers: cookie(attackerSession) });
+    expect(res.status).toBe(404);
+    const body = (await res.text()).toLowerCase();
+    // No disclosure that the credential exists, and no mention of the victim's login.
+    expect(body).not.toContain("passkey-victim");
+
+    // The victim's credential and every session it holds are untouched.
+    expect(await isAuthenticated(victimSession)).toBe(true);
+    const listed = await env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default")).fetch(
+      "https://credential-broker.internal/passkeys?subject=passkey-victim",
+      { headers: await brokerInternalHeaders(env, "default") },
+    );
+    const rows = (await listed.json()) as { passkeys?: Array<{ credentialId: string }> };
+    expect(rows.passkeys?.map((row) => row.credentialId)).toContain("pk-victim-9");
+    // The attacker's own session is untouched too (nothing happened to them either).
+    expect(await isAuthenticated(attackerSession)).toBe(true);
+  });
+
+  it("scopes the broker's own lookup to id AND subject, so the owner check cannot be bypassed", async () => {
+    await putPasskey("pk-scoped-10", "passkey-scoped-owner");
+    const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
+    const headers = await brokerInternalHeaders(env, "default");
+
+    // The root cause of plc4: with both parameters present the broker used to drop `subject`
+    // and answer by id alone.
+    const mismatched = await broker.fetch(
+      "https://credential-broker.internal/passkeys?id=pk-scoped-10&subject=someone-else",
+      { headers },
+    );
+    expect(((await mismatched.json()) as { passkeys?: unknown[] }).passkeys).toEqual([]);
+
+    // And a scoped delete that matches nothing says so instead of answering ok:true.
+    const noop = await broker.fetch(
+      "https://credential-broker.internal/passkeys?id=pk-scoped-10&subject=someone-else",
+      { method: "DELETE", headers: await brokerInternalHeaders(env, "default") },
+    );
+    const noopBody = (await noop.json()) as { ok: boolean; deletedCount: number };
+    expect(noopBody.deletedCount).toBe(0);
+    expect(noopBody.ok).toBe(false);
+
+    const real = await broker.fetch("https://credential-broker.internal/passkeys?id=pk-scoped-10&subject=passkey-scoped-owner", {
+      method: "DELETE",
+      headers: await brokerInternalHeaders(env, "default"),
+    });
+    expect(((await real.json()) as { deletedCount: number }).deletedCount).toBe(1);
+  });
+
   it("does not revoke anything for a passkey that does not exist", async () => {
     const caller = await mintSessionToken(SIGNING_KEY, "passkey-missing-user");
     const res = await call("/api/auth/passkeys?id=pk-does-not-exist", { method: "DELETE", headers: cookie(caller) });
