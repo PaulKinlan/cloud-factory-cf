@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { parseRepositoryKey } from "@factory-cloud/sdk";
 import type { Env } from "./env";
 import { planAgents, sourceMatches } from "./canvas-runs";
-import { safeParseJson } from "./events/helpers";
+import { readBodyWithinLimit, safeParseJson } from "./events/helpers";
 import { isMissingSchemaError } from "./events/sql-errors";
 import { createDefaultExecutionFn, drainRepository } from "./pipeline";
 import { CanvasStore, migrateCanvasTable } from "./canvas-store";
@@ -732,8 +732,16 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
     const provider: Provider = providerParam;
 
-    const body = await request.text();
-    if (byteLength(body) > MAX_WEBHOOK_BYTES) {
+    // Refuse the length up front when the caller declares one, then enforce it while
+    // reading: this body is unauthenticated until `authorise` below has seen it, so it
+    // must not be possible to make the object buffer an unbounded stream first
+    // (cloud-factory-cf-v0xd).
+    const declared = Number(request.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > MAX_WEBHOOK_BYTES) {
+      return Response.json({ ok: false, error: "payload too large" }, { status: 413 });
+    }
+    const body = await readBodyWithinLimit(request, MAX_WEBHOOK_BYTES);
+    if (body === null) {
       return Response.json({ ok: false, error: "payload too large" }, { status: 413 });
     }
 
@@ -1020,6 +1028,3 @@ function sameRepository(a: string, b: string): boolean {
   return repoA === repoB;
 }
 
-function byteLength(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
-}
