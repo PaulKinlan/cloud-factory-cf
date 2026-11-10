@@ -34,13 +34,23 @@ function cborUint(value: number): Uint8Array {
   // argument separately shifted every following key by one, which the verifier then refused
   // (correctly) as a COSE key it could not read.
   if (value >= 0) return uint(value);
-  if (-1 - value < 24) return new Uint8Array([0x20 | (-1 - value)]);
-  return concat(new Uint8Array([0x38]), uint(-1 - value));
+  // For a negative integer the ARGUMENT is (-1 - value) and the header carries its WIDTH:
+  // -257 is 0x39 0x01 0x00 (2-byte argument), not 0x38 followed by a separately encoded
+  // number. Writing it the second way made the verifier read -26 and then treat the remaining
+  // bytes as further map keys.
+  const arg = -1 - value;
+  if (arg < 24) return new Uint8Array([0x20 | arg]);
+  if (arg < 256) return new Uint8Array([0x38, arg]);
+  if (arg < 65536) return new Uint8Array([0x39, (arg >> 8) & 0xff, arg & 0xff]);
+  return new Uint8Array([0x3a, (arg >>> 24) & 0xff, (arg >>> 16) & 0xff, (arg >>> 8) & 0xff, arg & 0xff]);
 }
 function cborByteString(bytes: Uint8Array): Uint8Array {
-  return bytes.length < 24
-    ? concat(new Uint8Array([0x40 | bytes.length]), bytes)
-    : concat(new Uint8Array([0x58, bytes.length]), bytes);
+  // 0x58 carries ONE length byte, so it stops at 255; a 2048-bit RSA modulus is 256 bytes and
+  // needs 0x59 with a two-byte length. Encoding it with 0x58 truncated the length and shifted
+  // the rest of the key - the verifier then read kty 0 and refused the whole attestation.
+  if (bytes.length < 24) return concat(new Uint8Array([0x40 | bytes.length]), bytes);
+  if (bytes.length < 256) return concat(new Uint8Array([0x58, bytes.length]), bytes);
+  return concat(new Uint8Array([0x59, (bytes.length >> 8) & 0xff, bytes.length & 0xff]), bytes);
 }
 function cborText(text: string): Uint8Array {
   const bytes = new TextEncoder().encode(text);
@@ -72,10 +82,15 @@ export function coseKeyFromSpki(spki: Uint8Array): Uint8Array {
 export interface AttestationOptions {
   rpId: string;
   credentialId: Uint8Array;
+  /**
+   * An explicit COSE key, for the cases that have to build a key the helpers would never
+   * produce - an off-curve P-256 point, for instance. Takes precedence over `spki`.
+   */
+  coseKey?: Uint8Array;
   /** Defaults to UP|AT (0x41): user present, attested credential data included. */
   flags?: number;
   signCount?: number;
-  spki: Uint8Array;
+  spki?: Uint8Array;
   /** Override the rpId hash, to build the mismatch case. */
   rpIdHash?: Uint8Array;
 }
@@ -99,7 +114,7 @@ export async function buildAttestationObject(options: AttestationOptions): Promi
     aaguid,
     credentialIdLength,
     options.credentialId,
-    coseKeyFromSpki(options.spki),
+    options.coseKey ?? coseKeyFromSpki(options.spki!),
   );
   const attestationObject = cborMap([
     [cborText("fmt"), cborText("none")],
@@ -118,3 +133,39 @@ export async function es256KeyPair(): Promise<{ spki: Uint8Array; spkiBase64Url:
 }
 
 export { base64Url };
+
+/** COSE key for an RSA public key, from its JWK: kty=3, alg=-257, n and e. */
+export async function coseKeyFromRsaKey(key: CryptoKey): Promise<Uint8Array> {
+  const jwk = (await crypto.subtle.exportKey("jwk", key)) as { n?: string; e?: string };
+  if (!jwk.n || !jwk.e) throw new Error("RSA test key did not export a modulus and exponent");
+  const decode = (value: string) => {
+    const padded = value.replace(/-/g, "+").replace(/_/g, "/");
+    const binary = atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  };
+  return cborMap([
+    [cborUint(1), cborUint(3)],
+    [cborUint(3), cborUint(-257)],
+    [cborUint(-1), cborByteString(decode(jwk.n))],
+    [cborUint(-2), cborByteString(decode(jwk.e))],
+  ]);
+}
+
+/** A fresh RS256 key pair, plus a credential id, for the RSA path. */
+export async function rsaKeyPair(): Promise<{ spkiBase64Url: string; coseKey: Uint8Array; credentialId: Uint8Array }> {
+  const keyPair = (await crypto.subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([0x01, 0x00, 0x01]),
+      hash: "SHA-256",
+    },
+    true,
+    ["sign", "verify"],
+  )) as CryptoKeyPair;
+  const spki = new Uint8Array(await crypto.subtle.exportKey("spki", keyPair.publicKey));
+  const credentialId = new Uint8Array(16).map(() => Math.floor(Math.random() * 256));
+  return { spkiBase64Url: base64Url(spki), coseKey: await coseKeyFromRsaKey(keyPair.publicKey), credentialId };
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { verifyRegistrationAttestation } from "../src/auth/webauthn-attestation";
-import { base64Url, buildAttestationObject, es256KeyPair } from "./support/webauthn";
+import { base64Url, buildAttestationObject, es256KeyPair, rsaKeyPair } from "./support/webauthn";
 
 /**
  * Registration used to file whatever `credentialId` and `publicKeySpki` the client sent, without
@@ -12,6 +12,23 @@ import { base64Url, buildAttestationObject, es256KeyPair } from "./support/webau
  * doing the work rather than the fixture agreeing with the parser.
  */
 const RP_ID = "example.com";
+
+/** Minimal CBOR for one COSE EC2 key, so the off-curve case can be built exactly. */
+function x25519Point(x: Uint8Array, y: Uint8Array): Array<[number[], Uint8Array]> {
+  return [
+    [[0x01], new Uint8Array([0x02])],
+    [[0x03], new Uint8Array([0x26])],
+    [[0x20], new Uint8Array([0x01])],
+    [[0x21], new Uint8Array([0x58, x.length, ...x])],
+    [[0x22], new Uint8Array([0x58, y.length, ...y])],
+  ];
+}
+
+function cborEc(entries: Array<[number[], Uint8Array]>): Uint8Array {
+  const parts: number[] = [0xa0 | entries.length];
+  for (const [key, value] of entries) parts.push(...key, ...value);
+  return new Uint8Array(parts);
+}
 
 async function valid() {
   const key = await es256KeyPair();
@@ -103,5 +120,49 @@ describe("registration attestation verification", () => {
         expectedCredentialId: "x",
       }),
     ).rejects.toThrow();
+  });
+
+  it("accepts an RSA credential, and its key imports with the algorithm login will use", async () => {
+    // The first version of the DER builder emitted two OIDs in the SPKI AlgorithmIdentifier, so
+    // an RSA registration verified here and then failed at every login with "Invalid keyData"
+    // (cloud-factory-cf-4m44). The assertion is the import the assertion path performs.
+    const key = await rsaKeyPair();
+    const attestationObject = await buildAttestationObject({
+      rpId: RP_ID,
+      credentialId: key.credentialId,
+      coseKey: key.coseKey,
+    });
+    const attested = await verifyRegistrationAttestation({
+      attestationObject,
+      expectedRpId: RP_ID,
+      expectedCredentialId: base64Url(key.credentialId),
+    });
+    expect(attested.algorithm).toBe(-257);
+    expect(attested.publicKeySpki).toBe(key.spkiBase64Url);
+    const spki = Uint8Array.from(atob(attested.publicKeySpki.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+    await expect(
+      crypto.subtle.importKey("spki", spki.buffer, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]),
+    ).resolves.toBeTruthy();
+  });
+
+  it("refuses an EC key that is structurally fine but not on the curve", async () => {
+    // x = y = 0 satifies every length and tag check and imports as nothing: the key has to be
+    // imported here, or registration accepts a credential that can never authenticate
+    // (cloud-factory-cf-7mzy).
+    const zero = new Uint8Array(32);
+    const coseKey = cborEc(x25519Point(zero, zero));
+    const key = await es256KeyPair();
+    const attestationObject = await buildAttestationObject({
+      rpId: RP_ID,
+      credentialId: key.credentialId,
+      coseKey,
+    });
+    await expect(
+      verifyRegistrationAttestation({
+        attestationObject,
+        expectedRpId: RP_ID,
+        expectedCredentialId: base64Url(key.credentialId),
+      }),
+    ).rejects.toThrow(/not an importable verification key/);
   });
 });

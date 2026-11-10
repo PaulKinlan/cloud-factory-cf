@@ -142,7 +142,6 @@ function concat(...parts: Array<Uint8Array>): Uint8Array {
 const OID_EC_PUBLIC_KEY = new Uint8Array([0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01]);
 const OID_P256 = new Uint8Array([0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]);
 const OID_RSA_ENCRYPTION = new Uint8Array([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01]);
-const OID_SHA256_WITH_RSA = new Uint8Array([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b]);
 
 /** Minimal CBOR decode of a COSE key, then DER for `crypto.subtle.importKey("spki", ...)`. */
 function coseToSpki(key: Map<unknown, unknown>): { spki: Uint8Array; algorithm: number } {
@@ -177,16 +176,31 @@ function coseToSpki(key: Map<unknown, unknown>): { spki: Uint8Array; algorithm: 
       return der(0x02, body);
     };
     const rsaKey = der(0x30, unsigned(n), unsigned(e));
-    const algorithmId = der(
-      0x30,
-      der(0x06, OID_RSA_ENCRYPTION),
-      der(0x06, OID_SHA256_WITH_RSA),
-      new Uint8Array([0x05, 0x00]),
-    );
+    // SubjectPublicKeyInfo's AlgorithmIdentifier for RSA is rsaEncryption WITH NULL
+    // parameters. Encoding sha256WithRSAEncryption here as well produced a structure the
+    // runtime refuses with "DataError Invalid keyData" - a registration that verified and then
+    // could never authenticate (cloud-factory-cf-4m44, found by review).
+    const algorithmId = der(0x30, der(0x06, OID_RSA_ENCRYPTION), new Uint8Array([0x05, 0x00]));
     const spki = der(0x30, algorithmId, der(0x03, new Uint8Array([0x00]), rsaKey));
     return { spki, algorithm: -257 };
   }
   throw new Error(`unsupported COSE key type ${kty}`);
+}
+
+
+/** Imports the derived key with the algorithm the assertion path will use, or throws. */
+async function assertVerificationKey(spki: Uint8Array, algorithm: number): Promise<void> {
+  const params =
+    algorithm === -7
+      ? { name: "ECDSA", namedCurve: "P-256" }
+      : { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" };
+  try {
+    // Copy into a fresh buffer: the view may be a slice of a larger ArrayBuffer, and the
+    // runtime's BufferSource typing wants the plain buffer.
+    await crypto.subtle.importKey("spki", new Uint8Array(spki).buffer, params, false, ["verify"]);
+  } catch {
+    throw new Error("credential public key is not an importable verification key");
+  }
 }
 
 /**
@@ -236,6 +250,14 @@ export async function verifyRegistrationAttestation(
   const publicKeyCose = new CborReader(authData.slice(offset)).read();
   if (!(publicKeyCose instanceof Map)) throw new Error("credential public key is not a COSE map");
   const { spki, algorithm } = coseToSpki(publicKeyCose);
+
+  // The key must be importable AS A VERIFICATION KEY, not merely well-formed DER. An
+  // off-curve P-256 point (x=y=0 passes every structural check) imports as nothing, so a
+  // registration could be accepted here and then fail every login at passkey.ts - the old
+  // route imported the SPKI before persisting and the rewrite dropped that
+  // (cloud-factory-cf-7mzy, found by review). Importing it here is the only check that
+  // exercises the same primitive the assertion path will use.
+  await assertVerificationKey(spki, algorithm);
 
   return { credentialId: bytesToBase64Url(credentialId), publicKeySpki: bytesToBase64Url(spki), algorithm, signCount };
 }
