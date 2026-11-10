@@ -12,6 +12,14 @@ export const MAX_NODES = 500;
 export const MAX_EDGES = 2_000;
 export const MAX_DOCUMENTS_PER_REPOSITORY = 200;
 export const MAX_NAME_LENGTH = 120;
+/**
+ * Bound on the body of `POST /canvas/:owner/:repo/documents/:id/run`.
+ *
+ * That request carries one optional number (`limit`), so it gets a small bound of its own
+ * rather than the document bound: a caller must not be able to make the worker buffer a
+ * large body just to read a single field (cloud-factory-cf-i9u7).
+ */
+export const MAX_CANVAS_RUN_BODY_BYTES = 4 * 1024;
 
 export interface CanvasDocumentRow extends Record<string, SqlStorageValue> {
   id: string;
