@@ -10,6 +10,7 @@ import { executeSignedRequest, type BrokerExecution } from "./credentials/broker
 import { credentialEnvFor, hasPermission, isApprovedCredentialBinding } from "./credentials/policy";
 import { sameSecret } from "./secrets";
 import { BROKER_INTERNAL_LOGIN, brokerInternalHeaders, verifyDelegation } from "./auth/delegation";
+import { SESSION_TTL_SECONDS } from "./auth/sessions";
 
 /**
  * Per-repository credential broker.
@@ -79,7 +80,7 @@ export class CredentialBroker extends DurableObject<Env> {
     const url = new URL(request.url);
     // These DO-only routes expose secrets or can mutate root passkeys. The outer
     // Worker's path filter is not an authorization boundary for a DO stub.
-    if (["/internal-setting", "/passkeys", "/passkeys/touch", "/passkeys/challenge", "/passkeys/challenge/consume", "/effective-webhook-secret", "/effective-github-app", "/auth-throttle/check", "/auth-throttle/record", "/auth-throttle/attempt"].includes(url.pathname) &&
+    if (["/internal-setting", "/passkeys", "/passkeys/touch", "/passkeys/challenge", "/passkeys/challenge/consume", "/effective-webhook-secret", "/effective-github-app", "/auth-throttle/check", "/auth-throttle/record", "/auth-throttle/attempt", "/sessions/revoked", "/sessions/revoke"].includes(url.pathname) &&
         !(await this.isInternalCaller(request))) {
       return Response.json({ ok: false, error: "not authorised for broker internal route" }, { status: 401 });
     }
@@ -380,6 +381,56 @@ export class CredentialBroker extends DurableObject<Env> {
       }
       return Response.json({ ok: false, error: "missing id" }, { status: 400 });
     }
+    // Session revocation (cloud-factory-cf-2lbm). Read on every session-authenticated
+    // request, written only when something is revoked — see `auth/sessions.ts`.
+    if (request.method === "GET" && url.pathname === "/sessions/revoked") {
+      const login = url.searchParams.get("login") ?? "";
+      const sid = url.searchParams.get("sid") ?? "";
+      const iat = Number.parseInt(url.searchParams.get("iat") ?? "", 10);
+      if (!login || !sid || !Number.isSafeInteger(iat)) {
+        return Response.json({ ok: false, error: "login, sid and iat are required" }, { status: 400 });
+      }
+      const rows = this.sql
+        .exec<{ sid: string; revoked_before: number }>(
+          `SELECT sid, revoked_before FROM session_revocations WHERE login = ?`,
+          login,
+        )
+        .toArray();
+      // A wildcard revokes everything issued at or before it; `<=` is deliberate, so a token
+      // minted in the same second as the revocation does not survive it.
+      const revoked = rows.some(
+        (row) => row.sid === sid || (row.sid === "*" && iat <= Number(row.revoked_before)),
+      );
+      return Response.json({ ok: true, revoked });
+    }
+    if (request.method === "POST" && url.pathname === "/sessions/revoke") {
+      const body = (await readJson(request)) as { login?: unknown; sid?: unknown };
+      const login = typeof body?.login === "string" ? body.login.trim() : "";
+      const sid = typeof body?.sid === "string" ? body.sid.trim() : "";
+      if (!login) {
+        return Response.json({ ok: false, error: "login is required" }, { status: 400 });
+      }
+      const nowMs = Date.now();
+      // Nothing older than a session TTL (plus an hour of margin) can still be live, so
+      // pruning here keeps the deny list proportional to active revocations.
+      this.sql.exec(
+        `DELETE FROM session_revocations WHERE revoked_at_ms < ?`,
+        nowMs - (SESSION_TTL_SECONDS + 3600) * 1000,
+      );
+      const revokedBefore = Math.floor(nowMs / 1000);
+      this.sql.exec(
+        `INSERT INTO session_revocations (login, sid, revoked_before, revoked_at_ms)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT (login, sid) DO UPDATE SET
+           revoked_before = MAX(revoked_before, excluded.revoked_before),
+           revoked_at_ms = excluded.revoked_at_ms`,
+        login,
+        sid || "*",
+        revokedBefore,
+        nowMs,
+      );
+      return Response.json({ ok: true, login, sid: sid || "*", revokedBefore });
+    }
     if (url.pathname === "/effective-webhook-secret") {
       const effective = (await this.resolveEffectiveSetting("webhook.secret")) ?? this.env.WEBHOOK_SECRET ?? null;
       if (!effective) {
@@ -531,6 +582,25 @@ export class CredentialBroker extends DurableObject<Env> {
     `);
     this.sql.exec(`
       CREATE INDEX IF NOT EXISTS passkey_subject_idx ON passkey_credentials (subject);
+    `);
+    // Revoked browser sessions (cloud-factory-cf-2lbm). A `cf_session` cookie is a stateless
+    // HMAC token, so a revocation has to be recorded somewhere the verifier can read it;
+    // this is that place. The table is a **deny list**: `sid` names one session, and the
+    // wildcard `sid = '*'` invalidates every session its `login` minted at or before
+    // `revoked_before` (epoch seconds). Rows older than a session TTL are pruned on every
+    // write, so the table stays bounded by the revocations actually in flight rather than
+    // by the number of logins ever served.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS session_revocations (
+        login TEXT NOT NULL,
+        sid TEXT NOT NULL,
+        revoked_before INTEGER NOT NULL,
+        revoked_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (login, sid)
+      );
+    `);
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS session_revocations_at_idx ON session_revocations (revoked_at_ms);
     `);
   }
 

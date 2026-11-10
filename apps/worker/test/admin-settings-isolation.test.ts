@@ -13,10 +13,14 @@ describe("repository GitHub App settings isolation", () => {
         idFromName: (name: string) => name,
         get: (repository: string) => ({
           fetch: async (request: Request) => {
-            // The control-key throttle talks to this same object; it is bookkeeping, not a
-            // forwarded settings call, so it is not part of what this test counts.
+            // The control-key throttle and the session revocation check talk to this same
+            // object; both are bookkeeping, not forwarded settings calls, so neither is
+            // part of what this test counts (cloud-factory-cf-2lbm).
             if (new URL(request.url).pathname.startsWith("/auth-throttle")) {
               return Response.json({ ok: true, allowed: true, retryAfterSec: 0 });
+            }
+            if (new URL(request.url).pathname.startsWith("/sessions/")) {
+              return Response.json({ ok: true, revoked: false });
             }
             writes.push({ repository, request });
             return Response.json({ ok: true });
