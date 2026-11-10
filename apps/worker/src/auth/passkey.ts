@@ -3,6 +3,7 @@ import { sameSecret } from "../secrets";
 import { mintSessionToken, SESSION_COOKIE, SESSION_TTL_SECONDS } from "../routes/auth";
 import { readSession } from "../routes/auth";
 import { brokerInternalHeaders } from "./delegation";
+import { acceptPresentedControlKey } from "./throttle";
 
 export const WEBAUTHN_CHALLENGE_COOKIE = "cf_webauthn_challenge";
 
@@ -242,9 +243,10 @@ export async function handlePasskeyRoute(
     // Requires active session or control key
     const session = await readSession(request.headers, signingKey);
     const controlKey = request.headers.get("x-factory-control-key");
-    const hasValidControlKey = Boolean(
-      controlKey && env.BROKER_CONTROL_KEY && (await sameSecret(env.BROKER_CONTROL_KEY, controlKey)),
-    );
+    // Counted like every other control-key comparison: five rejections here lock the
+    // address for the window instead of leaving this route a free oracle
+    // (cloud-factory-cf-96mr).
+    const hasValidControlKey = await acceptPresentedControlKey(request, env, controlKey);
 
     let body: Record<string, any> = {};
     try {
@@ -636,7 +638,7 @@ export async function handlePasskeyRoute(
     const session = await readSession(request.headers, signingKey);
     const controlKey = request.headers.get("x-factory-control-key");
     const isRoot = Boolean(
-      (controlKey && env.BROKER_CONTROL_KEY && (await sameSecret(env.BROKER_CONTROL_KEY, controlKey))) ||
+      (await acceptPresentedControlKey(request, env, controlKey)) ||
       (session.ok && session.login === "__root__"),
     );
 
@@ -664,7 +666,7 @@ export async function handlePasskeyRoute(
     const session = await readSession(request.headers, signingKey);
     const controlKey = request.headers.get("x-factory-control-key");
     const isRoot = Boolean(
-      (controlKey && env.BROKER_CONTROL_KEY && (await sameSecret(env.BROKER_CONTROL_KEY, controlKey))) ||
+      (await acceptPresentedControlKey(request, env, controlKey)) ||
       (session.ok && session.login === "__root__"),
     );
 

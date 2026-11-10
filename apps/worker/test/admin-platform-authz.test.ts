@@ -26,6 +26,11 @@ function testEnv(): { env: Env; calls: Array<{ repository: string; request: Requ
       idFromName: (name: string) => name,
       get: (repository: string) => ({
         fetch: async (request: Request) => {
+          // Throttle bookkeeping goes to the same object; it is not a forwarded settings
+          // call, so it stays out of what these cases count.
+          if (new URL(request.url).pathname.startsWith("/auth-throttle")) {
+            return Response.json({ ok: true, allowed: true, retryAfterSec: 0 });
+          }
           calls.push({ repository, request });
           return Response.json({ ok: true });
         },
