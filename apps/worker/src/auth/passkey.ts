@@ -694,6 +694,14 @@ export async function handlePasskeyRoute(
     });
     const found = (await lookup.json().catch(() => null)) as { passkeys?: Array<Record<string, any>> } | null;
     const owner = found?.passkeys?.[0]?.subject ? String(found.passkeys[0].subject) : null;
+    // A non-root caller may only revoke a credential it owns. The lookup is scoped to the
+    // caller, but the answer is still checked here: an id that belongs to someone else is
+    // "not found" to this caller, so it neither discloses their login nor revokes their
+    // sessions (cloud-factory-cf-plc4).
+    const ownsCredential = owner !== null && (!session.ok || session.login.toLowerCase() === owner.toLowerCase());
+    if (!isRoot && !ownsCredential) {
+      return Response.json({ ok: false, error: "Passkey not found", id }, { status: 404 });
+    }
     if (!owner) {
       return Response.json({ ok: false, error: "Passkey not found", id }, { status: 404 });
     }
@@ -705,6 +713,12 @@ export async function handlePasskeyRoute(
     });
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     if (!res.ok) return Response.json(data, { status: res.status });
+    // Nothing deleted (a scoped delete that matched no row, e.g. a race with another
+    // deletion): revoking the owner's sessions from here would still be right, but the
+    // answer must not claim a deletion that did not happen.
+    if (data.deletedCount === 0) {
+      return Response.json({ ok: false, error: "Passkey not found", id }, { status: 404 });
+    }
 
     // Revoking the credential ends the sessions it could have minted
     // (cloud-factory-cf-2lbm). Sessions are not bound to the credential that created
