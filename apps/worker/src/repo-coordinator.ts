@@ -7,6 +7,7 @@ import { isMissingSchemaError } from "./events/sql-errors";
 import { createDefaultExecutionFn, drainRepository } from "./pipeline";
 import { CanvasStore, MAX_CANVAS_BODY_BYTES, migrateCanvasTable } from "./canvas-store";
 import { GitTreeStore, migrateGitTreeTable } from "./git-tree-store";
+import { consumeTraceTicketNonce, migrateTraceTicketTable } from "./trace-ticket-store";
 import { MemoryHandler, migrateMemoryTable } from "./memory";
 import { sameSecret } from "./secrets";
 import { brokerInternalHeaders } from "./auth/delegation";
@@ -575,6 +576,18 @@ export class RepoCoordinator extends DurableObject<Env> {
       }
       return new Response("method not allowed", { status: 405 });
     }
+    if (request.method === "POST" && url.pathname === "/trace-ticket-nonces/consume") {
+      const body = (await readJson(request)) as Record<string, any>;
+      const result = consumeTraceTicketNonce(
+        this.sql,
+        typeof body?.nonce === "string" ? body.nonce : "",
+        Number(body?.expiresAt),
+        Date.now(),
+      );
+      // 409 for a replay keeps it distinguishable from a malformed request; the caller
+      // treats anything but ok as "not authorised", so the distinction is for the logs.
+      return Response.json(result, { status: result.ok ? 200 : result.reason === "invalid" ? 400 : 409 });
+    }
     if (request.method === "GET" && url.pathname.startsWith("/git-tree/files/")) {
       return this.gitTreeStore.file(decodeURIComponent(url.pathname.slice("/git-tree/files/".length)));
     }
@@ -791,6 +804,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     migrateRunTraceTable(this.sql);
     migrateConnectTable(this.sql);
     migrateDeliveryLedgerTable(this.sql);
+    migrateTraceTicketTable(this.sql);
   }
 
   // ---------------------------------------------------------------- ingestion
