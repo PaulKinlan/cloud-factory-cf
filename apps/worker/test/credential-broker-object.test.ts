@@ -1,5 +1,6 @@
 import { env, SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mintSessionToken } from "../src/routes/auth";
 
 const CONTROL_KEY = "test-control-key";
 const SIGNING_KEY = "test-broker-signing-key";
@@ -208,5 +209,180 @@ describe("credential broker object: proxying", () => {
     ).json()) as { entries: Array<{ outcome: string; service: string; action: string; status: number | null }> };
     const executed = audit.entries.find((entry) => entry.outcome === "executed");
     expect(executed).toMatchObject({ service: "github", action: "repo.read", status: 200 });
+  });
+});
+
+/**
+ * A credential id is public: it travels with every assertion so a relying party can look
+ * the key up, and it is shown in the admin passkey table. It therefore cannot be allowed
+ * to decide whose passkey a record is - the upsert used to take `subject` from the request
+ * body and overwrite the existing owner, so a caller could point a victim's credential id
+ * at their own public key and then mint a session for the victim
+ * (cloud-factory-cf-fbjl).
+ */
+describe("passkey credential ids are bound to their subject", () => {
+  const internals = (path: string, body: unknown) =>
+    env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default")).fetch(
+      `https://credential-broker.internal${path}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-factory-control-key": CONTROL_KEY },
+        body: JSON.stringify(body),
+      },
+    );
+
+  it("refuses to move an existing credential id to another subject", async () => {
+    const credentialId = "fbjl-shared-id";
+    const aliceKey = "alice-public-key-spki";
+    const malloryKey = "mallory-public-key-spki";
+
+    const first = await internals("/passkeys", {
+      credentialId,
+      subject: "alice",
+      role: "user",
+      publicKeySpki: aliceKey,
+      algorithm: -7,
+      label: "Alice laptop",
+    });
+    expect(first.status).toBe(200);
+
+    const hijack = await internals("/passkeys", {
+      credentialId,
+      subject: "alice-victim", // the caller tries to name somebody else
+      role: "root",
+      publicKeySpki: malloryKey,
+      algorithm: -7,
+      label: "Mallory",
+    });
+    expect(hijack.status).toBe(409);
+    await expect(hijack.json()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("another subject"),
+    });
+
+    // The original binding and key are untouched.
+    const listed = (await (
+      await env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default")).fetch(
+        `https://credential-broker.internal/passkeys?id=${credentialId}`,
+        { headers: { "x-factory-control-key": CONTROL_KEY } },
+      )
+    ).json()) as { passkeys: Array<{ subject: string; publicKeySpki: string; role: string }> };
+    expect(listed.passkeys).toHaveLength(1);
+    expect(listed.passkeys[0]).toMatchObject({ subject: "alice", publicKeySpki: aliceKey, role: "user" });
+  });
+
+  it("still lets the same subject refresh its own passkey", async () => {
+    const credentialId = "fbjl-own-id";
+    await internals("/passkeys", {
+      credentialId,
+      subject: "bob",
+      role: "user",
+      publicKeySpki: "bob-key-1",
+      algorithm: -7,
+      label: "Old label",
+    });
+    const refresh = await internals("/passkeys", {
+      credentialId,
+      subject: "bob",
+      role: "user",
+      publicKeySpki: "bob-key-2",
+      algorithm: -7,
+      label: "New label",
+    });
+    expect(refresh.status).toBe(200);
+
+    const listed = (await (
+      await env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default")).fetch(
+        `https://credential-broker.internal/passkeys?id=${credentialId}`,
+        { headers: { "x-factory-control-key": CONTROL_KEY } },
+      )
+    ).json()) as { passkeys: Array<{ subject: string; publicKeySpki: string; label: string }> };
+    expect(listed.passkeys[0]).toMatchObject({ subject: "bob", publicKeySpki: "bob-key-2", label: "New label" });
+  });
+});
+
+/**
+ * The route-level half of the same rule: the passkey registration endpoint takes the
+ * subject from the session, but the credential id from the client - so the broker's
+ * binding is what stops a logged-in attacker from re-pointing a victim's credential id at
+ * their own authenticator and then logging in as the victim
+ * (cloud-factory-cf-fbjl). This drives the real Worker and the real Durable Object.
+ */
+describe("passkey registration cannot take over another subject's credential", () => {
+  const base64Url = (bytes: Uint8Array): string => {
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  };
+
+  const es256PublicKeySpki = async (): Promise<string> => {
+    const keyPair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+    const spki = await crypto.subtle.exportKey("spki", keyPair.publicKey);
+    return base64Url(new Uint8Array(spki));
+  };
+
+  it("refuses a session that names a credential id owned by someone else", async () => {
+    const credentialId = "fbjl-victim-credential";
+    const victimKey = "victim-public-key-spki";
+    const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
+    await broker.fetch("https://credential-broker.internal/passkeys", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-factory-control-key": CONTROL_KEY },
+      body: JSON.stringify({
+        credentialId,
+        subject: "victim",
+        role: "user",
+        publicKeySpki: victimKey,
+        algorithm: -7,
+        label: "Victim laptop",
+      }),
+    });
+
+    const cookie = `cf_session=${await mintSessionToken(SIGNING_KEY, "mallory")}`;
+    const optionsRes = await SELF.fetch("https://example.com/api/auth/passkey/register/options", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(optionsRes.status).toBe(200);
+    const options = (await optionsRes.json()) as { options: { challenge: string } };
+    const challengeCookie = (optionsRes.headers.get("set-cookie") ?? "").split(";")[0] as string;
+
+    const clientData = base64Url(
+      new TextEncoder().encode(
+        JSON.stringify({
+          type: "webauthn.create",
+          challenge: options.options.challenge,
+          origin: "https://example.com",
+        }),
+      ),
+    );
+
+    const registerRes = await SELF.fetch("https://example.com/api/auth/passkey/register/verify", {
+      method: "POST",
+      headers: { cookie: challengeCookie, "content-type": "application/json" },
+      body: JSON.stringify({
+        credentialId,
+        publicKeySpki: await es256PublicKeySpki(),
+        algorithm: -7,
+        clientDataJSON: clientData,
+        label: "Mallory's key",
+      }),
+    });
+
+    expect(registerRes.status).toBe(409);
+    await expect(registerRes.json()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("already registered"),
+    });
+    expect(registerRes.headers.get("set-cookie")).toBeNull();
+
+    // The victim's binding and key are untouched.
+    const listed = (await (
+      await broker.fetch(`https://credential-broker.internal/passkeys?id=${credentialId}`, {
+        headers: { "x-factory-control-key": CONTROL_KEY },
+      })
+    ).json()) as { passkeys: Array<{ subject: string; publicKeySpki: string }> };
+    expect(listed.passkeys[0]).toMatchObject({ subject: "victim", publicKeySpki: victimKey });
   });
 });
