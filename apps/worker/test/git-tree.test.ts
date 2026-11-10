@@ -90,3 +90,52 @@ describe("provider-independent git tree snapshot", () => {
     expect((await call("https://example.com/analysis/acme/off-github-example/tree/files/README.md?platform=gitlab")).status).toBe(404);
   });
 });
+
+/**
+ * The file path in `/analysis/<owner>/<repo>/tree/files/<path>` comes straight off the URL,
+ * so it must be normalised at the edge rather than forwarded in whatever shape it arrived
+ * (cloud-factory-cf-r9eu). The store also validates, which is why the traversal case below
+ * did not get through even before this delta - the point is that the edge no longer leans on
+ * that, and that a malformed escape is a 400 instead of an exception inside the Durable
+ * Object.
+ */
+describe("git tree file paths are normalised at the edge", () => {
+  const filesUrl = (path: string) =>
+    `https://example.com/analysis/acme/off-github-example/tree/files/${path}?platform=gitlab`;
+
+  it("refuses encoded dot segments instead of forwarding them", async () => {
+    const traversal = await call(filesUrl("%2e%2e%2f%2e%2e%2fother-repo%2fsecret"));
+    expect(traversal.status).toBe(400);
+    await expect(traversal.json()).resolves.toMatchObject({ ok: false, error: "invalid path" });
+
+    const nested = await call(filesUrl("src%2f%2e%2e%2fREADME.md"));
+    expect(nested.status).toBe(400);
+  });
+
+  it("refuses a malformed escape with 400 instead of throwing in the coordinator", async () => {
+    const malformed = await call(filesUrl("%zz"));
+    expect(malformed.status).toBe(400);
+    await expect(malformed.json()).resolves.toMatchObject({ ok: false, error: "invalid path" });
+  });
+
+  it("still serves a real file, and keeps a '?' in a file name a file name", async () => {
+    const snapshot = {
+      source: "isomorphic-git",
+      revision: "c0ffee1",
+      files: [
+        { path: "docs/deep/guide.md", size: 5, content: "docs!" },
+        { path: "weird?name.txt", size: 6, content: "weird!" },
+      ],
+    };
+    expect((await call(endpoint, "POST", snapshot)).status).toBe(201);
+
+    const nested = await call(filesUrl("docs%2fdeep%2fguide.md"));
+    expect(nested.status).toBe(200);
+    await expect(nested.json()).resolves.toMatchObject({ ok: true, path: "docs/deep/guide.md", content: "docs!" });
+
+    // %3f decodes to '?': the edge re-encodes it so it addresses the file, not a query.
+    const question = await call(filesUrl("weird%3fname.txt"));
+    expect(question.status).toBe(200);
+    await expect(question.json()).resolves.toMatchObject({ ok: true, path: "weird?name.txt", content: "weird!" });
+  });
+});

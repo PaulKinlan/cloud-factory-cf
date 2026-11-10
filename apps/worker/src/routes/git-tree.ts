@@ -1,7 +1,7 @@
 import type { Env } from "../env";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
 import { authorizeControlPlane, authzDenial, sessionMayAddressPlatform } from "../auth/tenant";
-import { MAX_TREE_BYTES } from "../git-tree-store";
+import { MAX_PATH_BYTES, MAX_TREE_BYTES } from "../git-tree-store";
 import { tarballFiles } from "../git-tarball";
 
 async function readBounded(body: ReadableStream<Uint8Array> | null, limit: number): Promise<Uint8Array> {
@@ -22,6 +22,29 @@ async function readBounded(body: ReadableStream<Uint8Array> | null, limit: numbe
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
   return bytes;
+}
+
+/**
+ * Normalise the file path taken from the URL, or refuse it.
+ *
+ * The coordinator's store validates the path it is handed (git-tree-store.ts validPath), so a
+ * traversal does not currently get through - but the edge is the security boundary and must
+ * not forward a traversal-shaped path in the hope that the other side catches it, which is
+ * cloud-factory-cf-r9eu. Decoding here also turns a malformed escape (`%zz`) into a 400
+ * instead of an exception thrown inside the Durable Object, and re-encoding makes the
+ * forwarded URL unambiguous (a `?` in a file name stays a file name, not a query).
+ */
+function safeRelativePath(raw: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    return null; // malformed percent-encoding
+  }
+  if (decoded.length === 0 || new TextEncoder().encode(decoded).length > MAX_PATH_BYTES) return null;
+  if (decoded.startsWith("/") || decoded.includes("\\") || decoded.includes("\0")) return null;
+  if (decoded.split("/").some((part) => !part || part === "." || part === "..")) return null;
+  return decoded;
 }
 
 const PATH = /^\/analysis\/([^/]+)\/([^/]+)\/tree(?:\/files\/(.+))?$/;
@@ -59,8 +82,17 @@ export async function handleGitTree(request: Request, env: Env, url: URL): Promi
       { "cross-tenant": "not authorised for another provider's tenancy" },
     );
   }
+  const filePath = path === undefined ? null : safeRelativePath(path);
+  if (path !== undefined && filePath === null) {
+    return Response.json({ ok: false, error: "invalid path" }, { status: 400 });
+  }
   const coordinator = getRepoCoordinator(env, `${owner}/${repo}`, platform);
-  const target = path ? `/git-tree/files/${path}` : "/git-tree";
+  const target =
+    filePath === null
+      ? "/git-tree"
+      : // Per segment: encodeURI would leave "?" and "#" alone, and they are exactly the
+        // characters that would change the meaning of the forwarded URL.
+        `/git-tree/files/${filePath.split("/").map(encodeURIComponent).join("/")}`;
   const query = path ? "" : url.search;
   let body: BodyInit | undefined;
   if (request.method === "POST") {
