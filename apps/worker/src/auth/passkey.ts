@@ -300,7 +300,10 @@ export async function handlePasskeyRoute(
       attestation: "none",
       authenticatorSelection: {
         residentKey: "preferred",
-        userVerification: "preferred",
+        // Decided here, from the server-derived role, not by the caller: a root passkey
+        // unlocks the control plane, so it is asked for (and later required to have) user
+        // verification (cloud-factory-cf-dxy4).
+        userVerification: role === "root" ? "required" : "preferred",
       },
     };
 
@@ -455,6 +458,9 @@ export async function handlePasskeyRoute(
       challenge,
       rpId: url.hostname,
       timeout: 60000,
+      // A hint for the browser, never the decision: login/verify requires user verification
+      // whenever the credential it resolves is a root credential, whatever this request
+      // asked for (cloud-factory-cf-dxy4).
       userVerification: "preferred",
     };
 
@@ -550,6 +556,22 @@ export async function handlePasskeyRoute(
     const passkey = passkeyData.passkeys?.[0];
     if (!passkey || !passkey.publicKeySpki) {
       return Response.json({ ok: false, error: "Passkey not found" }, { status: 404 });
+    }
+
+    // User verification is required for a root credential, and that requirement comes from
+    // the record being resolved - not from what the client asked for when it requested the
+    // challenge, and not from what it puts in the assertion. Without this, a root passkey
+    // could be used touch-only: the UP flag (0x01) proves presence, but only the UV flag
+    // (0x04) proves the human unlocked the authenticator, and the admin console's
+    // 'required' policy lived only in client JavaScript that an attacker never runs
+    // (cloud-factory-cf-dxy4).
+    const credentialIsRoot =
+      String(passkey.role ?? "user") === "root" || String(passkey.subject ?? "") === "__root__";
+    if (credentialIsRoot && (flags & 0x04) === 0) {
+      return Response.json(
+        { ok: false, error: "User verification required for this passkey" },
+        { status: 401 },
+      );
     }
 
     // Cryptographic signature verification
