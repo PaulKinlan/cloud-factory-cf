@@ -420,7 +420,12 @@ export async function handlePasskeyRoute(
         attestationObject,
         expectedRpId: url.hostname,
         expectedCredentialId: String(credentialId),
-        requireUserVerification: verifiedCookie.userVerification === "required",
+        // The role is the server's own record: the registration cookie is minted by this route
+        // after it resolved the session or the control key, so "root" here means the server
+        // decided this is a control-plane credential - not that the caller asked nicely
+        // (cloud-factory-cf-dxy4).
+        requireUserVerification:
+          verifiedCookie.userVerification === "required" || verifiedCookie.role === "root",
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -616,6 +621,21 @@ export async function handlePasskeyRoute(
     const passkey = passkeyData.passkeys?.[0];
     if (!passkey || !passkey.publicKeySpki) {
       return Response.json({ ok: false, error: "Passkey not found" }, { status: 404 });
+    }
+
+    // The requirement is derived from the ROLE of the record we just looked up, not only from
+    // what the caller asked for at options time (cloud-factory-cf-dxy4). A policy that lives in
+    // client JavaScript is not a policy: an attacker scripting this endpoint never runs it, and
+    // would otherwise ask for a "preferred" challenge and unlock root with a bare touch.
+    const passkeyRole = String((passkey as { role?: unknown }).role ?? "user");
+    if (
+      (verifiedCookie.userVerification === "required" || passkeyRole === "root") &&
+      (flags & UV_FLAG) === 0
+    ) {
+      return Response.json(
+        { ok: false, error: "User verification required but not performed" },
+        { status: 400 },
+      );
     }
 
     // Cryptographic signature verification

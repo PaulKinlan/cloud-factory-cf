@@ -27,7 +27,7 @@ function base64Url(bytes: Uint8Array): string {
 const CHALLENGE_URL = "https://credential-broker.internal/passkeys/challenge";
 const CONSUME_URL = `${CHALLENGE_URL}/consume`;
 
-function testEnv() {
+function testEnv(initial: { passkeys?: Array<Record<string, unknown>> } = {}) {
   const saved: unknown[] = [];
   // The broker's challenge table, in memory: store on issue, delete on consume, so the
   // single-use rule is what these cases observe (cloud-factory-cf-zl0a).
@@ -51,9 +51,19 @@ function testEnv() {
       return Response.json({ ok: false, error: "unexpected broker path" }, { status: 404 });
     },
   };
+  const stored: Array<Record<string, unknown>> = [...(initial.passkeys ?? [])];
   const saveRequest = {
     fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input) === SAVE_URL && init?.body) saved.push(JSON.parse(String(init.body)));
+      const target = String(input);
+      if (target.startsWith(`${SAVE_URL}?id=`)) {
+        // The login path looks a credential up by id and reads its role from this record.
+        return Response.json({ passkeys: stored });
+      }
+      if (target === SAVE_URL && init?.body) {
+        const parsed = JSON.parse(String(init.body)) as Record<string, unknown>;
+        saved.push(parsed);
+        stored.push(parsed);
+      }
       return broker.fetch(input, init);
     },
   };
@@ -79,9 +89,10 @@ function post(path: string, body: unknown, headers: Record<string, string> = {})
 async function startRegistration(
   env: never,
   body: Record<string, unknown> = {},
+  headers: Record<string, string> = { "x-factory-control-key": CONTROL_KEY },
 ): Promise<{ challenge: string; cookie: string; userVerification: string }> {
   const response = await handlePasskeyRoute(
-    post("/api/auth/passkey/register/options", body, { "x-factory-control-key": CONTROL_KEY }),
+    post("/api/auth/passkey/register/options", body, headers),
     env,
     new URL(`${ORIGIN}/api/auth/passkey/register/options`),
   );
@@ -230,6 +241,7 @@ describe("passkey registration client data", () => {
       rpId: "example.com",
       credentialId: key.credentialId,
       spki: key.spki,
+      flags: 0x45, // UP|UV|AT: this is a root registration, which now always requires verification
     });
 
     const response = await handlePasskeyRoute(
@@ -288,6 +300,7 @@ describe("passkey registration client data", () => {
       rpId: "example.com",
       credentialId: other.credentialId,
       spki: key.spki,
+      flags: 0x45,
     });
 
     const response = await handlePasskeyRoute(
@@ -473,11 +486,14 @@ describe("passkey user verification", () => {
     expect(saved).toHaveLength(1);
   });
 
-  it("does not demand verification from a challenge that only preferred it", async () => {
-    // The other half of the rule: "preferred" must stay honest, or every security key without a
-    // PIN is locked out of the product.
+  it("does not demand verification from an ordinary user's preferred challenge", async () => {
+    // The other half of the rule: for an ordinary user, "preferred" must stay honest, or every
+    // security key without a PIN is locked out of the product. Note the registration is made as
+    // a USER, not with the control key - a root registration requires verification regardless of
+    // what was asked for (cloud-factory-cf-dxy4), which the next case covers.
     const { env, saved } = testEnv();
-    const { challenge, cookie } = await startRegistration(env);
+    const userSession = `cf_session=${encodeURIComponent(await mintSessionToken(SIGNING_KEY, "alice"))}`;
+    const { challenge, cookie } = await startRegistration(env, {}, { cookie: userSession });
     const key = await es256KeyPair();
     const attestationObject = await buildAttestationObject({
       rpId: "example.com",
@@ -553,3 +569,94 @@ describe("passkey user verification", () => {
     expect(body.error).not.toBe("User verification required but not performed");
   });
 });
+
+  it("refuses an ordinary root login whose assertion never verified the user, whatever was asked", async () => {
+    // cloud-factory-cf-dxy4: the requirement must come from the record's role, not from the
+    // caller. Here the caller asked for nothing, so the challenge is "preferred" - and the
+    // server still refuses, because the credential being unlocked is a root one.
+    const { env } = testEnv({
+      passkeys: [{ credentialId: "root-cred", publicKeySpki: "AAAA", algorithm: -7, role: "root" }],
+    });
+    const { challenge, cookie } = await startLogin(env); // no userVerification: "preferred"
+    expect(cookie).toContain("=");
+
+    const response = await handlePasskeyRoute(
+      post(
+        "/api/auth/passkey/login/verify",
+        {
+          credentialId: "root-cred",
+          authenticatorData: await assertionAuthenticatorData(0x01), // UP only
+          clientDataJSON: assertionClientData(challenge),
+          signature: "AAAA",
+        },
+        { cookie },
+      ),
+      env,
+      new URL(`${ORIGIN}/api/auth/passkey/login/verify`),
+    );
+
+    expect(response?.status).toBe(400);
+    expect(await response!.json()).toMatchObject({
+      ok: false,
+      error: "User verification required but not performed",
+    });
+  });
+
+  it("lets an ordinary user's assertion through when the challenge only preferred verification", async () => {
+    const { env } = testEnv({
+      passkeys: [{ credentialId: "user-cred", publicKeySpki: "AAAA", algorithm: -7, role: "user" }],
+    });
+    const { challenge, cookie } = await startLogin(env);
+
+    const response = await handlePasskeyRoute(
+      post(
+        "/api/auth/passkey/login/verify",
+        {
+          credentialId: "user-cred",
+          authenticatorData: await assertionAuthenticatorData(0x01),
+          clientDataJSON: assertionClientData(challenge),
+          signature: "AAAA",
+        },
+        { cookie },
+      ),
+      env,
+      new URL(`${ORIGIN}/api/auth/passkey/login/verify`),
+    );
+
+    // It goes on to fail signature verification with the stub key, which is the point: the UV
+    // gate did not fire for a user credential on a preferred challenge.
+    const body = (await response!.json()) as { error?: string };
+    expect(body.error).not.toBe("User verification required but not performed");
+  });
+
+  it("refuses a root registration that only preferred verification", async () => {
+    // The other half of the same finding: registerUv came from the request body, so a root
+    // registration could run under "preferred". The role in the signed cookie is the server's
+    // own decision, and it now forces the requirement.
+    const { env, saved } = testEnv();
+    const { challenge, cookie } = await startRegistration(env); // control key, no userVerification
+    const key = await es256KeyPair();
+    const attestationObject = await buildAttestationObject({
+      rpId: "example.com",
+      credentialId: key.credentialId,
+      spki: key.spki,
+      flags: 0x41,
+    });
+
+    const response = await handlePasskeyRoute(
+      post(
+        "/api/auth/passkey/register/verify",
+        { credentialId: base64Url(key.credentialId), attestationObject, clientDataJSON: clientData({ challenge }) },
+        { cookie },
+      ),
+      env,
+      new URL(VERIFY_URL),
+    );
+
+    expect(response?.status).toBe(400);
+    expect(await response!.json()).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("user verification required but not performed"),
+    });
+    expect(saved).toEqual([]);
+  });
