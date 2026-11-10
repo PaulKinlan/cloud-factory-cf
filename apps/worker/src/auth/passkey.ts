@@ -404,6 +404,15 @@ export async function handlePasskeyRoute(
     });
 
     if (!saveRes.ok) {
+      // 409 means the credential id is already bound to another subject: it is public, so
+      // this is the one check that stops a caller replacing someone else's passkey with
+      // their own (cloud-factory-cf-fbjl).
+      if (saveRes.status === 409) {
+        return Response.json(
+          { ok: false, error: "This credential is already registered to another account" },
+          { status: 409 },
+        );
+      }
       return Response.json({ ok: false, error: "Failed to persist passkey in broker" }, { status: 500 });
     }
 
