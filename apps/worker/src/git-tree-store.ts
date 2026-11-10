@@ -1,7 +1,7 @@
 /** A bounded, provider-independent snapshot of a repository tree for offline analysis. */
 export const MAX_TREE_BYTES = 4 * 1024 * 1024;
 export const MAX_TREE_FILES = 5_000;
-const MAX_PATH_BYTES = 1_024;
+export const MAX_PATH_BYTES = 1_024;
 
 export interface TreeFile {
   path: string;
