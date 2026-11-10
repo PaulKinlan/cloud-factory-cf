@@ -652,8 +652,8 @@ export class CredentialBroker extends DurableObject<Env> {
     // A system delegation is single-use: `brokerInternalHeaders` mints one per request, and
     // a token that can be replayed for its whole 60s window is a bearer credential for every
     // internal route it can reach (settings, passkeys, the effective raw secrets). Tenant
-    // delegations are not touched here — the pipeline mints one per run by design
-    // (`pipeline.ts`), so they stay bearer tokens until that path changes.
+    // delegations are refused here by the login check above; the routes they ARE accepted on
+    // (`/capabilities`, `/settings`) spend their `jti` themselves (cloud-factory-cf-tkfb).
     return this.consumeDelegation(delegated.claims.jti, delegated.claims.exp);
   }
 
@@ -688,13 +688,20 @@ export class CredentialBroker extends DurableObject<Env> {
     }
     const presented = request.headers.get("x-factory-control-key");
     const delegated = await this.verifyDelegationHeader(request);
+    // A delegation is single-use here too, not only on the internal routes
+    // (cloud-factory-cf-tkfb): the Worker mints one per broker request, so spending the
+    // `jti` turns a leaked tenant token from a 60s bearer credential into one request.
+    const delegationSpent = delegated.ok
+      ? this.consumeDelegation(delegated.claims.jti, delegated.claims.exp)
+      : false;
     const authorised =
-      delegated.ok || (provisioningKey !== undefined && (await sameSecret(provisioningKey, presented)));
+      delegationSpent ||
+      (provisioningKey !== undefined && (await sameSecret(provisioningKey, presented)));
     if (!authorised) {
       await this.record({ agent: DEFAULT_CLIENT, service: "-", action: "-", outcome: "denied", detail: "bad control key" });
       return Response.json({ ok: false, error: "not authorised to issue capabilities" }, { status: 401 });
     }
-    const delegatedLogin = delegated.ok ? delegated.claims.login : undefined;
+    const delegatedLogin = delegationSpent && delegated.ok ? delegated.claims.login : undefined;
 
     const signingKey = this.env.BROKER_SIGNING_KEY;
     if (!signingKey) {
@@ -1311,8 +1318,14 @@ export class CredentialBroker extends DurableObject<Env> {
     }
     const presented = request.headers.get("x-factory-control-key");
     const delegated = await this.verifyDelegationHeader(request);
+    // Single-use, like the capability path (cloud-factory-cf-tkfb): the caller mints a
+    // delegation per request, so a second presentation of the same one is a replay.
+    const delegationSpent = delegated.ok
+      ? this.consumeDelegation(delegated.claims.jti, delegated.claims.exp)
+      : false;
     const authorised =
-      delegated.ok || (provisioningKey !== undefined && (await sameSecret(provisioningKey, presented)));
+      delegationSpent ||
+      (provisioningKey !== undefined && (await sameSecret(provisioningKey, presented)));
     if (!authorised) {
       return Response.json({ ok: false, error: "not authorised to manage settings" }, { status: 401 });
     }

@@ -84,13 +84,19 @@ describe("CredentialBroker internal route authorization", () => {
     expect((await request("/passkeys", "GET", key)).status).toBe(200);
   });
 
-  it("does not spend a tenant delegation's jti, so ordinary tenant reads keep working", async () => {
-    // The pipeline holds one tenant delegation for a whole run (it mints several capabilities
-    // with it), so tenant tokens stay bearer credentials - see `auth/delegation.ts`.
-    const token = await mintDelegation(env, { repository, login: "alice" });
-    if (!token) throw new Error("mintDelegation returned no token for this test's environment");
-    const headers = { "x-factory-delegation": token };
+  it("refuses a second use of the same tenant delegation too", async () => {
+    // Tenant delegations became single-use when the pipeline started minting one per broker
+    // request (cloud-factory-cf-tkfb), so `/settings` and `/capabilities` spend the `jti`
+    // exactly as the internal routes do.
+    const first = await mintDelegation(env, { repository, login: "alice" });
+    if (!first) throw new Error("mintDelegation returned no token for this test's environment");
+    const headers = { "x-factory-delegation": first };
     expect((await request("/settings", "GET", headers)).status).toBe(200);
-    expect((await request("/settings", "GET", headers)).status).toBe(200);
+    expect((await request("/settings", "GET", headers)).status).toBe(401);
+
+    // A fresh delegation for the same login still reads: single-use is per token, not a ban.
+    const second = await mintDelegation(env, { repository, login: "alice" });
+    if (!second) throw new Error("mintDelegation returned no token for this test's environment");
+    expect((await request("/settings", "GET", { "x-factory-delegation": second })).status).toBe(200);
   });
 });

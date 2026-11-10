@@ -19,18 +19,22 @@
  * The TTL is deliberately short: this is a bearer credential for one request, and the
  * capability it produces is itself short-lived.
  *
- * **Single use, and who enforces it** (cloud-factory-cf-sd6u). The `jti` is not decorative
- * for the internal principal: `brokerInternalHeaders` mints a fresh delegation per call,
- * and the broker records each `__system__` `jti` it accepts, refusing a second use of the
- * same token (see `consumeDelegation` in `credential-broker-object.ts`). That is why a
- * token that leaks — or a header a bug forwards — is worth one request and not sixty
- * seconds of every internal route.
+ * **Single use, and who enforces it** (cloud-factory-cf-sd6u, cloud-factory-cf-tkfb). The
+ * `jti` is not decorative: the broker records every `jti` it accepts and refuses a second
+ * use of the same token (see `consumeDelegation` in `credential-broker-object.ts`). That is
+ * why a token that leaks - or a header a bug forwards - is worth one request and not sixty
+ * seconds of every route it can reach.
  *
- * Tenant delegations are the exception, and it is a known gap rather than a design: the
- * pipeline holds one delegation for a whole run and mints several capabilities with it
- * (`pipeline.ts`, `capabilityFor`), so the broker cannot refuse a repeat without breaking
- * that path. Making them single-use means minting per request there first — tracked as
- * follow-up work rather than guessed at here.
+ * Both classes are single-use, and both sides had to change for that to be true:
+ *   - the internal principal, because `brokerInternalHeaders` already minted per call;
+ *   - tenant logins, because the pipeline used to hold one delegation for a whole run and
+ *     mint several capabilities with it. `RunDeps.delegation` is now a minting function
+ *     (`pipeline.ts`), and `/api/runs` and `/api/canvas/run` hand it one token per broker
+ *     request, so `/capabilities` and `/settings` can spend the `jti` on arrival.
+ *
+ * What remains bearer is the delegation's *scope*: it names one repository for 60-300
+ * seconds, and a caller that mints one per request is entitled to as many as it asks for.
+ * The replay rule buys "a leaked token is not reusable", not rate limiting.
  */
 
 import type { Env } from "../env";
