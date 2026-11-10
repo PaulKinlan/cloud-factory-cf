@@ -8,6 +8,15 @@
  */
 
 export const MAX_DOCUMENT_BYTES = 256 * 1024;
+/**
+ * Bound on the request body that may carry a canvas document.
+ *
+ * The stored document is capped at MAX_DOCUMENT_BYTES, but that check runs after the body
+ * has been read and parsed, and the same document can be legitimately larger on the wire
+ * (whitespace, escaped characters). So the read is capped separately and generously, and
+ * anything past it is refused before it is buffered (cloud-factory-cf-usgd).
+ */
+export const MAX_CANVAS_BODY_BYTES = MAX_DOCUMENT_BYTES * 4;
 export const MAX_NODES = 500;
 export const MAX_EDGES = 2_000;
 export const MAX_DOCUMENTS_PER_REPOSITORY = 200;
