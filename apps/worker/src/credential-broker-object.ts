@@ -274,6 +274,25 @@ export class CredentialBroker extends DurableObject<Env> {
       if (!credentialId || !subject || !publicKeySpki) {
         return Response.json({ ok: false, error: "missing required passkey fields" }, { status: 400 });
       }
+      // A credential id is public - it travels in the clear with every assertion - so it
+      // must not choose whose passkey it is. Re-registering an id that already belongs to
+      // somebody else would replace that subject's public key with the caller's, and the
+      // next assertion signed by the caller's authenticator would mint a session for the
+      // victim (cloud-factory-cf-fbjl). The subject is bound at creation and can only be
+      // re-asserted by the subject it already names.
+      const existing = this.sql
+        .exec<{ subject: string }>(
+          "SELECT subject FROM passkey_credentials WHERE credential_id = ?",
+          String(credentialId),
+        )
+        .toArray()[0];
+      if (existing !== undefined && existing.subject !== String(subject)) {
+        return Response.json(
+          { ok: false, error: "credential id already registered to another subject" },
+          { status: 409 },
+        );
+      }
+
       const now = new Date().toISOString();
       this.sql.exec(
         `INSERT INTO passkey_credentials (credential_id, subject, role, public_key_spki, algorithm, label, created_at)
