@@ -1,6 +1,12 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { mintTraceTicket, verifyTraceTicket, coordinatorTicketConsumer } from "../src/routes/trace";
+import {
+  handleTrace,
+  mintTraceTicket,
+  verifyTraceTicket,
+  coordinatorTicketConsumer,
+  ticketRepositoryKey,
+} from "../src/routes/trace";
 import { consumeTraceTicketNonce, migrateTraceTicketTable } from "../src/trace-ticket-store";
 
 /**
@@ -15,48 +21,79 @@ const coordinator = (repository = "acme/widget") =>
   env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`github:${repository}`));
 
 describe("trace ticket nonces are single-use across isolates", () => {
-  it("spends a ticket once, in the repository's own store", async () => {
+  const consume = async (ticket: string, now = Date.now()) => {
+    const identity = await verifyTraceTicket(SECRET, ticket, now);
+    if (!identity) return false;
+    const stub = env.REPO_COORDINATOR.get(
+      env.REPO_COORDINATOR.idFromName(ticketRepositoryKey(identity)),
+    );
+    return coordinatorTicketConsumer(stub)(identity.nonce, identity.expiresAt);
+  };
+
+  it("spends a ticket once, in the repository the ticket names", async () => {
     const { ticket, expiresAt } = await mintTraceTicket(SECRET, "acme", "widget");
-    const stub = coordinator();
-
-    const first = await verifyTraceTicket(SECRET, ticket, "acme", "widget", Date.now(), coordinatorTicketConsumer(stub));
-    expect(first).toBe(true);
-
-    // A second verification of the same ticket - a fresh consumer, emulating another
-    // isolate - must be refused, because the nonce is spent in the shared store.
-    const second = await verifyTraceTicket(SECRET, ticket, "acme", "widget", Date.now(), coordinatorTicketConsumer(stub));
-    expect(second).toBe(false);
     expect(expiresAt).toBeGreaterThan(Date.now());
+    expect(await consume(ticket)).toBe(true);
+    // A second verification - a fresh consumer, emulating another isolate - is refused,
+    // because the nonce is spent in the shared store.
+    expect(await consume(ticket)).toBe(false);
   });
 
-  it("does not spend a nonce when the ticket is forged or for another repository", async () => {
-    const stub = coordinator();
+  it("cannot be replayed by flipping the case of the URL", async () => {
+    // The reviewer's finding (cloud-factory-cf-idqf): the nonce store used to live in
+    // whichever coordinator the URL spelled, so `github:Acme/Widget` was a different store
+    // from `github:acme/widget` and the replay succeeded. The key now comes from the ticket
+    // and is case-folded, so both spellings resolve to one store.
     const { ticket } = await mintTraceTicket(SECRET, "acme", "widget");
+    const identity = await verifyTraceTicket(SECRET, ticket);
+    expect(identity).not.toBeNull();
+    expect(ticketRepositoryKey(identity!)).toBe(ticketRepositoryKey({ ...identity!, owner: "Acme", repo: "Widget" }));
 
-    // Wrong secret: refused before the nonce is touched.
-    expect(await verifyTraceTicket("other-secret", ticket, "acme", "widget", Date.now(), coordinatorTicketConsumer(stub))).toBe(false);
-    // Right ticket, wrong repository.
-    expect(await verifyTraceTicket(SECRET, ticket, "acme", "other", Date.now(), coordinatorTicketConsumer(stub))).toBe(false);
-
-    // The ticket is still usable where it belongs.
-    expect(await verifyTraceTicket(SECRET, ticket, "acme", "widget", Date.now(), coordinatorTicketConsumer(stub))).toBe(true);
+    expect(await consume(ticket)).toBe(true);
+    expect(await consume(ticket)).toBe(false);
   });
 
-  it("refuses an expired ticket without consuming it", async () => {
-    const stub = coordinator();
+  it("binds the ticket to the platform it was minted for", async () => {
+    // A ticket minted for github must not open a gitea socket: the platform is inside the
+    // signature, so a ?platform=gitea request cannot reinterpret the ticket, and its nonce
+    // is still spent in the github store.
+    const { ticket } = await mintTraceTicket(SECRET, "acme", "widget", "github");
+    const identity = (await verifyTraceTicket(SECRET, ticket))!;
+    expect(identity.platform).toBe("github");
+    expect(ticketRepositoryKey(identity)).not.toBe(
+      ticketRepositoryKey({ ...identity, platform: "gitea" }),
+    );
+
+    expect(await consume(ticket)).toBe(true);
+    // Replaying with a platform hint cannot find a fresh store, because the identity is the
+    // ticket's, not the URL's.
+    expect(await consume(ticket)).toBe(false);
+  });
+
+  it("does not spend a nonce when the ticket is forged or expired", async () => {
+    const { ticket } = await mintTraceTicket(SECRET, "acme", "widget");
+    expect(await verifyTraceTicket("other-secret", ticket)).toBeNull();
+    expect(await verifyTraceTicket(SECRET, ticket.replace(/.$/, (c) => (c === "0" ? "1" : "0")))).toBeNull();
+
     const mintedAt = Date.now();
-    const { ticket, expiresAt } = await mintTraceTicket(SECRET, "acme", "widget", mintedAt);
-    const later = expiresAt + 1;
-    expect(await verifyTraceTicket(SECRET, ticket, "acme", "widget", later, coordinatorTicketConsumer(stub))).toBe(false);
+    const shortLived = await mintTraceTicket(SECRET, "acme", "widget", "github", mintedAt);
+    expect(await verifyTraceTicket(SECRET, shortLived.ticket, shortLived.expiresAt + 1)).toBeNull();
+
+    // ... and the ticket is still usable where it belongs.
+    expect(await consume(ticket)).toBe(true);
   });
 
   it("fails closed when the store cannot be reached", async () => {
     const { ticket } = await mintTraceTicket(SECRET, "acme", "widget");
+    const identity = (await verifyTraceTicket(SECRET, ticket))!;
     const broken = { fetch: async () => { throw new Error("store down"); } } as unknown as { fetch: typeof fetch };
-    expect(await verifyTraceTicket(SECRET, ticket, "acme", "widget", Date.now(), coordinatorTicketConsumer(broken))).toBe(false);
+    expect(await coordinatorTicketConsumer(broken)(identity.nonce, identity.expiresAt)).toBe(false);
 
     const notOk = { fetch: async () => new Response("nope", { status: 500 }) } as unknown as { fetch: typeof fetch };
-    expect(await verifyTraceTicket(SECRET, ticket, "acme", "widget", Date.now(), coordinatorTicketConsumer(notOk))).toBe(false);
+    expect(await coordinatorTicketConsumer(notOk)(identity.nonce, identity.expiresAt)).toBe(false);
+
+    // Nothing was recorded by the failed attempts, so the ticket still works.
+    expect(await consume(ticket)).toBe(true);
   });
 
   it("prunes expired nonces and refuses unusable expiries", () => {
@@ -89,13 +126,48 @@ describe("trace ticket nonces are single-use across isolates", () => {
   });
 
   it("answers the coordinator's consume route", async () => {
-    const repository = "acme/consume-route";
-    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`github:${repository}`));
-    const consume = coordinatorTicketConsumer(stub);
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName("github:acme/consume-route"));
+    const consumer = coordinatorTicketConsumer(stub);
     const expiresAt = Date.now() + 60_000;
 
-    expect(await consume("route-nonce", expiresAt)).toBe(true);
-    expect(await consume("route-nonce", expiresAt)).toBe(false);
-    expect(await consume("another", Date.now() - 1)).toBe(false);
+    expect(await consumer("route-nonce", expiresAt)).toBe(true);
+    expect(await consumer("route-nonce", expiresAt)).toBe(false);
+    expect(await consumer("another", Date.now() - 1)).toBe(false);
+  });
+});
+
+/**
+ * The end-to-end shape of cloud-factory-cf-idqf: the same ticket presented twice, the second
+ * time with the URL spelled differently. Before the fix each spelling reached its own
+ * coordinator, so the second request was authorised with no session at all.
+ */
+describe("the socket route refuses a ticket replayed under another spelling", () => {
+  const socket = async (path: string) => {
+    const url = new URL(`https://example.com${path}`);
+    return handleTrace(new Request(url.toString(), { method: "GET" }), env, url);
+  };
+
+  it("authorises the ticket's own repository once and refuses a case-flipped replay", async () => {
+    const { ticket } = await mintTraceTicket(SECRET, "acme", "widget");
+
+    const first = await socket(`/trace/acme/widget/socket?ticket=${encodeURIComponent(ticket)}`);
+    expect(first?.status).not.toBe(401);
+
+    // Same ticket, same repository, different capitalisation: refused, because the nonce was
+    // spent in the one canonical store rather than in `github:Acme/Widget`'s.
+    const replay = await socket(`/trace/Acme/Widget/socket?ticket=${encodeURIComponent(ticket)}`);
+    expect(replay?.status).toBe(401);
+  });
+
+  it("refuses a replay that names another platform's coordinator", async () => {
+    const { ticket } = await mintTraceTicket(SECRET, "acme", "widget");
+
+    const first = await socket(`/trace/acme/widget/socket?ticket=${encodeURIComponent(ticket)}`);
+    expect(first?.status).not.toBe(401);
+
+    const replay = await socket(
+      `/trace/acme/widget/socket?ticket=${encodeURIComponent(ticket)}&platform=gitea`,
+    );
+    expect(replay?.status).toBe(401);
   });
 });

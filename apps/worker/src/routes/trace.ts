@@ -1,6 +1,7 @@
 import type { Env } from "../env";
 import { sameSecret } from "../secrets";
-import { getRepoCoordinator } from "../repo-coordinator-addressing";
+import { getRepoCoordinator, resolveRepositoryKey } from "../repo-coordinator-addressing";
+import { isDevPlatform } from "@factory-cloud/sdk";
 import { authorizeControlPlane, authzDenial, sessionMayAddressPlatform } from "../auth/tenant";
 
 /**
@@ -69,15 +70,43 @@ async function signHmacSha256(secret: string, data: string): Promise<string> {
     .join("");
 }
 
+/** What a ticket says it is good for, once its signature has been checked. */
+export interface TraceTicketIdentity {
+  platform: string;
+  owner: string;
+  repo: string;
+  nonce: string;
+  expiresAt: number;
+}
+
+/**
+ * The coordinator that owns a ticket's nonce, derived from the TICKET and never from the
+ * request URL.
+ *
+ * The nonce store is per coordinator object, and the object key used to come from the raw
+ * URL spelling plus `?platform=`, so the same ticket could be spent once per spelling:
+ * `github:acme/widget`, `github:Acme/Widget` and `gitea:acme/widget` were three stores, so a
+ * replay that changed the case or the platform hint was accepted with no session check
+ * (cloud-factory-cf-idqf). Resolving from the ticket's own fields - case-folded, platform
+ * from the signature - means every replay lands in the same object and is refused there.
+ */
+export function ticketRepositoryKey(identity: Pick<TraceTicketIdentity, "platform" | "owner" | "repo">): string {
+  return resolveRepositoryKey(`${identity.owner.toLowerCase()}/${identity.repo.toLowerCase()}`, identity.platform);
+}
+
 export async function mintTraceTicket(
   secret: string,
   owner: string,
   repo: string,
+  platform = "github",
   now = Date.now(),
 ): Promise<{ ticket: string; expiresAt: number }> {
   const expiresAt = now + 60_000;
   const nonce = crypto.randomUUID().replace(/-/g, "");
-  const payload = `${owner.toLowerCase()}:${repo.toLowerCase()}:${expiresAt}:${nonce}`;
+  // The platform is inside the signature: a ticket minted for one provider cannot be
+  // presented at another provider's socket, which is a tenancy question and not just a
+  // replay one (ADR 003).
+  const payload = `${platform}:${owner.toLowerCase()}:${repo.toLowerCase()}:${expiresAt}:${nonce}`;
   const sig = await signHmacSha256(secret, payload);
   const ticket = `${payload}.${sig}`;
   return { ticket, expiresAt };
@@ -86,36 +115,37 @@ export async function mintTraceTicket(
 export async function verifyTraceTicket(
   secret: string,
   ticket: string,
-  owner: string,
-  repo: string,
   now = Date.now(),
-  consumeNonce: TraceTicketNonceConsumer,
-): Promise<boolean> {
+): Promise<TraceTicketIdentity | null> {
   const dotIndex = ticket.lastIndexOf(".");
-  if (dotIndex < 0) return false;
+  if (dotIndex < 0) return null;
   const payload = ticket.slice(0, dotIndex);
   const sig = ticket.slice(dotIndex + 1);
 
   const parts = payload.split(":");
-  if (parts.length !== 4) return false;
-  const [ticketOwner, ticketRepo, expStr, nonce] = parts as [string, string, string, string];
+  if (parts.length !== 5) return null;
+  const [platform, ticketOwner, ticketRepo, expStr, nonce] = parts as [
+    string,
+    string,
+    string,
+    string,
+    string,
+  ];
 
   const expiresAt = Number.parseInt(expStr, 10);
   if (!Number.isFinite(expiresAt) || now > expiresAt) {
-    return false;
-  }
-  if (ticketOwner !== owner.toLowerCase() || ticketRepo !== repo.toLowerCase()) {
-    return false;
-  }
-  const expectedSig = await signHmacSha256(secret, payload);
-  if (!(await sameSecret(expectedSig, sig))) {
-    return false;
+    return null;
   }
 
-  // Spend the nonce only after the signature checks out, so a forged ticket cannot burn a
-  // legitimate one. The consumer is the repository's durable store, so this is the single
-  // point where a ticket becomes unusable - for every isolate (cloud-factory-cf-il5w).
-  return consumeNonce(nonce, expiresAt);
+  // The signature covers the platform, the repository and the expiry, so a valid signature
+  // is what makes those fields trustworthy; nothing here takes the caller's word for which
+  // repository they are addressing.
+  const expectedSig = await signHmacSha256(secret, payload);
+  if (!(await sameSecret(expectedSig, sig))) {
+    return null;
+  }
+
+  return { platform, owner: ticketOwner, repo: ticketRepo, nonce, expiresAt };
 }
 
 function requiredGroup(groups: Record<string, string | undefined>, name: string): string {
@@ -168,7 +198,10 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
     if (!signingKey) {
       return Response.json({ ok: false, error: "signing key not configured" }, { status: 503 });
     }
-    const { ticket, expiresAt } = await mintTraceTicket(signingKey, owner, repo);
+    // The ticket records the provider this request was authorised for, defaulting to the
+    // repository's own platform (github) exactly as address resolution does.
+    const ticketPlatform = platform && isDevPlatform(platform) ? platform : "github";
+    const { ticket, expiresAt } = await mintTraceTicket(signingKey, owner, repo, ticketPlatform);
     return Response.json({ ok: true, ticket, expiresAt });
   }
 
@@ -185,16 +218,20 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
     }
 
     let socketAuthorised = false;
+    let socketStub = stub;
     const ticket = url.searchParams.get("ticket");
     if (ticket && signingKey) {
-      socketAuthorised = await verifyTraceTicket(
-        signingKey,
-        ticket,
-        owner,
-        repo,
-        Date.now(),
-        coordinatorTicketConsumer(stub),
-      );
+      const identity = await verifyTraceTicket(signingKey, ticket, Date.now());
+      if (identity) {
+        // Spend the nonce in the coordinator the TICKET names, then stream from that same
+        // object: the URL's spelling and its `?platform=` must not decide where the nonce
+        // lives or which repository the socket reads (cloud-factory-cf-idqf).
+        const ticketStub = getRepoCoordinator(env, `${identity.owner}/${identity.repo}`, identity.platform);
+        if (await coordinatorTicketConsumer(ticketStub)(identity.nonce, identity.expiresAt)) {
+          socketAuthorised = true;
+          socketStub = ticketStub;
+        }
+      }
     }
     let authz: Awaited<ReturnType<typeof authorizeControlPlane>> | undefined;
     if (!socketAuthorised) {
@@ -211,7 +248,7 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
 
     const limit = url.searchParams.get("limit");
     const forwarded = limit === null ? "" : `?limit=${encodeURIComponent(limit)}`;
-    return stub.fetch(
+    return socketStub.fetch(
       new Request(`https://repo-coordinator.internal/trace/socket${forwarded}`, {
         method: "GET",
         headers: request.headers,
