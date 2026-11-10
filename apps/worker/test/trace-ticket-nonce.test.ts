@@ -39,18 +39,24 @@ describe("trace ticket nonces are single-use across isolates", () => {
     expect(await consume(ticket)).toBe(false);
   });
 
-  it("cannot be replayed by flipping the case of the URL", async () => {
+  it("cannot be replayed by flipping the case of the URL, and keeps the ticket's spelling", async () => {
     // The reviewer's finding (cloud-factory-cf-idqf): the nonce store used to live in
     // whichever coordinator the URL spelled, so `github:Acme/Widget` was a different store
-    // from `github:acme/widget` and the replay succeeded. The key now comes from the ticket
-    // and is case-folded, so both spellings resolve to one store.
+    // from `github:acme/widget` and the replay succeeded. The store now comes from the
+    // ticket, so a case-flipped URL cannot reach a fresh one.
     const { ticket } = await mintTraceTicket(SECRET, "acme", "widget");
-    const identity = await verifyTraceTicket(SECRET, ticket);
-    expect(identity).not.toBeNull();
-    expect(ticketRepositoryKey(identity!)).toBe(ticketRepositoryKey({ ...identity!, owner: "Acme", repo: "Widget" }));
-
     expect(await consume(ticket)).toBe(true);
     expect(await consume(ticket)).toBe(false);
+
+    // ... and the key keeps the ticket's exact spelling, because coordinator objects are
+    // case-sensitive and a real delivery for `Acme/Widget` lives in github:Acme/Widget
+    // (cloud-factory-cf-skhd). Folding the case here streamed an empty coordinator.
+    expect(ticketRepositoryKey({ platform: "github", owner: "Acme", repo: "Widget" })).toBe(
+      "github:Acme/Widget",
+    );
+    expect(ticketRepositoryKey({ platform: "github", owner: "Acme", repo: "Widget" })).not.toBe(
+      ticketRepositoryKey({ platform: "github", owner: "acme", repo: "widget" }),
+    );
   });
 
   it("binds the ticket to the platform it was minted for", async () => {
@@ -169,5 +175,24 @@ describe("the socket route refuses a ticket replayed under another spelling", ()
       `/trace/acme/widget/socket?ticket=${encodeURIComponent(ticket)}&platform=gitea`,
     );
     expect(replay?.status).toBe(401);
+  });
+  it("streams the repository the ticket was minted for, spelling and all", async () => {
+    // cloud-factory-cf-skhd: the ticket used to be case-folded, so a ticket for
+    // /trace/Acme/Widget/ticket opened github:acme/widget - an empty object - while the
+    // webhook and session paths use github:Acme/Widget. The identity the controller receives
+    // is the ticket's own spelling, and the coordinator key follows it exactly.
+    const { ticket } = await mintTraceTicket(SECRET, "Acme", "Widget");
+    const identity = (await verifyTraceTicket(SECRET, ticket))!;
+    expect(identity.owner).toBe("Acme");
+    expect(identity.repo).toBe("Widget");
+    expect(ticketRepositoryKey(identity)).toBe("github:Acme/Widget");
+
+    const url = new URL(`https://example.com/trace/Acme/Widget/socket?ticket=${encodeURIComponent(ticket)}`);
+    const res = await handleTrace(new Request(url.toString(), { method: "GET" }), env, url);
+    expect(res?.status).not.toBe(401);
+  });
+
+  it("refuses to mint a ticket for a name it could not verify", async () => {
+    await expect(mintTraceTicket(SECRET, "ac:me", "widget")).rejects.toThrow(/colon|':'/);
   });
 });

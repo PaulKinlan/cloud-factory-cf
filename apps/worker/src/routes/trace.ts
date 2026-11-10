@@ -87,11 +87,17 @@ export interface TraceTicketIdentity {
  * URL spelling plus `?platform=`, so the same ticket could be spent once per spelling:
  * `github:acme/widget`, `github:Acme/Widget` and `gitea:acme/widget` were three stores, so a
  * replay that changed the case or the platform hint was accepted with no session check
- * (cloud-factory-cf-idqf). Resolving from the ticket's own fields - case-folded, platform
- * from the signature - means every replay lands in the same object and is refused there.
+ * (cloud-factory-cf-idqf). Resolving from the ticket's own fields means every replay lands in
+ * the same object and is refused there.
+ *
+ * The spelling is used EXACTLY as the ticket carries it, never case-folded: coordinator
+ * objects are case-sensitive, and a real GitHub delivery for `Acme/Widget` is stored in
+ * `github:Acme/Widget`, so folding here would stream an empty coordinator instead of the
+ * repository's own trace (cloud-factory-cf-skhd). The URL no longer contributes to the key,
+ * which is what makes folding unnecessary rather than what makes it safe.
  */
 export function ticketRepositoryKey(identity: Pick<TraceTicketIdentity, "platform" | "owner" | "repo">): string {
-  return resolveRepositoryKey(`${identity.owner.toLowerCase()}/${identity.repo.toLowerCase()}`, identity.platform);
+  return resolveRepositoryKey(`${identity.owner}/${identity.repo}`, identity.platform);
 }
 
 export async function mintTraceTicket(
@@ -101,12 +107,19 @@ export async function mintTraceTicket(
   platform = "github",
   now = Date.now(),
 ): Promise<{ ticket: string; expiresAt: number }> {
+  // The payload is colon-separated, so a colon in either half would make the ticket
+  // unverifiable rather than dangerous; refusing at mint says so instead of handing the
+  // caller a ticket that can never work.
+  if (`${owner}${repo}${platform}`.includes(":")) {
+    throw new Error("a trace ticket cannot be minted for a name containing ':'");
+  }
   const expiresAt = now + 60_000;
   const nonce = crypto.randomUUID().replace(/-/g, "");
   // The platform is inside the signature: a ticket minted for one provider cannot be
   // presented at another provider's socket, which is a tenancy question and not just a
   // replay one (ADR 003).
-  const payload = `${platform}:${owner.toLowerCase()}:${repo.toLowerCase()}:${expiresAt}:${nonce}`;
+  // The repository keeps the spelling it was minted with - see ticketRepositoryKey.
+  const payload = `${platform}:${owner}:${repo}:${expiresAt}:${nonce}`;
   const sig = await signHmacSha256(secret, payload);
   const ticket = `${payload}.${sig}`;
   return { ticket, expiresAt };
