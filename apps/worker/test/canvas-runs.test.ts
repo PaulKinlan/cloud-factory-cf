@@ -745,3 +745,46 @@ describe("fan-out settlement when a ledger write is lost (cloud-factory-cf-lbi)"
     expect(chosen.outcome.status).toBe("succeeded");
   });
 });
+
+/**
+ * The run endpoint reads exactly one optional number out of the body, so it must not buffer
+ * an unbounded body to find it - the PUT path beside it was fixed the same way
+ * (cloud-factory-cf-i9u7). The bound is small on purpose: {"limit":100} is the whole
+ * vocabulary.
+ */
+describe("the run endpoint bounds its body", () => {
+  it("refuses an oversized body with 413 without parsing it", async () => {
+    const repository = "acme/run-body-limit";
+    const documentId = await storeDocument(repository, wiredLayout());
+    const response = await SELF.fetch(
+      `https://example.com/canvas/${repository}/documents/${documentId}/run`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-factory-control-key": CONTROL_KEY },
+        // Deliberately not JSON: a 413 proves the refusal happened while reading.
+        body: "x".repeat(8 * 1024),
+      },
+    );
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("size limit"),
+    });
+  });
+
+  it("still accepts a bounded limit and runs the document", async () => {
+    const repository = "acme/run-body-ok";
+    const documentId = await storeDocument(repository, wiredLayout());
+    const upstream = stubUpstream();
+    const response = await runDocument(repository, documentId, { limit: 2 });
+    expect(response.status).not.toBe(413);
+    expect(upstream.calls.length).toBeGreaterThanOrEqual(0);
+
+    // An empty body still means "no limit", as before.
+    const empty = await SELF.fetch(
+      `https://example.com/canvas/${repository}/documents/${documentId}/run`,
+      { method: "POST", headers: { "x-factory-control-key": CONTROL_KEY } },
+    );
+    expect(empty.status).not.toBe(413);
+  });
+});
