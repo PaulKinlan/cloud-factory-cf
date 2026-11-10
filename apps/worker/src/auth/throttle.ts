@@ -29,6 +29,17 @@ import { sameSecret } from "../secrets";
  * that follows is still what decides the request.
  */
 export const CONTROL_KEY_ATTEMPT_LIMIT = 5;
+/**
+ * The budget for machine routes, which is deliberately larger than the human one.
+ *
+ * A reservation is taken before the comparison (that is what bounds a parallel burst), so
+ * the budget also bounds how many callers can be *in flight* at once from one address. At
+ * five, a legitimate agent fleet issuing eight parallel control-plane calls was refused
+ * before any of them could compare its correct key (cloud-factory-cf-r012). Twenty is still
+ * far below any useful guessing rate for a 256-bit secret, and it is above the concurrency
+ * a real machine caller produces from one egress address.
+ */
+export const CONTROL_KEY_ATTEMPT_LIMIT_MACHINE = 20;
 export const CONTROL_KEY_WINDOW_MS = 15 * 60 * 1000;
 
 export type ThrottleOutcome = { allowed: boolean; retryAfterSec: number; failures: number };
@@ -104,11 +115,16 @@ export async function acceptPresentedControlKey(
   // Reserve before comparing, release on a match: the slot is atomic, so concurrent
   // guesses cannot all be compared, and only rejections spend the window
   // (cloud-factory-cf-yu3v / cloud-factory-cf-96mr).
-  const reservation = await controlKeyThrottle(env, identity, "attempt");
+  const reservation = await controlKeyThrottle(env, identity, "attempt", {
+    limit: CONTROL_KEY_ATTEMPT_LIMIT_MACHINE,
+  });
   if (reservation && !reservation.allowed) return false;
   if (await sameSecret(controlKey, presented)) {
     await controlKeyThrottle(env, identity, "success");
     return true;
   }
+  // Close the reservation and count the rejection, so the slot is not held against the next
+  // caller and these routes stop being uncounted oracles (cloud-factory-cf-r012 / 96mr).
+  await controlKeyThrottle(env, identity, "failure");
   return false;
 }

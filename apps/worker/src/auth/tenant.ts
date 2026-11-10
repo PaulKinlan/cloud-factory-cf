@@ -1,7 +1,7 @@
 import type { Env } from "../env";
 import { sameSecret } from "../secrets";
 import { readSession } from "../routes/auth";
-import { clientIdentity, controlKeyThrottle } from "./throttle";
+import { CONTROL_KEY_ATTEMPT_LIMIT_MACHINE, clientIdentity, controlKeyThrottle } from "./throttle";
 
 /**
  * Tenant-aware control-plane authorisation (cloud-factory-cf-e1ql).
@@ -136,7 +136,9 @@ export async function authorizeControlPlane(
     // rather than at the entry point matters: a caller that presents a key to a route
     // which never compares it must not burn its own budget.
     const identity = clientIdentity(request);
-    const reservation = await controlKeyThrottle(env, identity, "attempt");
+    const reservation = await controlKeyThrottle(env, identity, "attempt", {
+      limit: CONTROL_KEY_ATTEMPT_LIMIT_MACHINE,
+    });
     if (reservation && !reservation.allowed) {
       return { ok: false, reason: "throttled", retryAfterSec: reservation.retryAfterSec };
     }
@@ -144,6 +146,11 @@ export async function authorizeControlPlane(
       await controlKeyThrottle(env, identity, "success");
       return { ok: true, principal: { via: "control-key" } };
     }
+    // The reservation this attempt took has to be closed either way: a slot left in flight
+    // would be held against the next caller from this address, and a rejected guess that is
+    // not recorded is the oracle this throttle exists to close (cloud-factory-cf-r012 would
+    // otherwise have made valid callers pay for it).
+    await controlKeyThrottle(env, identity, "failure");
   }
 
   const signingKey = sessionSigningKey(env);

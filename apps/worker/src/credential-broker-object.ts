@@ -49,6 +49,16 @@ export function parseQuotaLimit(raw: unknown): number {
   return parsed;
 }
 
+/**
+ * How long a reservation may sit unclosed before it stops counting as in-flight work.
+ *
+ * A caller that reserves a slot and then dies (isolate evicted, request cancelled) never
+ * reports success or failure, and without this its slot would block the address until the
+ * window rolled over. Comparisons take milliseconds, so anything this old is stale
+ * (cloud-factory-cf-r012).
+ */
+export const RESERVATION_TTL_MS = 60_000;
+
 export class CredentialBroker extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -157,8 +167,8 @@ export class CredentialBroker extends DurableObject<Env> {
       }
       const now = Date.now();
       const row = this.sql
-        .exec<{ window_start: number; failures: number }>(
-          "SELECT window_start, failures FROM auth_throttle WHERE identity = ?",
+        .exec<{ window_start: number; failures: number; inflight: number; inflight_at: number }>(
+          "SELECT window_start, failures, inflight, inflight_at FROM auth_throttle WHERE identity = ?",
           identity,
         )
         .toArray()[0];
@@ -167,19 +177,44 @@ export class CredentialBroker extends DurableObject<Env> {
       // (cloud-factory-cf-1f8m).
       if (row === undefined || row.window_start + windowMs <= now) {
         this.sql.exec(
-          "INSERT OR REPLACE INTO auth_throttle (identity, window_start, failures) VALUES (?, ?, 1)",
+          "INSERT OR REPLACE INTO auth_throttle (identity, window_start, failures, inflight, inflight_at) VALUES (?, ?, 0, 1, ?)",
           identity,
           now,
+          now,
         );
-        return Response.json({ ok: true, allowed: true, failures: 1, retryAfterSec: 0 });
+        return Response.json({ ok: true, allowed: true, failures: 0, retryAfterSec: 0 });
       }
-      if (row.failures >= limit) {
+      // A reservation that was never closed - the caller died between reserving and
+      // reporting - must not block the address forever. Real comparisons are sub-second, so
+      // a slot older than this is stale rather than busy.
+      let inflight = row.inflight;
+      if (inflight > 0 && now - row.inflight_at > RESERVATION_TTL_MS) {
+        inflight = 0;
+        this.sql.exec(
+          "UPDATE auth_throttle SET inflight = 0, inflight_at = 0 WHERE identity = ?",
+          identity,
+        );
+      }
+      // In-flight work counts against the budget: that is what bounds a parallel burst even
+      // when every guess is still being compared. It is NOT charged as a failure, so a
+      // caller holding the correct key is never refused for its own concurrency
+      // (cloud-factory-cf-r012).
+      if (row.failures + inflight >= limit) {
         const retryAfterSec = Math.max(1, Math.ceil((row.window_start + windowMs - now) / 1000));
-        return Response.json({ ok: true, allowed: false, failures: row.failures, retryAfterSec });
+        return Response.json({
+          ok: true,
+          allowed: false,
+          failures: row.failures,
+          retryAfterSec,
+        });
       }
-      const failures = row.failures + 1;
-      this.sql.exec("UPDATE auth_throttle SET failures = ? WHERE identity = ?", failures, identity);
-      return Response.json({ ok: true, allowed: true, failures, retryAfterSec: 0 });
+      this.sql.exec(
+        "UPDATE auth_throttle SET inflight = ?, inflight_at = ? WHERE identity = ?",
+        inflight + 1,
+        now,
+        identity,
+      );
+      return Response.json({ ok: true, allowed: true, failures: row.failures, retryAfterSec: 0 });
     }
     if (request.method === "POST" && url.pathname === "/auth-throttle/check") {
       const body = (await readJson(request)) as Record<string, any>;
@@ -214,27 +249,38 @@ export class CredentialBroker extends DurableObject<Env> {
         return Response.json({ ok: false, error: "identity, outcome and windowMs are required" }, { status: 400 });
       }
       const now = Date.now();
-      if (outcome === "success") {
-        // A correct key ends the streak: the caller has proved it is not guessing.
-        this.sql.exec("DELETE FROM auth_throttle WHERE identity = ?", identity);
-        return Response.json({ ok: true, failures: 0 });
-      }
       const row = this.sql
-        .exec<{ window_start: number; failures: number }>(
-          "SELECT window_start, failures FROM auth_throttle WHERE identity = ?",
+        .exec<{ window_start: number; failures: number; inflight: number }>(
+          "SELECT window_start, failures, inflight FROM auth_throttle WHERE identity = ?",
           identity,
         )
         .toArray()[0];
+      if (outcome === "success") {
+        // A correct key ends the streak: the caller has proved it is not guessing. The slot
+        // it reserved is released, and the row is kept rather than deleted so a concurrent
+        // reservation is not lost (cloud-factory-cf-r012).
+        if (row !== undefined) {
+          this.sql.exec(
+            "UPDATE auth_throttle SET failures = 0, inflight = MAX(inflight - 1, 0) WHERE identity = ?",
+            identity,
+          );
+        }
+        return Response.json({ ok: true, failures: 0 });
+      }
       if (row === undefined || row.window_start + windowMs <= now) {
         this.sql.exec(
-          "INSERT OR REPLACE INTO auth_throttle (identity, window_start, failures) VALUES (?, ?, 1)",
+          "INSERT OR REPLACE INTO auth_throttle (identity, window_start, failures, inflight, inflight_at) VALUES (?, ?, 1, 0, 0)",
           identity,
           now,
         );
         return Response.json({ ok: true, failures: 1 });
       }
       const failures = row.failures + 1;
-      this.sql.exec("UPDATE auth_throttle SET failures = ? WHERE identity = ?", failures, identity);
+      this.sql.exec(
+        "UPDATE auth_throttle SET failures = ?, inflight = MAX(inflight - 1, 0) WHERE identity = ?",
+        failures,
+        identity,
+      );
       // Keep the table bounded: a counter whose window expired long ago is useless.
       this.sql.exec("DELETE FROM auth_throttle WHERE window_start < ?", now - 24 * 60 * 60 * 1000);
       return Response.json({ ok: true, failures });
@@ -395,9 +441,20 @@ export class CredentialBroker extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS auth_throttle (
         identity TEXT PRIMARY KEY,
         window_start INTEGER NOT NULL,
-        failures INTEGER NOT NULL
+        failures INTEGER NOT NULL,
+        inflight INTEGER NOT NULL DEFAULT 0,
+        inflight_at INTEGER NOT NULL DEFAULT 0
       )
     `);
+    // Objects created by cloud-factory-cf-vhns already have the table without the in-flight
+    // columns, and CREATE TABLE IF NOT EXISTS will not add them (cloud-factory-cf-r012).
+    for (const column of ["inflight INTEGER NOT NULL DEFAULT 0", "inflight_at INTEGER NOT NULL DEFAULT 0"]) {
+      try {
+        this.sql.exec(`ALTER TABLE auth_throttle ADD COLUMN ${column}`);
+      } catch {
+        // Already present.
+      }
+    }
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS credential_audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

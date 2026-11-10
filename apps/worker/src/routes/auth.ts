@@ -205,7 +205,10 @@ export async function handleAuth(
     }
 
     if (!presented || !(await sameSecret(controlKey, presented))) {
-      // The reservation already counted this attempt; nothing else to record.
+      // The reservation now holds an in-flight slot rather than a failure, so a rejection has
+      // to be recorded explicitly: it both counts the guess and releases the slot
+      // (cloud-factory-cf-r012).
+      await controlKeyThrottle(env, throttleIdentity, "failure");
       return Response.json({ ok: false, error: "Invalid root bootstrap password / control key" }, { status: 401 });
     }
 

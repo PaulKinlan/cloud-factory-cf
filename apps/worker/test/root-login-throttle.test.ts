@@ -1,6 +1,10 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { CONTROL_KEY_ATTEMPT_LIMIT, CONTROL_KEY_WINDOW_MS } from "../src/auth/throttle";
+import {
+  CONTROL_KEY_ATTEMPT_LIMIT,
+  CONTROL_KEY_ATTEMPT_LIMIT_MACHINE,
+  CONTROL_KEY_WINDOW_MS,
+} from "../src/auth/throttle";
 
 /**
  * `POST /api/auth/root-login` trades the deployment's control key for a root session and
@@ -121,9 +125,61 @@ describe("root login throttle", () => {
       ),
     );
     const statuses = responses.filter((response) => response.status !== 429);
-    // At most the window's worth of guesses is ever compared; the rest are refused.
-    expect(statuses.length).toBeLessThanOrEqual(CONTROL_KEY_ATTEMPT_LIMIT);
-    expect(responses.length - statuses.length).toBeGreaterThanOrEqual(40 - CONTROL_KEY_ATTEMPT_LIMIT);
+    // At most the machine budget's worth of guesses is ever compared; the rest are refused.
+    // The budget is the machine one (20), not the human one, because a reservation is taken
+    // before the comparison and therefore also bounds legitimate concurrency
+    // (cloud-factory-cf-r012).
+    expect(statuses.length).toBeLessThanOrEqual(CONTROL_KEY_ATTEMPT_LIMIT_MACHINE);
+    expect(responses.length - statuses.length).toBeGreaterThanOrEqual(40 - CONTROL_KEY_ATTEMPT_LIMIT_MACHINE);
+  });
+
+  it("does not throttle a caller that holds the correct key, however parallel it is (cloud-factory-cf-r012)", async () => {
+    // The reviewer's repro: the atomic reservation incremented the SHARED failures counter
+    // before the comparison, so eight concurrent requests with the CORRECT key competed for
+    // a five-slot budget and some were refused before they could ever compare. In-flight
+    // work still counts against the budget - that is what bounds a burst - but it is not
+    // charged as a failure, and a match releases its slot.
+    const identity = "203.0.113.81";
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        SELF.fetch(
+          new Request("https://example.com/api/admin/system", {
+            headers: { "cf-connecting-ip": identity, "x-factory-control-key": "test-control-key" },
+          }),
+        ),
+      ),
+    );
+    const refused = responses.filter((response) => response.status === 429);
+    expect(refused).toHaveLength(0);
+    for (const response of responses) expect(response.status).not.toBe(429);
+
+    // And the address is not left with a spent window afterwards: a ninth call still works.
+    const after = await SELF.fetch(
+      new Request("https://example.com/api/admin/system", {
+        headers: { "cf-connecting-ip": identity, "x-factory-control-key": "test-control-key" },
+      }),
+    );
+    expect(after.status).not.toBe(429);
+  });
+
+  it("releases the reservation a rejected guess took, so the next caller is not charged for it", async () => {
+    const identity = "203.0.113.82";
+    const wrong = () =>
+      SELF.fetch(
+        new Request("https://example.com/api/admin/system", {
+          headers: { "cf-connecting-ip": identity, "x-factory-control-key": "not-the-control-key" },
+        }),
+      );
+
+    // One rejection, then a correct key: the in-flight slot from the rejection must be gone,
+    // and the streak cleared, so the correct call is not refused.
+    expect((await wrong()).status).not.toBe(429);
+    const good = await SELF.fetch(
+      new Request("https://example.com/api/admin/system", {
+        headers: { "cf-connecting-ip": identity, "x-factory-control-key": "test-control-key" },
+      }),
+    );
+    expect(good.status).not.toBe(429);
   });
 
   it("counts rejections on the routes that compare the key directly (cloud-factory-cf-96mr)", async () => {
