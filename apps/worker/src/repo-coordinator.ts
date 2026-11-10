@@ -242,13 +242,46 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
 
     const candidates = legacyCandidateNames(parsed.repository, legacyHint);
+
+    // Nothing left to learn and nothing left to write: once the repository is sealed and
+    // every known spelling is probed, this must not touch the database at all. It used to
+    // rewrite legacy_read_through with a fresh migrated_at on every single delivery
+    // (cloud-factory-cf-973u). A candidate that arrives later through a hint is in
+    // `candidates` and therefore still gets probed.
+    const everyKnownCandidateProbed = candidates.every((candidate) =>
+      this.hasMigration(`legacy_probed:${candidate}`),
+    );
+    if (
+      everyKnownCandidateProbed &&
+      this.hasMigration("legacy_read_through") &&
+      !this.hasMigration("legacy_lossy")
+    ) {
+      return;
+    }
+
     // Set once a candidate could not be merged losslessly, or could not be reached at
     // all: either way the repository must stay unsealed so the evidence stays reachable.
     let sealSafe = !this.hasMigration("legacy_lossy");
 
     for (const candidate of candidates) {
       if (this.hasMigration(`legacy_probed:${candidate}`)) continue;
-      const outcome = await this.importLegacyCandidate(candidate, controlKey);
+      // Claim before the await, not after it (cloud-factory-cf-fjpb): two requests that
+      // both decided to probe would both merge, and mergeLegacyConnectRow SUMS pings, so
+      // the legacy evidence would be counted twice. The claim is a lease - a crash
+      // between claim and release must not strand the candidate - and it is released on
+      // every exit path that is not a completed probe.
+      if (!this.claimProbe(candidate)) continue;
+      let outcome: "merged" | "lossy" | "unreachable" | "empty" = "unreachable";
+      try {
+        outcome = await this.importLegacyCandidate(candidate, controlKey);
+      } catch (err) {
+        // importLegacyCandidate already logs and reports unreachable; this is the belt
+        // for anything it does not catch, and it must still release the lease.
+        console.error(`Legacy probe for ${candidate} threw:`, err);
+        outcome = "unreachable";
+      } finally {
+        this.releaseProbe(candidate);
+      }
       if (outcome === "unreachable") {
         // No marker: a later request retries this spelling rather than sealing over it.
         sealSafe = false;
@@ -399,6 +432,30 @@ export class RepoCoordinator extends DurableObject<Env> {
         .exec<{ name: string }>("SELECT name FROM _schema_migrations WHERE name = ?", name)
         .toArray().length > 0
     );
+  }
+
+  private migrationAt(name: string): number | null {
+    const row = this.sql
+      .exec<{ migrated_at: number }>("SELECT migrated_at FROM _schema_migrations WHERE name = ?", name)
+      .toArray()[0];
+    return row === undefined ? null : Number(row.migrated_at);
+  }
+
+  /** How long a probe lease is honoured before another request may take the candidate. */
+  private static readonly PROBE_LEASE_MS = 2 * 60 * 1000;
+
+  private claimProbe(candidate: string): boolean {
+    const claim = `legacy_claim:${candidate}`;
+    const at = this.migrationAt(claim);
+    if (at !== null && Date.now() - at < RepoCoordinator.PROBE_LEASE_MS) return false;
+    // A lease that outlived its request (eviction mid-import) is taken over rather than
+    // blocking the candidate forever.
+    this.markMigration(claim);
+    return true;
+  }
+
+  private releaseProbe(candidate: string): void {
+    this.sql.exec("DELETE FROM _schema_migrations WHERE name = ?", `legacy_claim:${candidate}`);
   }
 
   private markMigration(name: string): void {
