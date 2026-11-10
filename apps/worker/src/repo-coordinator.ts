@@ -5,7 +5,7 @@ import { planAgents, sourceMatches } from "./canvas-runs";
 import { readBodyWithinLimit, safeParseJson } from "./events/helpers";
 import { isMissingSchemaError } from "./events/sql-errors";
 import { createDefaultExecutionFn, drainRepository } from "./pipeline";
-import { CanvasStore, migrateCanvasTable } from "./canvas-store";
+import { CanvasStore, MAX_CANVAS_BODY_BYTES, migrateCanvasTable } from "./canvas-store";
 import { GitTreeStore, migrateGitTreeTable } from "./git-tree-store";
 import { MemoryHandler, migrateMemoryTable } from "./memory";
 import { sameSecret } from "./secrets";
@@ -581,7 +581,19 @@ export class RepoCoordinator extends DurableObject<Env> {
     if (url.pathname === "/canvas" || url.pathname.startsWith("/canvas/")) {
       const id = url.pathname === "/canvas" ? "" : decodeURIComponent(url.pathname.slice("/canvas/".length));
       if (request.method === "GET") return id ? this.canvasStore.get(id) : this.canvasStore.list(url);
-      if (request.method === "PUT") return this.canvasStore.put(id, await readJson(request));
+      if (request.method === "PUT") {
+        // The edge caps this too; the object caps it as well because it is the component
+        // that pays for the buffer, and it must not assume its caller did
+        // (cloud-factory-cf-usgd).
+        const text = await readBodyWithinLimit(request, MAX_CANVAS_BODY_BYTES);
+        if (text === null) {
+          return Response.json({ ok: false, error: "canvas document exceeds size limit" }, { status: 413 });
+        }
+        let parsed: unknown;
+        try { parsed = JSON.parse(text); }
+        catch { return Response.json({ ok: false, error: "invalid json" }, { status: 400 }); }
+        return this.canvasStore.put(id, parsed);
+      }
       if (request.method === "DELETE") return this.canvasStore.remove(id);
       return new Response("method not allowed", { status: 405 });
     }

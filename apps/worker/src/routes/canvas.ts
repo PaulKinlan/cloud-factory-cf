@@ -4,6 +4,8 @@ import { runCanvasDocument } from "../canvas-runs";
 import { authorizeControlPlane, authzDenial, sessionMayAddressPlatform } from "../auth/tenant";
 import { mintDelegation } from "../auth/delegation";
 import { getRepoCoordinator } from "../repo-coordinator-addressing";
+import { MAX_CANVAS_BODY_BYTES } from "../canvas-store";
+import { readBodyWithinLimit } from "../events/helpers";
 
 export const CANVAS_PATH = /^\/canvas\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/documents(?:\/(?<id>[^/]+))?$/;
 export const CANVAS_RUN_PATH = /^\/canvas\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/documents\/(?<id>[^/]+)\/run$/;
@@ -106,11 +108,22 @@ export async function routeCanvas(
     }
   }
   const target = docId === undefined ? "/canvas" : `/canvas/${encodeURIComponent(docId)}`;
+  // The body is read against the cap rather than buffered first: a canvas document is at
+  // most MAX_DOCUMENT_BYTES once parsed, so anything past this bound is refused before it
+  // occupies memory (cloud-factory-cf-usgd).
+  let body: string | undefined;
+  if (request.method === "PUT") {
+    const text = await readBodyWithinLimit(request, MAX_CANVAS_BODY_BYTES);
+    if (text === null) {
+      return Response.json({ ok: false, error: "canvas document exceeds size limit" }, { status: 413 });
+    }
+    body = text;
+  }
   return stub.fetch(
     new Request(`https://repo-coordinator.internal${target}`, {
       method: request.method,
       headers: { "content-type": "application/json" },
-      body: request.method === "PUT" ? await request.text() : undefined,
+      body,
     }),
   );
 }

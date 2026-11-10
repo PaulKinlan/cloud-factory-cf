@@ -1,6 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { MAX_DOCUMENT_BYTES, MAX_NODES } from "../src/canvas-store";
+import { MAX_CANVAS_BODY_BYTES, MAX_DOCUMENT_BYTES, MAX_NODES } from "../src/canvas-store";
 
 /**
  * Canvas documents are stored in the repository's coordinator object and served
@@ -22,14 +22,14 @@ const document = {
 
 async function canvasFetch(
   path: string,
-  init: { method?: string; body?: unknown; controlKey?: string | null } = {},
+  init: { method?: string; body?: unknown; rawBody?: string; controlKey?: string | null } = {},
 ): Promise<Response> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (init.controlKey !== null) headers["x-factory-control-key"] = init.controlKey ?? CONTROL_KEY;
   return SELF.fetch(`https://example.com/canvas/${REPOSITORY}/documents${path}`, {
     method: init.method ?? "GET",
     headers,
-    body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    body: init.rawBody ?? (init.body === undefined ? undefined : JSON.stringify(init.body)),
   });
 }
 
@@ -142,5 +142,48 @@ describe("canvas document store", () => {
     const item = listPayload.documents.find((d: any) => d.id === customId);
     expect(item).toBeDefined();
     expect(item.id).toBe(customId);
+  });
+});
+
+/**
+ * The canvas document is written with PUT, and the route used to buffer the whole body with
+ * `await request.text()` before anything looked at its size - so a client could make the
+ * worker hold an arbitrarily large body in memory before the (post-parse) document cap
+ * rejected it (cloud-factory-cf-usgd). The body is now read against a bound, on the edge and
+ * again in the object.
+ */
+describe("canvas body size is bounded while reading", () => {
+  it("refuses an oversized body without parsing it, and stores nothing", async () => {
+    // Deliberately not valid JSON: the point is that the refusal happens while reading, so
+    // nothing downstream ever sees (or tries to parse) the body.
+    const refusal = await canvasFetch("", {
+      method: "PUT",
+      rawBody: "x".repeat(MAX_CANVAS_BODY_BYTES + 1_024),
+    });
+    expect(refusal.status).toBe(413);
+    await expect(refusal.json()).resolves.toMatchObject({ ok: false, error: expect.stringContaining("size limit") });
+
+    const listed = (await (await canvasFetch("")).json()) as { documents: Array<{ name: string }> };
+    expect(listed.documents.some((entry) => entry.name === "huge")).toBe(false);
+  });
+
+  it("still stores a document that is large on the wire but legal once parsed", async () => {
+    // 260 nodes with a note each: ~270 KB once serialised (under MAX_DOCUMENT_BYTES) but
+    // comfortably over it on the wire once indented, which is why the read cap is separate
+    // from the stored-document cap.
+    const nodes = Array.from({ length: 260 }, (_, index) => ({
+      id: `n-${index}`,
+      kind: "source" as const,
+      label: "node",
+      x: index,
+      y: index,
+      config: { note: "y".repeat(900) },
+    }));
+    const rawBody = JSON.stringify({ name: "big but legal", document: { ...document, nodes } }, null, 2);
+    expect(Buffer.byteLength(rawBody, "utf8")).toBeGreaterThan(MAX_DOCUMENT_BYTES);
+    expect(Buffer.byteLength(rawBody, "utf8")).toBeLessThan(MAX_CANVAS_BODY_BYTES);
+
+    const created = await canvasFetch("", { method: "PUT", rawBody });
+    expect([200, 201]).toContain(created.status);
   });
 });
