@@ -5,6 +5,7 @@ import { readSession } from "../routes/auth";
 import { brokerInternalHeaders } from "./delegation";
 import { acceptPresentedControlKey } from "./throttle";
 import { revokeAllSessions } from "./sessions";
+import { isRootLogin } from "./tenant";
 
 export const WEBAUTHN_CHALLENGE_COOKIE = "cf_webauthn_challenge";
 
@@ -276,6 +277,15 @@ export async function handlePasskeyRoute(
     const userBytes = new TextEncoder().encode(subject);
     const userId = base64UrlEncode(userBytes);
 
+    // The registration policy has to agree with the login policy (cloud-factory-cf-trej): a
+    // login the control plane treats as root needs user verification at BOTH ends, so the
+    // options below ask for it and `login/verify` later requires it. Deriving this from
+    // `role` alone left platform owners — who register under their own login, so
+    // `role === "user"` — advertising `preferred`, and an authenticator that followed that
+    // policy produced a credential that could never sign in.
+    const rootCapable =
+      role === "root" || subject === "__root__" || (subject !== "" && isRootLogin(subject, env));
+
     const challengeCookie = await mintChallengeCookie(signingKey, challenge, subject, role, "create", url);
     if (!(await rememberChallenge(env, challenge, subject, role, "create"))) {
       return Response.json({ ok: false, error: "Could not record the WebAuthn challenge" }, { status: 503 });
@@ -300,7 +310,10 @@ export async function handlePasskeyRoute(
       attestation: "none",
       authenticatorSelection: {
         residentKey: "preferred",
-        userVerification: "preferred",
+        // Decided here, from the server-derived role, not by the caller: a root passkey
+        // unlocks the control plane, so it is asked for (and later required to have) user
+        // verification (cloud-factory-cf-dxy4, cloud-factory-cf-trej).
+        userVerification: rootCapable ? "required" : "preferred",
       },
     };
 
@@ -455,6 +468,9 @@ export async function handlePasskeyRoute(
       challenge,
       rpId: url.hostname,
       timeout: 60000,
+      // A hint for the browser, never the decision: login/verify requires user verification
+      // whenever the credential it resolves is a root credential, whatever this request
+      // asked for (cloud-factory-cf-dxy4).
       userVerification: "preferred",
     };
 
@@ -550,6 +566,31 @@ export async function handlePasskeyRoute(
     const passkey = passkeyData.passkeys?.[0];
     if (!passkey || !passkey.publicKeySpki) {
       return Response.json({ ok: false, error: "Passkey not found" }, { status: 404 });
+    }
+
+    // User verification is required for a root credential, and that requirement comes from
+    // the record being resolved - not from what the client asked for when it requested the
+    // challenge, and not from what it puts in the assertion. Without this, a root passkey
+    // could be used touch-only: the UP flag (0x01) proves presence, but only the UV flag
+    // (0x04) proves the human unlocked the authenticator, and the admin console's
+    // 'required' policy lived only in client JavaScript that an attacker never runs
+    // (cloud-factory-cf-dxy4).
+    // "Root" is not one credential role, it is whatever the control plane treats as root:
+    // `role === "root"`, the `__root__` bootstrap subject, AND every login the deployment
+    // lists in PLATFORM_OWNERS / ROOT_ADMIN_LOGINS (ADR 006) — `authorizeControlPlane` grants
+    // those deployment-wide authority, so a touch-only assertion for one of them would unlock
+    // the control plane while the check here believed it was an ordinary user
+    // (cloud-factory-cf-bgjb).
+    const credentialSubject = String(passkey.subject ?? "");
+    const credentialIsRoot =
+      String(passkey.role ?? "user") === "root" ||
+      credentialSubject === "__root__" ||
+      (credentialSubject !== "" && isRootLogin(credentialSubject, env));
+    if (credentialIsRoot && (flags & 0x04) === 0) {
+      return Response.json(
+        { ok: false, error: "User verification required for this passkey" },
+        { status: 401 },
+      );
     }
 
     // Cryptographic signature verification
