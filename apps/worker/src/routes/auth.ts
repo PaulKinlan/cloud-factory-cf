@@ -1031,6 +1031,149 @@ async function successHeaders(
   return headers;
 }
 
+/**
+ * A token that can read `ownerLogin`'s repositories (cloud-factory-cf-15ao).
+ *
+ * The installation token for that account's GitHub App installation, or the deployment's PAT
+ * when it uses one. `null` means we cannot ask GitHub anything, which is a refusal rather than
+ * a reason to believe the caller.
+ */
+async function resolveRepositoryReadToken(env: Env, ownerLogin: string): Promise<string | null> {
+  if (env.GITHUB_TOKEN?.trim()) return env.GITHUB_TOKEN.trim();
+
+  const creds = await resolveGithubCredentials(env, { owner: ownerLogin });
+  const appId = creds.appId ?? env.GITHUB_APP_ID?.trim();
+  const privateKey = creds.privateKey ?? env.GITHUB_APP_PRIVATE_KEY ?? env.GITHUB_PRIVATE_KEY;
+  if (!appId || !privateKey) return null;
+
+  let appJwt: string;
+  try {
+    appJwt = await mintAppJwt(appId, await importAppPrivateKey(privateKey));
+  } catch {
+    return null;
+  }
+  const appHeaders = {
+    authorization: `Bearer ${appJwt}`,
+    accept: "application/vnd.github+json",
+    "user-agent": "CloudFactory-Auth",
+  };
+
+  // The installation is found by account, because this caller named a repository rather than
+  // presenting an installation id - a token is only ever minted for an installation GitHub
+  // already says exists for that account.
+  let installations: Array<{ id?: number; account?: { login?: string } }> = [];
+  try {
+    const listRes = await fetch("https://api.github.com/app/installations?per_page=100", { headers: appHeaders });
+    if (!listRes.ok) return null;
+    installations = (await listRes.json()) as typeof installations;
+  } catch {
+    return null;
+  }
+  const wanted = ownerLogin.toLowerCase();
+  const installation = installations.find((entry) => entry.account?.login?.toLowerCase() === wanted);
+  if (!installation?.id) return null;
+
+  try {
+    const tokenRes = await fetch(`https://api.github.com/app/installations/${installation.id}/access_tokens`, {
+      method: "POST",
+      headers: appHeaders,
+    });
+    if (!tokenRes.ok) return null;
+    const data = (await tokenRes.json()) as { token?: string };
+    return data.token ?? null;
+  } catch {
+    return null;
+  }
+}
+
+interface VerifiedRepository {
+  fullName: string;
+  owner: string;
+  name: string;
+  private: boolean;
+  defaultBranch: string;
+}
+
+/**
+ * Asks GitHub whether this repository exists and is visible to us, and returns GitHub's OWN
+ * description of it (cloud-factory-cf-15ao).
+ *
+ * The POST below used to write whatever the caller asserted: any fullName, any `private`, any
+ * `defaultBranch`. That record is what later decides whether a repository is public, which
+ * default branch the pipeline reads and which org's coordinator owns it, so a caller could
+ * describe a repository they have no access to and have the fleet act on that description. The
+ * fix is not to sanity-check the claims but to replace them with the answer GitHub gives.
+ */
+async function verifyRepositoryWithGithub(
+  env: Env,
+  requestedFullName: string,
+): Promise<{ ok: true; repo: VerifiedRepository } | { ok: false; status: number; error: string }> {
+  const parts = requestedFullName.split("/");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    return { ok: false, status: 400, error: "fullName must be owner/repo" };
+  }
+  const [owner, name] = parts as [string, string];
+
+  const token = await resolveRepositoryReadToken(env, owner);
+  if (!token) {
+    return {
+      ok: false,
+      status: 503,
+      error: "GitHub credentials are not configured, so a repository cannot be verified",
+    };
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "CloudFactory-Auth",
+      },
+    });
+  } catch (err) {
+    return { ok: false, status: 502, error: `Failed to reach GitHub: ${String(err)}` };
+  }
+
+  // 404 and 403 are the same answer to the caller: we cannot see it, so it cannot be registered.
+  // Distinguishing them would turn this endpoint into an existence oracle for private repos.
+  if (res.status === 404 || res.status === 403) {
+    return { ok: false, status: 403, error: "repository could not be verified through GitHub" };
+  }
+  if (!res.ok) {
+    return { ok: false, status: 502, error: `GitHub returned HTTP ${res.status} for this repository` };
+  }
+
+  const data = (await res.json().catch(() => ({}))) as {
+    full_name?: string;
+    name?: string;
+    private?: boolean;
+    default_branch?: string;
+    owner?: { login?: string };
+  };
+  if (!data.full_name || !data.full_name.includes("/")) {
+    return { ok: false, status: 502, error: "GitHub returned no repository identity" };
+  }
+  const [ghOwner, ghName] = data.full_name.split("/") as [string, string];
+  if (ghOwner.toLowerCase() !== owner.toLowerCase() || ghName.toLowerCase() !== name.toLowerCase()) {
+    // A rename between the caller's request and the lookup: refuse rather than register a
+    // record whose name does not match the identifier we verified.
+    return { ok: false, status: 403, error: "repository could not be verified through GitHub" };
+  }
+
+  return {
+    ok: true,
+    repo: {
+      fullName: data.full_name,
+      owner: data.owner?.login ?? ghOwner,
+      name: data.name ?? ghName,
+      private: Boolean(data.private),
+      defaultBranch: data.default_branch || "main",
+    },
+  };
+}
+
 export async function handleApiRepos(
   request: Request,
   env: Env,
@@ -1094,28 +1237,35 @@ export async function handleApiRepos(
     if (!fullName || !fullName.includes("/")) {
       return Response.json({ ok: false, error: "fullName or name is required (e.g. owner/repo)" }, { status: 400 });
     }
-    const parts = fullName.split("/");
-    const repoOwner = parts[0]!;
-    const repoName = parts[1]!;
+    const [repoOwner] = fullName.split("/") as [string];
     const targetOrg = owner === ROOT_SESSION_LOGIN ? repoOwner : (owner || repoOwner);
+    // A caller only ever registers repositories for the account it is acting for. Without this,
+    // a session for one login could file another account's repository under its own org, and
+    // every later decision about that repository would be made from the wrong org's record.
+    if (targetOrg.toLowerCase() !== repoOwner.toLowerCase()) {
+      return Response.json(
+        { ok: false, error: "repositories must belong to the account you are acting for" },
+        { status: 403 },
+      );
+    }
     if (!env.ORG_COORDINATOR) {
       return Response.json({ ok: false, error: "OrgCoordinator is not configured" }, { status: 503 });
     }
+
+    // Everything stored comes from GitHub, never from the request body: the caller chooses WHICH
+    // repository to register (subject to being allowed to see it), and nothing else.
+    const verified = await verifyRepositoryWithGithub(env, fullName);
+    if (!verified.ok) {
+      return Response.json({ ok: false, error: verified.error }, { status: verified.status });
+    }
+
     const org = env.ORG_COORDINATOR.get(env.ORG_COORDINATOR.idFromName(targetOrg));
     const addRes = await org.fetch("https://org-coordinator.internal/installations", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         accountLogin: targetOrg,
-        repos: [
-          {
-            fullName,
-            owner: repoOwner,
-            name: repoName,
-            private: Boolean(body.private ?? body.isPrivate),
-            defaultBranch: body.defaultBranch || "main",
-          },
-        ],
+        repos: [verified.repo],
       }),
     });
     const addData = await addRes.json();
