@@ -315,6 +315,59 @@ describe("passkey registration cannot take over another subject's credential", (
     return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   };
 
+  /**
+   * A registration attestation object, as the route now requires (cloud-factory-cf-evbe): the
+   * credential's own key has to be presented inside authenticator data, so a registration that
+   * only names a credential id is refused before it ever reaches the broker. That is what this
+   * file's case has to get past - there is deliberately no assertion about it here, the broker's
+   * ownership rule is the subject.
+   */
+  const attestationObjectFor = async (spkiBase64Url: string, credentialId: string): Promise<string> => {
+    const decode = (value: string): Uint8Array => {
+      const padded = value.replace(/-/g, "+").replace(/_/g, "/");
+      const binary = atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
+      return new Uint8Array(Array.from(binary, (c) => c.charCodeAt(0)));
+    };
+    const encode = (bytes: number[]): Uint8Array => new Uint8Array(bytes);
+    const spki = decode(spkiBase64Url);
+    const point = spki.slice(spki.length - 65);
+    const bytes = (body: Uint8Array): Uint8Array =>
+      body.length < 24
+        ? new Uint8Array([0x40 | body.length, ...body])
+        : body.length < 256
+          ? new Uint8Array([0x58, body.length, ...body])
+          : new Uint8Array([0x59, (body.length >> 8) & 0xff, body.length & 0xff, ...body]);
+    const coseKey = encode([
+      0xa5, // map(5): kty, alg, crv, x, y
+      0x01, 0x02, // kty: EC2
+      0x03, 0x26, // alg: ES256 (-7)
+      0x20, 0x01, // crv: P-256 (-1)
+      0x21, 0x58, 32, ...point.slice(1, 33), // x (-2)
+      0x22, 0x58, 32, ...point.slice(33, 65), // y (-3)
+    ]);
+    const rpIdHash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("example.com")));
+    // The authenticator data carries the RAW id; the request carries its base64url, and the
+    // route compares the two forms. Encoding the base64url text here would put a different id
+    // in the authenticator data than the one being registered.
+    const credentialBytes = decode(credentialId);
+    const authData = encode([
+      ...rpIdHash,
+      0x41, // UP | AT
+      0, 0, 0, 0, // signCount
+      ...new Uint8Array(16), // AAGUID
+      (credentialBytes.length >> 8) & 0xff, credentialBytes.length & 0xff,
+      ...credentialBytes,
+      ...coseKey,
+    ]);
+    const attestation = encode([
+      0xa3, // map(3): fmt, attStmt, authData
+      0x63, 0x66, 0x6d, 0x74, 0x64, 0x6e, 0x6f, 0x6e, 0x65, // "fmt": "none" (0x64: four bytes)
+      0x67, 0x61, 0x74, 0x74, 0x53, 0x74, 0x6d, 0x74, 0xa0, // "attStmt": {}
+      0x68, 0x61, 0x75, 0x74, 0x68, 0x44, 0x61, 0x74, 0x61, ...bytes(authData), // "authData"
+    ]);
+    return base64Url(attestation);
+  };
+
   const es256PublicKeySpki = async (): Promise<string> => {
     const keyPair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
     const spki = await crypto.subtle.exportKey("spki", keyPair.publicKey);
@@ -322,7 +375,11 @@ describe("passkey registration cannot take over another subject's credential", (
   };
 
   it("refuses a session that names a credential id owned by someone else", async () => {
-    const credentialId = "fbjl-victim-credential";
+    // base64url of the raw credential id, which is what a browser sends as rawId. The
+    // registration route now checks this against the id inside the authenticator data
+    // (cloud-factory-cf-evbe), so a plain-text label would be refused before the broker's
+    // ownership rule - the rule this case exists to test - was ever consulted.
+    const credentialId = base64Url(new TextEncoder().encode("fbjl-victim-credential"));
     const victimKey = "victim-public-key-spki";
     const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
     await broker.fetch("https://credential-broker.internal/passkeys", {
@@ -358,12 +415,14 @@ describe("passkey registration cannot take over another subject's credential", (
       ),
     );
 
+    const mallorySpki = await es256PublicKeySpki();
     const registerRes = await SELF.fetch("https://example.com/api/auth/passkey/register/verify", {
       method: "POST",
       headers: { cookie: challengeCookie, "content-type": "application/json" },
       body: JSON.stringify({
         credentialId,
-        publicKeySpki: await es256PublicKeySpki(),
+        publicKeySpki: mallorySpki,
+        attestationObject: await attestationObjectFor(mallorySpki, credentialId),
         algorithm: -7,
         clientDataJSON: clientData,
         label: "Mallory's key",
