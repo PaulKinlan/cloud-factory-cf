@@ -1,5 +1,6 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { mintSessionToken, SESSION_TTL_SECONDS } from "../src/auth/sessions";
 
 /**
  * The GitHub OAuth session as a tenant-bound control-plane credential
@@ -30,10 +31,31 @@ async function sign(data: string, secret: string = SIGNING_KEY): Promise<string>
     .join("");
 }
 
-/** A cookie exactly the shape `/auth/github/callback` mints (`login.exp.hmac`). */
+/**
+ * A cookie minted by the real mint path, shaped `<login>.<iat>.<exp>.<sid>.<hmac>`, with
+ * `ttlSeconds` measured from now (negative expires it). The hand-built three-part cookie
+ * this used to produce is the pre-revocation format and is rejected on purpose since
+ * revocation landed (cloud-factory-cf-2lbm).
+ */
 async function session(login: string, ttlSeconds = 900, secret = SIGNING_KEY): Promise<string> {
-  const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
-  return `cf_session=${login}.${exp}.${await sign(`${login}.${exp}`, secret)}`;
+  const nowMs = Date.now() + (ttlSeconds - SESSION_TTL_SECONDS) * 1000;
+  return `cf_session=${await mintSessionToken(secret, login, nowMs)}`;
+}
+
+/**
+ * A session-shaped cookie (5 parts) whose signature or signed login has been tampered
+ * with, so the tampering — not the format — is what the verifier rejects.
+ */
+async function tampered(
+  login: string,
+  opts: { signature?: string; signedLogin?: string } = {},
+): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const exp = now + 900;
+  const sid = "0".repeat(32);
+  const signable = `${opts.signedLogin ?? login}.${now}.${exp}.${sid}`;
+  const signature = opts.signature ?? (await sign(signable));
+  return `cf_session=${login}.${now}.${exp}.${sid}.${signature}`;
 }
 
 /** Call the real Worker with the given bindings (the suite's env by default). */
@@ -75,18 +97,17 @@ describe("tenant-bound control-plane sessions (cloud-factory-cf-e1ql)", () => {
   });
 
   it("refuses forged and expired sessions with 401", async () => {
-    const exp = Math.floor(Date.now() / 1000) + 900;
-    const forged = await call(AUDIT, {
-      headers: { cookie: `cf_session=octodev.${exp}.${"0".repeat(64)}` },
+    const forgedSig = await call(AUDIT, {
+      headers: { cookie: await tampered("octodev", { signature: "0".repeat(64) }) },
     });
-    expect(forged.status).toBe(401);
+    expect(forgedSig.status).toBe(401);
 
     const expired = await call(AUDIT, { headers: { cookie: await session("octodev", -10) } });
     expect(expired.status).toBe(401);
 
     // A correctly signed login cannot be retargeted at another owner.
     const retargeted = await call("/audit/events/victimorg/widget-service", {
-      headers: { cookie: `cf_session=victimorg.${exp}.${await sign(`octodev.${exp}`)}` },
+      headers: { cookie: await tampered("victimorg", { signedLogin: "octodev" }) },
     });
     expect(retargeted.status).toBe(401);
   });

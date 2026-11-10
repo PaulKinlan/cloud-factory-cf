@@ -1,6 +1,7 @@
 import { env, SELF } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleApiRepos } from "../src/routes/auth";
+import { mintSessionToken } from "../src/auth/sessions";
 
 function setupDefaultFetch() {
   vi.stubGlobal(
@@ -1314,9 +1315,9 @@ describe("/api/repos: the browser session minted by the connect callback (cloud-
   });
 
   it("allows session auth on /api/repos even when BROKER_CONTROL_KEY is unset", async () => {
-    const exp = Math.floor(Date.now() / 1000) + 3600;
-    const sig = await sign(`octodev.${exp}`);
-    const cookie = `cf_session=octodev.${exp}.${sig}`;
+    // Minted through the real mint path: a hand-built `<login>.<exp>.<hmac>` cookie is the
+    // pre-revocation format and is rejected on purpose (cloud-factory-cf-2lbm).
+    const cookie = `cf_session=${await mintSessionToken(SESSION_SIGNING_KEY, "octodev")}`;
 
     // Test with handleApiRepos directly with env lacking BROKER_CONTROL_KEY
     const req = new Request("https://example.com/api/repos?owner=octodev", {

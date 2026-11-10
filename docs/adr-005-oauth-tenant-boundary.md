@@ -38,9 +38,23 @@ session the *general* control-plane credential and to say what happens to the ke
 **The browser's GitHub OAuth session is the only human control-plane credential, and
 `:owner` is the tenant boundary.**
 
-- The session is an HMAC-signed cookie `cf_session = <login>.<exp>.<sig>`, minted only
-  after a GitHub OAuth `code` exchange has named the login (`routes/auth.ts`). It is
-  `HttpOnly`, `SameSite=Lax`, `Secure` on https, 8h TTL, and bound to one login.
+- The session is an HMAC-signed cookie `cf_session = <login>.<iat>.<exp>.<sid>.<sig>`,
+  minted only after a GitHub OAuth `code` exchange has named the login
+  (`routes/auth.ts`, `auth/sessions.ts`). It is `HttpOnly`, `SameSite=Lax`, `Secure` on
+  https, 8h TTL, and bound to one login. `sid` is a random per-session id and `iat` its
+  issue time: the pair a revocation names.
+- **Sessions are revocable** (`cloud-factory-cf-2lbm`). The token is stateless, so
+  revocation is a deny list in the `default` `CredentialBroker`
+  (`session_revocations`), consulted by `readSession` on every read: one row ends one
+  `sid`, a wildcard row ends every session for a login issued at or before it.
+  `POST /api/auth/logout` revokes the session it is discarding (`?all=1` signs out
+  everywhere), `DELETE /api/auth/passkeys` revokes every session the credential's owner
+  holds — sessions are not bound to the passkey that created them, so that is the
+  fail-closed reading — and `POST /api/auth/sessions/revoke` (control key or root) is
+  the operator lever after removing a login from `PLATFORM_OWNERS`. The list is read,
+  not cached, and a store error answers "revoked": a deny list that cannot be read
+  cannot be trusted. Cost: one Durable Object read per session-authenticated request;
+  the machine key is checked first and never pays it.
 - Authorisation is one function, `apps/worker/src/auth/tenant.ts`
   (`authorizeControlPlane`): the machine key first (unchanged contract), then the
   session, which may only act for its own login — a valid session asking for another
@@ -107,9 +121,9 @@ a GitHub login is reachable only with the machine key, because permission data c
 from GitHub (documented in `docs/credentials.md`).
 
 **Explicitly not decided here.** Who administers an account and what each tier may do
-(ADR 006); whether sessions gain refresh/rotation (they are re-minted on each login);
-whether the machine key is deleted outright rather than kept as break-glass (`ec98`
-closes this).
+(ADR 006); whether sessions gain refresh/rotation (they are re-minted on each login;
+revocation landed in `cloud-factory-cf-2lbm`, refresh did not); whether the machine key
+is deleted outright rather than kept as break-glass (`ec98` closes this).
 
 ## Slices
 

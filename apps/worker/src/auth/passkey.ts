@@ -2,6 +2,7 @@ import type { Env } from "../env";
 import { sameSecret } from "../secrets";
 import { mintSessionToken, SESSION_COOKIE, SESSION_TTL_SECONDS } from "../routes/auth";
 import { readSession } from "../routes/auth";
+import { revokeAllSessions } from "./sessions";
 
 export const WEBAUTHN_CHALLENGE_COOKIE = "cf_webauthn_challenge";
 
@@ -152,7 +153,7 @@ export async function handlePasskeyRoute(
   // 1. POST /api/auth/passkey/register/options
   if (url.pathname === "/api/auth/passkey/register/options" && request.method === "POST") {
     // Requires active session or control key
-    const session = await readSession(request.headers, signingKey);
+    const session = await readSession(request.headers, env);
     const controlKey = request.headers.get("x-factory-control-key");
     const hasValidControlKey = Boolean(
       controlKey && env.BROKER_CONTROL_KEY && (await sameSecret(env.BROKER_CONTROL_KEY, controlKey)),
@@ -505,7 +506,7 @@ export async function handlePasskeyRoute(
 
   // 5. GET /api/auth/passkeys
   if (url.pathname === "/api/auth/passkeys" && request.method === "GET") {
-    const session = await readSession(request.headers, signingKey);
+    const session = await readSession(request.headers, env);
     const controlKey = request.headers.get("x-factory-control-key");
     const isRoot = Boolean(
       (controlKey && env.BROKER_CONTROL_KEY && (await sameSecret(env.BROKER_CONTROL_KEY, controlKey))) ||
@@ -528,7 +529,7 @@ export async function handlePasskeyRoute(
 
   // 6. DELETE /api/auth/passkeys
   if (url.pathname === "/api/auth/passkeys" && request.method === "DELETE") {
-    const session = await readSession(request.headers, signingKey);
+    const session = await readSession(request.headers, env);
     const controlKey = request.headers.get("x-factory-control-key");
     const isRoot = Boolean(
       (controlKey && env.BROKER_CONTROL_KEY && (await sameSecret(env.BROKER_CONTROL_KEY, controlKey))) ||
@@ -549,10 +550,41 @@ export async function handlePasskeyRoute(
       return Response.json({ ok: false, error: "CredentialBroker not available" }, { status: 503 });
     }
     const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
-    const query = subject ? `?id=${encodeURIComponent(id)}&subject=${encodeURIComponent(subject)}` : `?id=${encodeURIComponent(id)}`;
+    const scope = subject ? `&subject=${encodeURIComponent(subject)}` : "";
+
+    // Look the credential up first: a bogus or already-deleted id must not revoke anyone's
+    // sessions, and a root deletion has to know whose sessions to end.
+    const lookup = await broker.fetch(
+      `https://credential-broker.internal/passkeys?id=${encodeURIComponent(id)}${scope}`,
+    );
+    const found = (await lookup.json().catch(() => null)) as { passkeys?: Array<Record<string, any>> } | null;
+    const owner = found?.passkeys?.[0]?.subject ? String(found.passkeys[0].subject) : null;
+    if (!owner) {
+      return Response.json({ ok: false, error: "Passkey not found", id }, { status: 404 });
+    }
+
+    const query = `?id=${encodeURIComponent(id)}${scope}`;
     const res = await broker.fetch(`https://credential-broker.internal/passkeys${query}`, { method: "DELETE" });
-    const data = await res.json();
-    return Response.json(data);
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok) return Response.json(data, { status: res.status });
+
+    // Revoking the credential ends the sessions it could have minted
+    // (cloud-factory-cf-2lbm). Sessions are not bound to the credential that created
+    // them, so a deleted passkey cannot be told apart from any other: every session the
+    // owner holds is revoked, which is the fail-closed reading of "I lost that device".
+    const sessionsRevoked = await revokeAllSessions(env, owner);
+    const isSelf = session.ok && session.login.toLowerCase() === owner.toLowerCase();
+    const headers = new Headers();
+    if (isSelf) {
+      // The caller's own cookie is now dead; clear it so the next request is honest
+      // about being signed out instead of 401ing against a cookie it still holds.
+      const isSecure = url.protocol === "https:";
+      headers.set(
+        "set-cookie",
+        `${SESSION_COOKIE}=; Path=/; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=0`,
+      );
+    }
+    return Response.json({ ...data, ok: true, subject: owner, sessionsRevoked, signedOut: isSelf }, { headers });
   }
 
   return null;
