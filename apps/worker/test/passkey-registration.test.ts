@@ -76,18 +76,62 @@ function post(path: string, body: unknown, headers: Record<string, string> = {})
 }
 
 /** Runs register/options as the root control plane and returns the challenge + cookie. */
-async function startRegistration(env: never): Promise<{ challenge: string; cookie: string }> {
+async function startRegistration(
+  env: never,
+  body: Record<string, unknown> = {},
+): Promise<{ challenge: string; cookie: string; userVerification: string }> {
   const response = await handlePasskeyRoute(
-    post("/api/auth/passkey/register/options", {}, { "x-factory-control-key": CONTROL_KEY }),
+    post("/api/auth/passkey/register/options", body, { "x-factory-control-key": CONTROL_KEY }),
     env,
     new URL(`${ORIGIN}/api/auth/passkey/register/options`),
   );
   expect(response?.status).toBe(200);
-  const options = (await response!.json()) as { options: { challenge: string } };
+  const options = (await response!.json()) as {
+    // For a creation ceremony the level belongs in authenticatorSelection (the spec's shape);
+    // for an assertion it is top-level. Reading the wrong one is how this check first came back
+    // undefined, which is the same mistake a client would make.
+    options: { challenge: string; authenticatorSelection: { userVerification: string } };
+  };
   const setCookie = response!.headers.get("set-cookie") ?? "";
   const cookie = setCookie.split(";")[0] as string;
   expect(cookie).toContain("=");
-  return { challenge: options.options.challenge, cookie };
+  return {
+    challenge: options.options.challenge,
+    cookie,
+    userVerification: options.options.authenticatorSelection.userVerification,
+  };
+}
+
+/** Runs login/options and returns the challenge, the cookie and the level we asked for. */
+async function startLogin(
+  env: never,
+  body: Record<string, unknown> = {},
+): Promise<{ challenge: string; cookie: string; userVerification: string }> {
+  const response = await handlePasskeyRoute(
+    post("/api/auth/passkey/login/options", body),
+    env,
+    new URL(`${ORIGIN}/api/auth/passkey/login/options`),
+  );
+  expect(response?.status).toBe(200);
+  const options = (await response!.json()) as {
+    options: { challenge: string; userVerification: string };
+  };
+  const cookie = (response!.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  return { challenge: options.options.challenge, cookie, userVerification: options.options.userVerification };
+}
+
+/** Authenticator data as an assertion carries it: rpIdHash, flags, sign count. */
+async function assertionAuthenticatorData(flags: number): Promise<string> {
+  const rpIdHash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("example.com")));
+  return base64Url(new Uint8Array([...rpIdHash, flags, 0, 0, 0, 1]));
+}
+
+function assertionClientData(challenge: string): string {
+  return base64Url(
+    new TextEncoder().encode(
+      JSON.stringify({ type: "webauthn.get", challenge, origin: ORIGIN }),
+    ),
+  );
 }
 
 /** A real ES256 public key in SPKI form, base64url - what the browser's credential holds. */
@@ -353,5 +397,159 @@ describe("passkey challenges are single use", () => {
     // the flow would only fail later with a worse message.
     expect(response?.status).toBe(503);
     expect(response?.headers.get("set-cookie")).toBeNull();
+  });
+});
+
+/**
+ * User verification (cloud-factory-cf-l28o). The assertion path checked the UP flag and never
+ * looked at UV, so a challenge we handed out asking for verification could be answered by a
+ * bare touch. What makes this a server-side property rather than a client courtesy is that the
+ * requirement is written into the SIGNED challenge cookie when the challenge is issued: the
+ * assertion cannot lower it, because the assertion is the part an attacker controls.
+ */
+describe("passkey user verification", () => {
+  it("asks for the level the caller requests, and defaults to preferred", async () => {
+    const { env } = testEnv();
+    const required = await startRegistration(env, { userVerification: "required" });
+    expect(required.userVerification).toBe("required");
+    const byDefault = await startRegistration(env);
+    expect(byDefault.userVerification).toBe("preferred");
+    const bogus = await startRegistration(env, { userVerification: "yes-please" });
+    expect(bogus.userVerification).toBe("preferred");
+  });
+
+  it("refuses a registration whose authenticator never verified the user, when it asked for that", async () => {
+    const { env, saved } = testEnv();
+    const { challenge, cookie } = await startRegistration(env, { userVerification: "required" });
+    const key = await es256KeyPair();
+    // UP|AT: present, attested data - but no UV, which is what a bare touch reports.
+    const attestationObject = await buildAttestationObject({
+      rpId: "example.com",
+      credentialId: key.credentialId,
+      spki: key.spki,
+      flags: 0x41,
+    });
+
+    const response = await handlePasskeyRoute(
+      post(
+        "/api/auth/passkey/register/verify",
+        { credentialId: base64Url(key.credentialId), attestationObject, clientDataJSON: clientData({ challenge }) },
+        { cookie },
+      ),
+      env,
+      new URL(VERIFY_URL),
+    );
+
+    expect(response?.status).toBe(400);
+    expect(await response!.json()).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("user verification required but not performed"),
+    });
+    expect(saved).toEqual([]);
+  });
+
+  it("registers when the authenticator did verify the user", async () => {
+    const { env, saved } = testEnv();
+    const { challenge, cookie } = await startRegistration(env, { userVerification: "required" });
+    const key = await es256KeyPair();
+    const attestationObject = await buildAttestationObject({
+      rpId: "example.com",
+      credentialId: key.credentialId,
+      spki: key.spki,
+      flags: 0x45, // UP|UV|AT
+    });
+
+    const response = await handlePasskeyRoute(
+      post(
+        "/api/auth/passkey/register/verify",
+        { credentialId: base64Url(key.credentialId), attestationObject, clientDataJSON: clientData({ challenge }) },
+        { cookie },
+      ),
+      env,
+      new URL(VERIFY_URL),
+    );
+
+    expect(response?.status).toBe(200);
+    expect(saved).toHaveLength(1);
+  });
+
+  it("does not demand verification from a challenge that only preferred it", async () => {
+    // The other half of the rule: "preferred" must stay honest, or every security key without a
+    // PIN is locked out of the product.
+    const { env, saved } = testEnv();
+    const { challenge, cookie } = await startRegistration(env);
+    const key = await es256KeyPair();
+    const attestationObject = await buildAttestationObject({
+      rpId: "example.com",
+      credentialId: key.credentialId,
+      spki: key.spki,
+      flags: 0x41,
+    });
+
+    const response = await handlePasskeyRoute(
+      post(
+        "/api/auth/passkey/register/verify",
+        { credentialId: base64Url(key.credentialId), attestationObject, clientDataJSON: clientData({ challenge }) },
+        { cookie },
+      ),
+      env,
+      new URL(VERIFY_URL),
+    );
+
+    expect(response?.status).toBe(200);
+    expect(saved).toHaveLength(1);
+  });
+
+  it("refuses a login whose assertion never verified the user, when it asked for that", async () => {
+    const { env } = testEnv();
+    const { challenge, cookie } = await startLogin(env, { userVerification: "required" });
+    expect(cookie).toContain("=");
+
+    const response = await handlePasskeyRoute(
+      post(
+        "/api/auth/passkey/login/verify",
+        {
+          credentialId: "unknown-credential",
+          authenticatorData: await assertionAuthenticatorData(0x01), // UP only
+          clientDataJSON: assertionClientData(challenge),
+          signature: "AAAA",
+        },
+        { cookie },
+      ),
+      env,
+      new URL(`${ORIGIN}/api/auth/passkey/login/verify`),
+    );
+
+    expect(response?.status).toBe(400);
+    expect(await response!.json()).toMatchObject({
+      ok: false,
+      error: "User verification required but not performed",
+    });
+  });
+
+  it("lets a verified assertion through to the credential lookup", async () => {
+    // This case is about ORDERING: with UV set, the request must get past the flag checks and
+    // fail on the unknown credential instead. If the UV gate were placed before the UP check,
+    // or if it fired on a satisfied requirement, this would return the UV error.
+    const { env } = testEnv();
+    const { challenge, cookie } = await startLogin(env, { userVerification: "required" });
+
+    const response = await handlePasskeyRoute(
+      post(
+        "/api/auth/passkey/login/verify",
+        {
+          credentialId: "unknown-credential",
+          authenticatorData: await assertionAuthenticatorData(0x05), // UP|UV
+          clientDataJSON: assertionClientData(challenge),
+          signature: "AAAA",
+        },
+        { cookie },
+      ),
+      env,
+      new URL(`${ORIGIN}/api/auth/passkey/login/verify`),
+    );
+
+    const body = (await response!.json()) as { error?: string };
+    expect(body.error).not.toBe("User verification required but not performed");
   });
 });

@@ -96,6 +96,8 @@ export interface VerifyRegistrationInput {
   attestationObject: string;
   expectedRpId: string;
   expectedCredentialId: string;
+  /** When true, the authenticator data must also report that the user was verified (cloud-factory-cf-l28o). */
+  requireUserVerification?: boolean;
 }
 
 function base64UrlToBytes(value: string): Uint8Array {
@@ -227,6 +229,12 @@ export async function verifyRegistrationAttestation(
 
   const flags = authData[32]!;
   if ((flags & 0x01) === 0) throw new Error("user presence flag not set");
+  // UV is enforced only when the challenge was issued asking for it: "preferred" lets the
+  // authenticator skip it, and demanding it anyway would reject honest registrations from
+  // security keys that have no PIN (cloud-factory-cf-l28o).
+  if (input.requireUserVerification && (flags & 0x04) === 0) {
+    throw new Error("user verification required but not performed");
+  }
   // Bit 0x40 says attested credential data follows; without it there is no key to register.
   if ((flags & 0x40) === 0) throw new Error("no attested credential data in the registration");
 

@@ -127,6 +127,21 @@ function getCookie(headers: Headers, name: string): string | null {
 /** How long a WebAuthn challenge stays valid, in seconds. The broker row uses the same. */
 export const CHALLENGE_TTL_SECONDS = 300;
 
+/**
+ * How strongly we asked the authenticator to verify the user (cloud-factory-cf-l28o).
+ *
+ * This is bound to the challenge rather than read from the assertion, because the assertion is
+ * exactly what an attacker controls: a response that simply omits the UV flag must not be able
+ * to downgrade the requirement we set when we handed out the challenge.
+ */
+export type UserVerificationRequirement = "required" | "preferred" | "discouraged";
+
+const UV_FLAG = 0x04;
+
+function isUserVerificationRequirement(value: unknown): value is UserVerificationRequirement {
+  return value === "required" || value === "preferred" || value === "discouraged";
+}
+
 export async function mintChallengeCookie(
   signingKey: string,
   challenge: string,
@@ -134,9 +149,10 @@ export async function mintChallengeCookie(
   role: string,
   flowType: "create" | "get",
   url: URL,
+  userVerification: UserVerificationRequirement = "preferred",
 ): Promise<string> {
   const exp = Math.floor(Date.now() / 1000) + CHALLENGE_TTL_SECONDS;
-  const payload = `${challenge}.${exp}.${subject}.${role}.${flowType}`;
+  const payload = `${challenge}.${exp}.${subject}.${role}.${flowType}.${userVerification}`;
   const sig = await signHmacSha256(signingKey, payload);
   const cookieVal = `${payload}.${sig}`;
   const isSecure = url.protocol === "https:";
@@ -147,15 +163,32 @@ export async function verifyChallengeCookie(
   request: Request,
   signingKey: string,
   expectedFlow: "create" | "get",
-): Promise<{ ok: true; challenge: string; subject: string; role: string } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; challenge: string; subject: string; role: string; userVerification: UserVerificationRequirement }
+  | { ok: false; error: string }
+> {
   const cookieVal = getCookie(request.headers, WEBAUTHN_CHALLENGE_COOKIE);
   if (!cookieVal) return { ok: false, error: "Missing WebAuthn challenge cookie" };
 
   const parts = cookieVal.split(".");
-  if (parts.length !== 6) return { ok: false, error: "Malformed challenge cookie" };
-  const [challenge, expStr, subject, role, flowType, sig] = parts as [string, string, string, string, string, string];
+  if (parts.length !== 7) return { ok: false, error: "Malformed challenge cookie" };
+  const [challenge, expStr, subject, role, flowType, userVerification, sig] = parts as [
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+  ];
+  if (!isUserVerificationRequirement(userVerification)) {
+    return { ok: false, error: "Malformed challenge cookie" };
+  }
 
-  const expectedSig = await signHmacSha256(signingKey, `${challenge}.${expStr}.${subject}.${role}.${flowType}`);
+  const expectedSig = await signHmacSha256(
+    signingKey,
+    `${challenge}.${expStr}.${subject}.${role}.${flowType}.${userVerification}`,
+  );
   if (!(await sameSecret(expectedSig, sig))) {
     return { ok: false, error: "Invalid challenge cookie signature" };
   }
@@ -169,7 +202,7 @@ export async function verifyChallengeCookie(
     return { ok: false, error: "WebAuthn flow mismatch" };
   }
 
-  return { ok: true, challenge, subject, role };
+  return { ok: true, challenge, subject, role, userVerification };
 }
 
 /**
@@ -274,7 +307,14 @@ export async function handlePasskeyRoute(
     const userBytes = new TextEncoder().encode(subject);
     const userId = base64UrlEncode(userBytes);
 
-    const challengeCookie = await mintChallengeCookie(signingKey, challenge, subject, role, "create", url);
+    // The level is the caller's policy for THIS credential - an admin registering a root passkey
+    // asks for "required" - and it travels in the signed challenge cookie so the answer cannot
+    // lower it (cloud-factory-cf-l28o).
+    const registerUv: UserVerificationRequirement = isUserVerificationRequirement(body.userVerification)
+      ? body.userVerification
+      : "preferred";
+
+    const challengeCookie = await mintChallengeCookie(signingKey, challenge, subject, role, "create", url, registerUv);
     if (!(await rememberChallenge(env, challenge, subject, role, "create"))) {
       return Response.json({ ok: false, error: "Could not record the WebAuthn challenge" }, { status: 503 });
     }
@@ -298,7 +338,7 @@ export async function handlePasskeyRoute(
       attestation: "none",
       authenticatorSelection: {
         residentKey: "preferred",
-        userVerification: "preferred",
+        userVerification: registerUv,
       },
     };
 
@@ -380,6 +420,7 @@ export async function handlePasskeyRoute(
         attestationObject,
         expectedRpId: url.hostname,
         expectedCredentialId: String(credentialId),
+        requireUserVerification: verifiedCookie.userVerification === "required",
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -450,7 +491,19 @@ export async function handlePasskeyRoute(
     crypto.getRandomValues(challengeBytes);
     const challenge = base64UrlEncode(challengeBytes);
 
-    const challengeCookie = await mintChallengeCookie(signingKey, challenge, "", "", "get", url);
+    // Read the body once: cloning after a read is what locked the stream in the first draft of
+    // this change, and a locked stream fails every request that has a body at all.
+    let loginBody: Record<string, unknown> = {};
+    try {
+      loginBody = (await request.json()) as Record<string, unknown>;
+    } catch {
+      // empty body is fine - the caller does not have to express a preference
+    }
+    const loginUv: UserVerificationRequirement = isUserVerificationRequirement(loginBody.userVerification)
+      ? loginBody.userVerification
+      : "preferred";
+
+    const challengeCookie = await mintChallengeCookie(signingKey, challenge, "", "", "get", url, loginUv);
     if (!(await rememberChallenge(env, challenge, "", "", "get"))) {
       return Response.json({ ok: false, error: "Could not record the WebAuthn challenge" }, { status: 503 });
     }
@@ -459,7 +512,7 @@ export async function handlePasskeyRoute(
       challenge,
       rpId: url.hostname,
       timeout: 60000,
-      userVerification: "preferred",
+      userVerification: loginUv,
     };
 
     return Response.json({ ok: true, options, publicKey: options }, { headers: { "set-cookie": challengeCookie } });
@@ -527,6 +580,15 @@ export async function handlePasskeyRoute(
     const flags = authDataBytes[32]!;
     if ((flags & 0x01) === 0) {
       return Response.json({ ok: false, error: "User presence bit not set" }, { status: 400 });
+    }
+    // The requirement was fixed when we handed out the challenge, and it is checked here rather
+    // than trusted from the assertion (cloud-factory-cf-l28o): a response that leaves UV unset
+    // must not be able to downgrade a challenge we asked to be verified.
+    if (verifiedCookie.userVerification === "required" && (flags & UV_FLAG) === 0) {
+      return Response.json(
+        { ok: false, error: "User verification required but not performed" },
+        { status: 400 },
+      );
     }
 
     // Verify RP ID hash

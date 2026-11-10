@@ -474,7 +474,14 @@ export function initAdminDashboard(): void {
     }
     try {
       showStatus('Initiating Passkey sign-in...');
-      const optRes = await fetch('/api/auth/passkey/login/options', { method: 'POST', credentials: 'same-origin' });
+      // "required", not "preferred": this panel mints control-plane sessions, so a bare touch
+      // is not enough and the server enforces what it asked for (cloud-factory-cf-l28o).
+      const optRes = await fetch('/api/auth/passkey/login/options', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ userVerification: 'required' }),
+      });
       const optData = (await optRes.json()) as any;
       if (!optRes.ok || !optData.options) {
         showStatus(optData.error ?? 'Failed to get Passkey options', true);
@@ -531,7 +538,10 @@ export function initAdminDashboard(): void {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ role }),
+        // A passkey registered from the admin console unlocks the control plane, so it must be
+        // user-verified - the server refuses the registration if the authenticator did not
+        // verify the user (cloud-factory-cf-l28o).
+        body: JSON.stringify({ role, userVerification: 'required' }),
       });
       const optData = (await optRes.json()) as any;
       if (!optRes.ok || !optData.options) {
