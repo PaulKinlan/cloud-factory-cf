@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { handlePasskeyRoute } from "../src/auth/passkey";
+import { mintSessionToken } from "../src/auth/sessions";
 
 /**
  * A root passkey must be used with user verification.
@@ -62,7 +63,10 @@ function testEnv(credential: StoredCredential, extra: Record<string, unknown> = 
   const challenges = new Set<string>();
   const broker = {
     fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
-      const target = String(input);
+      // Some callers pass a Request rather than a URL string (`isSessionRevoked` does, so the
+      // stub has to read `.url` instead of stringifying it to "[object Request]").
+      const target =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (target === CHALLENGE_URL) {
         const body = JSON.parse(String(init?.body ?? "{}")) as { challenge?: string };
         if (typeof body.challenge === "string") challenges.add(body.challenge);
@@ -83,6 +87,9 @@ function testEnv(credential: StoredCredential, extra: Record<string, unknown> = 
         });
       }
       if (target === TOUCH_URL) return Response.json({ ok: true });
+      // A session-authenticated route also reads the revocation list on this same object
+      // (cloud-factory-cf-2lbm); it is bookkeeping, not a passkey operation.
+      if (target.startsWith(SESSION_CHECK_PREFIX)) return Response.json({ ok: true, revoked: false });
       return Response.json({ ok: false, error: "unexpected broker path" }, { status: 404 });
     },
   };
@@ -174,6 +181,8 @@ async function assertion(
     signature: base64Url(p1363ToDer(raw)),
   };
 }
+
+const SESSION_CHECK_PREFIX = "https://credential-broker.internal/sessions/revoked";
 
 const verifyUrl = new URL(`${ORIGIN}/api/auth/passkey/login/verify`);
 
@@ -292,6 +301,41 @@ describe("a root passkey requires user verification", () => {
       verifyUrl,
     );
     expect(bobAccepted?.status).toBe(200);
+  });
+
+  /**
+   * Registration has to advertise what login will require (cloud-factory-cf-trej). A
+   * platform owner registers under their own login, so the stored role is "user" while the
+   * control plane treats them as root; asking only "preferred" of them produced credentials
+   * that `login/verify` then refuses.
+   */
+  it("asks a platform owner's registration for user verification, like any other root credential", async () => {
+    const { credential } = await makeCredential("user", "alice");
+    const env = testEnv(credential, { PLATFORM_OWNERS: "alice" });
+    const cookie = `cf_session=${await mintSessionToken(SIGNING_KEY, "alice")}`;
+
+    const ownerOptions = await handlePasskeyRoute(
+      post("/api/auth/passkey/register/options", {}, { cookie }),
+      env,
+      new URL(`${ORIGIN}/api/auth/passkey/register/options`),
+    );
+    expect(ownerOptions?.status).toBe(200);
+    const ownerBody = (await ownerOptions!.json()) as {
+      options: { authenticatorSelection: { userVerification: string } };
+    };
+    expect(ownerBody.options.authenticatorSelection.userVerification).toBe("required");
+
+    // A login that is not a platform owner keeps the ordinary policy.
+    const bobCookie = `cf_session=${await mintSessionToken(SIGNING_KEY, "bob")}`;
+    const userOptions = await handlePasskeyRoute(
+      post("/api/auth/passkey/register/options", {}, { cookie: bobCookie }),
+      env,
+      new URL(`${ORIGIN}/api/auth/passkey/register/options`),
+    );
+    const userBody = (await userOptions!.json()) as {
+      options: { authenticatorSelection: { userVerification: string } };
+    };
+    expect(userBody.options.authenticatorSelection.userVerification).toBe("preferred");
   });
 
   it("asks a root registration for user verification, and a user registration for preferred", async () => {

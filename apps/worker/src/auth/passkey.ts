@@ -277,6 +277,15 @@ export async function handlePasskeyRoute(
     const userBytes = new TextEncoder().encode(subject);
     const userId = base64UrlEncode(userBytes);
 
+    // The registration policy has to agree with the login policy (cloud-factory-cf-trej): a
+    // login the control plane treats as root needs user verification at BOTH ends, so the
+    // options below ask for it and `login/verify` later requires it. Deriving this from
+    // `role` alone left platform owners — who register under their own login, so
+    // `role === "user"` — advertising `preferred`, and an authenticator that followed that
+    // policy produced a credential that could never sign in.
+    const rootCapable =
+      role === "root" || subject === "__root__" || (subject !== "" && isRootLogin(subject, env));
+
     const challengeCookie = await mintChallengeCookie(signingKey, challenge, subject, role, "create", url);
     if (!(await rememberChallenge(env, challenge, subject, role, "create"))) {
       return Response.json({ ok: false, error: "Could not record the WebAuthn challenge" }, { status: 503 });
@@ -303,8 +312,8 @@ export async function handlePasskeyRoute(
         residentKey: "preferred",
         // Decided here, from the server-derived role, not by the caller: a root passkey
         // unlocks the control plane, so it is asked for (and later required to have) user
-        // verification (cloud-factory-cf-dxy4).
-        userVerification: role === "root" ? "required" : "preferred",
+        // verification (cloud-factory-cf-dxy4, cloud-factory-cf-trej).
+        userVerification: rootCapable ? "required" : "preferred",
       },
     };
 
