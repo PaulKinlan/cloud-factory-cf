@@ -5,7 +5,12 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as http from 'node:http';
 import * as crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { runPrReview, sendWebhook, runCli, parseArgs } from '../src/index.ts';
+import { isSafeRefName } from '../src/dogfood/pr-reviewer.ts';
+
+const execFileAsync = promisify(execFile);
 import { handleReviewCommand } from '../src/commands/review.ts';
 
 test('parseArgs: parses review and webhook commands correctly', () => {
@@ -800,6 +805,85 @@ test('handleReviewCommand: a context holding the offline default never pins the 
   assert.ok(prepared, 'the handler should prepare a review');
   assert.ok(prepared!.includes('PaulKinlan/cloud-factory-cf'), `got: ${prepared}`);
   assert.ok(!prepared!.includes('local/local-repo'));
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
+// The base ref arrives in the webhook payload, so it is attacker-influenceable and must
+// never reach a shell (cloud-factory-cf-qtkd). git is invoked with an argv array and the
+// ref is validated first; these cases pin both halves.
+test('isSafeRefName: accepts real ref shapes and refuses anything else', () => {
+  for (const ref of ['main', 'release/1.0', 'feat/some-branch', 'v1.2.3', 'user/fix-issue_42']) {
+    assert.equal(isSafeRefName(ref), true, `${ref} should be accepted`);
+  }
+  for (const ref of [
+    '',
+    '-x',
+    '--upload-pack=touch /tmp/pwned',
+    'main; touch /tmp/pwned',
+    'main$(id)',
+    'main`id`',
+    'main && id',
+    'main|id',
+    'a b',
+    'origin/../escape',
+    'main..HEAD',
+    '/absolute/path',
+    'refs/heads/trailing/',
+    'refs/heads/dot.',
+    'tilde~1',
+    'caret^',
+    'colon:ref',
+    'question?',
+    'star*',
+    'bracket[0]',
+    '@{1}',
+  ]) {
+    assert.equal(isSafeRefName(ref), false, `${JSON.stringify(ref)} should be refused`);
+  }
+});
+
+test('runPrReview: a hostile base ref in the payload never reaches a shell', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-pr-review-injection-'));
+  const marker = path.join(tmpDir, 'pwned');
+  await fs.writeFile(path.join(tmpDir, 'README.md'), '# Test Project\n', 'utf8');
+  // A real commit, so the HEAD~1 fallback has something to diff.
+  await execFileAsync('git', ['init'], { cwd: tmpDir });
+  await execFileAsync('git', ['add', '.'], { cwd: tmpDir });
+  await execFileAsync(
+    'git',
+    ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-m', 'init'],
+    { cwd: tmpDir },
+  );
+
+  const eventPayload = {
+    action: 'opened',
+    number: 202,
+    pull_request: {
+      number: 202,
+      title: 'feat: hostile base',
+      user: { login: 'mallory' },
+      base: { ref: `main; touch ${marker}` },
+      head: { ref: 'feat/hostile', sha: 'deadbeefdeadbeef' },
+    },
+    repository: { full_name: 'PaulKinlan/cloud-factory-cf' },
+  };
+
+  const logs: string[] = [];
+  const result = await runPrReview({
+    cwd: tmpDir,
+    eventPayload,
+    dryRun: true,
+    io: { stdout: (msg) => logs.push(msg), stderr: (msg) => logs.push(msg) },
+  });
+
+  // The review still runs (the fallback diff is used) ...
+  assert.equal(result.prNumber, 202);
+  assert.ok(result.body.includes('Cloud Factory Dogfood Review'));
+  // ... the injected command did not execute ...
+  assert.equal(await fs.stat(marker).then(() => true, () => false), false);
+  // ... and the refusal is visible rather than silent.
+  assert.ok(logs.some((line) => line.includes('unsafe base ref')));
 
   await fs.rm(tmpDir, { recursive: true, force: true });
 });

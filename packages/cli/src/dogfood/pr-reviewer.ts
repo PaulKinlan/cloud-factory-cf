@@ -1,6 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { exec } from 'node:child_process';
+import * as childProcess from 'node:child_process';
 import { promisify } from 'node:util';
 import {
   GitHubPRReviewSink,
@@ -9,7 +9,77 @@ import {
 } from '@factory-cloud/sdk';
 import { LocalAgentRunner } from '../runner/local-runner.ts';
 
-const execAsync = promisify(exec);
+// node-env.d.ts (this package's hand-written Node typings) declares `exec` but not
+// `execFile`; adding it there would make an ambient .d.ts part of every delta's coverage
+// contract, so the shape is declared here instead. execFile is the argv form: no shell.
+const execFileAsync = promisify(
+  (
+    childProcess as unknown as {
+      execFile: (
+        file: string,
+        args: readonly string[],
+        options: {
+          cwd?: string;
+          timeout?: number;
+          maxBuffer?: number;
+          env?: Record<string, string | undefined>;
+        },
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => void;
+    }
+  ).execFile,
+);
+
+/**
+ * Is this git ref name safe to hand to git as an ARGUMENT?
+ *
+ * The base ref comes from the webhook payload, so it is attacker-influenceable. Two layers
+ * protect the command: git is invoked with an argv array (`execFile`, never a shell) so no
+ * metacharacter can be interpreted, and this check refuses anything that is not shaped like
+ * a ref - which also stops an argument-injection attempt such as `--upload-pack=...` or a
+ * path that escapes the repository (cloud-factory-cf-qtkd).
+ */
+export function isSafeRefName(ref: string): boolean {
+  if (!ref || ref.length > 255) return false;
+  if (ref.startsWith('-') || ref.startsWith('/') || ref.endsWith('/') || ref.endsWith('.')) return false;
+  if (ref.includes('..') || ref.includes('//') || ref.includes('\\')) return false;
+  if (/[\x00-\x20\x7f~^:?*[\]@{}]/.test(ref)) return false;
+  return /^[A-Za-z0-9._\/-]+$/.test(ref);
+}
+
+/**
+ * Files changed between `origin/<baseRef>` and HEAD, falling back to HEAD~1. Both attempts
+ * use argv arrays, and an unsafe ref is never passed to git at all - the fallback runs
+ * instead, with a warning, so a hostile payload degrades to a normal review instead of
+ * executing anything.
+ */
+async function changedFilesSinceBase(
+  baseRef: string,
+  cwd: string,
+  warn: (message: string) => void = (message) => console.warn(message),
+): Promise<string[]> {
+  const attempts: string[][] = [];
+  if (isSafeRefName(baseRef)) {
+    attempts.push(['diff', '--name-only', '-z', `origin/${baseRef}...HEAD`]);
+  } else {
+    warn(
+      `[pr-reviewer] ignoring unsafe base ref ${JSON.stringify(baseRef)} from the event payload; diffing HEAD~1 instead`,
+    );
+  }
+  attempts.push(['diff', '--name-only', '-z', 'HEAD~1']);
+
+  for (const args of attempts) {
+    try {
+      const { stdout } = await execFileAsync('git', args, { cwd });
+      return String(stdout)
+        .split('\0')
+        .filter((entry) => entry.length > 0);
+    } catch {
+      // Try the next candidate: an unpushed base ref or a shallow clone is normal.
+    }
+  }
+  return [];
+}
 
 export interface PrReviewOptions {
   cwd?: string;
@@ -116,7 +186,7 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
 
   if (!commitSha) {
     try {
-      const { stdout } = await execAsync('git rev-parse HEAD', { cwd });
+      const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd });
       commitSha = stdout.trim();
     } catch {
       commitSha = '0000000';
@@ -130,26 +200,22 @@ export async function runPrReview(options: PrReviewOptions): Promise<PrReviewRes
   if (changedFiles.length === 0 && !options.changedFiles) {
     let gitSucceeded = false;
     try {
-      const { stdout: toplevelOut } = await execAsync('git rev-parse --show-toplevel', { cwd });
+      const { stdout: toplevelOut } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd });
       if (toplevelOut.trim()) {
         rootDir = toplevelOut.trim();
       }
-      await execAsync('git rev-parse --is-inside-work-tree', { cwd });
+      await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd });
       gitSucceeded = true;
 
-      // Gather committed diff against base branch (or HEAD~1) running from rootDir with -z
-      const diffCmd = `git diff --name-only -z origin/${baseRef}...HEAD 2>/dev/null || git diff --name-only -z HEAD~1 2>/dev/null || true`;
-      // Also gather uncommitted/staged/untracked working tree modifications without collapsing untracked dirs with -z
-      const statusCmd = `git status --porcelain -z -uall 2>/dev/null || true`;
-
-      const [diffRes, statusRes] = await Promise.all([
-        execAsync(diffCmd, { cwd: rootDir }),
-        execAsync(statusCmd, { cwd: rootDir }),
-      ]);
-
-      const diffFiles = diffRes.stdout
-        .split('\0')
-        .filter((s) => s.length > 0);
+      // Gather committed diff against the base branch (or HEAD~1) from rootDir, with -z.
+      // Every git call is execFile with an argv array, so no ref ever reaches a shell;
+      // and the ref itself is validated first, because it comes from the webhook payload
+      // (cloud-factory-cf-qtkd).
+      const diffFiles = await changedFilesSinceBase(baseRef, rootDir, io.stderr);
+      // Uncommitted/staged/untracked working tree modifications, without collapsing
+      // untracked dirs with -z.
+      const statusRes = await execFileAsync('git', ['status', '--porcelain', '-z', '-uall'], { cwd: rootDir })
+        .catch(() => ({ stdout: '' }));
 
       const statusFiles: string[] = [];
       const parts = statusRes.stdout.split('\0');
