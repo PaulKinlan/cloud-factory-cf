@@ -4,7 +4,7 @@ import { importAppPrivateKey, mintAppJwt } from "../github-app";
 import { isRootLogin, ROOT_SESSION_LOGIN } from "../auth/tenant";
 import { handlePasskeyRoute } from "../auth/passkey";
 import { brokerInternalHeaders } from "../auth/delegation";
-import { clientIdentity, controlKeyThrottle } from "../auth/throttle";
+import { acceptPresentedControlKey, clientIdentity, controlKeyThrottle } from "../auth/throttle";
 
 export const AUTH_LOGIN_PATH = "/auth/github/login";
 export const AUTH_CALLBACK_PATH = "/auth/github/callback";
@@ -205,7 +205,10 @@ export async function handleAuth(
     }
 
     if (!presented || !(await sameSecret(controlKey, presented))) {
-      // The reservation already counted this attempt; nothing else to record.
+      // The reservation now holds an in-flight slot rather than a failure, so a rejection has
+      // to be recorded explicitly: it both counts the guess and releases the slot
+      // (cloud-factory-cf-r012).
+      await controlKeyThrottle(env, throttleIdentity, "failure");
       return Response.json({ ok: false, error: "Invalid root bootstrap password / control key" }, { status: 401 });
     }
 
@@ -991,7 +994,8 @@ export async function handleApiRepos(
 
   // Machine callers present the control key (unchanged contract).
   const presented = request.headers.get("x-factory-control-key");
-  if (presented && controlKey && (await sameSecret(controlKey, presented))) {
+  // Counted, like every other control-key comparison (cloud-factory-cf-96mr).
+  if (presented && (await acceptPresentedControlKey(request, env, presented))) {
     authorised = true;
   }
 
@@ -1098,3 +1102,4 @@ export async function handleApiRepos(
 
   return Response.json(data, { status: reposRes.status });
 }
+

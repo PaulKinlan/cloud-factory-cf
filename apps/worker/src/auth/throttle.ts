@@ -1,17 +1,15 @@
 import type { Env } from "../env";
 import { brokerInternalHeaders } from "./delegation";
+import { sameSecret } from "../secrets";
 
 /**
- * Failed-root-login throttling (cloud-factory-cf-vhns).
+ * Failed-control-key throttling (cloud-factory-cf-vhns, cloud-factory-cf-m5dk).
  *
- * `POST /api/auth/root-login` trades the deployment's control key for a root session and
- * is reachable from the internet, so a wrong guess has to cost the guesser something. The
- * counter lives here, keyed by client address, in the broker's durable storage.
- *
- * SCOPE: this throttles root-login only. The same secret is also accepted by
- * `authorizeControlPlane` and by routes that compare the header themselves; those are
- * followed up separately (see cloud-factory-cf-yu3v), and until that lands this must not
- * be described as protecting the whole control plane.
+ * The deployment's control key is a bearer secret: it is accepted as
+ * `x-factory-control-key` by root-login, by `authorizeControlPlane` (every admin, broker,
+ * audit, trace and passkey route) and by the legacy proxy. Throttling one of those routes
+ * and not the others throttles nothing, so the counter lives here, keyed by client
+ * address, and every control-key comparison goes through it.
  *
  * The counter is durable state in the default CredentialBroker - the Worker's only
  * storage - and the two operations the caller can choose between have different
@@ -31,11 +29,22 @@ import { brokerInternalHeaders } from "./delegation";
  * that follows is still what decides the request.
  */
 export const CONTROL_KEY_ATTEMPT_LIMIT = 5;
+/**
+ * The budget for machine routes, which is deliberately larger than the human one.
+ *
+ * A reservation is taken before the comparison (that is what bounds a parallel burst), so
+ * the budget also bounds how many callers can be *in flight* at once from one address. At
+ * five, a legitimate agent fleet issuing eight parallel control-plane calls was refused
+ * before any of them could compare its correct key (cloud-factory-cf-r012). Twenty is still
+ * far below any useful guessing rate for a 256-bit secret, and it is above the concurrency
+ * a real machine caller produces from one egress address.
+ */
+export const CONTROL_KEY_ATTEMPT_LIMIT_MACHINE = 20;
 export const CONTROL_KEY_WINDOW_MS = 15 * 60 * 1000;
 
 export type ThrottleOutcome = { allowed: boolean; retryAfterSec: number; failures: number };
 
-export type ThrottleOperation = "attempt" | "failure" | "success";
+export type ThrottleOperation = "check" | "attempt" | "failure" | "success";
 
 /**
  * Who is making this request, as far as a throttle is concerned. `cf-connecting-ip` is set
@@ -60,7 +69,8 @@ export async function controlKeyThrottle(
   if (!env.CREDENTIAL_BROKER) return null;
   const limit = options.limit ?? CONTROL_KEY_ATTEMPT_LIMIT;
   const windowMs = options.windowMs ?? CONTROL_KEY_WINDOW_MS;
-  const path = operation === "attempt" ? "/auth-throttle/attempt" : "/auth-throttle/record";
+  const path =
+    operation === "check" || operation === "attempt" ? `/auth-throttle/${operation}` : "/auth-throttle/record";
   try {
     const stub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
     const res = await stub.fetch(`https://credential-broker.internal${path}`, {
@@ -86,4 +96,35 @@ export async function controlKeyThrottle(
   } catch {
     return null;
   }
+}
+
+/**
+ * The one control-key comparison for routes that accept the key directly instead of going
+ * through `authorizeControlPlane` (the passkey administration routes and the repo list).
+ * Without this they are uncounted oracles: the same secret, compared at full speed, with
+ * nothing incrementing the counter the entry gate reads (cloud-factory-cf-96mr).
+ */
+export async function acceptPresentedControlKey(
+  request: Request,
+  env: Env,
+  presented: string | null,
+): Promise<boolean> {
+  const controlKey = env.BROKER_CONTROL_KEY;
+  if (!controlKey || !presented) return false;
+  const identity = clientIdentity(request);
+  // Reserve before comparing, release on a match: the slot is atomic, so concurrent
+  // guesses cannot all be compared, and only rejections spend the window
+  // (cloud-factory-cf-yu3v / cloud-factory-cf-96mr).
+  const reservation = await controlKeyThrottle(env, identity, "attempt", {
+    limit: CONTROL_KEY_ATTEMPT_LIMIT_MACHINE,
+  });
+  if (reservation && !reservation.allowed) return false;
+  if (await sameSecret(controlKey, presented)) {
+    await controlKeyThrottle(env, identity, "success");
+    return true;
+  }
+  // Close the reservation and count the rejection, so the slot is not held against the next
+  // caller and these routes stop being uncounted oracles (cloud-factory-cf-r012 / 96mr).
+  await controlKeyThrottle(env, identity, "failure");
+  return false;
 }
