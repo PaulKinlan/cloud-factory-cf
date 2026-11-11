@@ -137,8 +137,13 @@ export interface PipelineDeps {
    * (cloud-factory-cf-ec98). Exactly one is required.
    */
   controlKey?: string;
-  /** Short-lived tenant delegation, see `auth/delegation.ts`. */
-  delegation?: string;
+  /**
+   * Mints the short-lived tenant delegation for one broker request (see
+   * `auth/delegation.ts`). A function rather than a token because a delegation is
+   * single-use in the broker (cloud-factory-cf-tkfb): a run mints several capabilities,
+   * and each of those requests has to arrive with its own `jti`.
+   */
+  delegation?: () => Promise<string | undefined>;
   /** Seam for a model / `@cloudflare/computer` runtime. */
   executionFn?: AgentExecutionFn;
   /** Sinks for a run; defaults to the sinks the layout wired. */
@@ -160,11 +165,16 @@ export interface PipelineDeps {
  */
 export class BrokerCredentialBroker implements CredentialBroker {
   private readonly capabilities = new Map<string, { token: string; expiresAt: number }>();
-  private readonly credential: { controlKey?: string; delegation?: string };
+  private readonly credential: {
+    controlKey?: string;
+    delegation?: string | (() => Promise<string | undefined>);
+  };
 
   constructor(
     private readonly broker: CoordinatorStub,
-    credential: string | { controlKey?: string; delegation?: string },
+    credential:
+      | string
+      | { controlKey?: string; delegation?: string | (() => Promise<string | undefined>) },
     private readonly repository: string,
   ) {
     this.credential = typeof credential === "string" ? { controlKey: credential } : credential;
@@ -229,13 +239,21 @@ export class BrokerCredentialBroker implements CredentialBroker {
       return cached.token;
     }
 
+    // A delegation is single-use in the broker, so it is minted per request rather than
+    // carried for the whole run (cloud-factory-cf-tkfb). A mint failure is not fatal here:
+    // it leaves the header off and the broker answers 401, which is the same shape as an
+    // expired delegation.
+    const delegation =
+      typeof this.credential.delegation === "function"
+        ? await this.credential.delegation()
+        : this.credential.delegation;
     const response = await this.broker.fetch("https://credential-broker.internal/capabilities", {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...(this.credential.delegation === undefined
+        ...(delegation === undefined
           ? { "x-factory-control-key": this.credential.controlKey ?? "" }
-          : { "x-factory-delegation": this.credential.delegation }),
+          : { "x-factory-delegation": delegation }),
       },
       body: JSON.stringify({ agent: agentIdFor(this.repository), service, action }),
     });

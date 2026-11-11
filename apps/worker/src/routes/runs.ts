@@ -15,6 +15,32 @@ export const RUN_PATH = /^\/runs\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
  * own repository, and presents a short-lived delegation to the broker instead
  * of a key that names every tenant (cloud-factory-cf-ec98).
  */
+/**
+ * Hands the pipeline one delegation per broker request rather than one for the whole run
+ * (cloud-factory-cf-tkfb): a delegation's `jti` is single-use in the broker, and a run
+ * mints a capability for every (service, action) it touches, so reusing one token would be
+ * refused on the second sink.
+ *
+ * `first` is the token the caller already minted to prove the deployment can mint at all;
+ * it becomes the first one handed out instead of being thrown away.
+ */
+function delegationMinter(
+  env: Env,
+  repository: string,
+  login: string,
+  first?: string,
+): () => Promise<string | undefined> {
+  let next = first;
+  return async () => {
+    if (next !== undefined) {
+      const token = next;
+      next = undefined;
+      return token;
+    }
+    return mintDelegation(env, { repository, login });
+  };
+}
+
 export async function routeRun(
   request: Request,
   env: Env,
@@ -33,13 +59,15 @@ export async function routeRun(
 
   const repository = `${owner}/${repo}`;
   const sessionLogin = authz.principal.via === "session" ? authz.principal.login : undefined;
+  const firstDelegation =
+    sessionLogin === undefined ? undefined : await mintDelegation(env, { repository, login: sessionLogin });
+  if (sessionLogin !== undefined && firstDelegation === undefined) {
+    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
+  }
   const delegation =
     sessionLogin === undefined
       ? undefined
-      : await mintDelegation(env, { repository, login: sessionLogin });
-  if (delegation === undefined && sessionLogin !== undefined) {
-    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
-  }
+      : delegationMinter(env, repository, sessionLogin, firstDelegation);
   const body = (await request.json().catch(() => ({}))) as {
     limit?: unknown;
     reviewer?: unknown;

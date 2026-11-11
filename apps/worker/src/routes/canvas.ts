@@ -14,6 +14,32 @@ export const CANVAS_RUN_PATH = /^\/canvas\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/docu
  * Turns a stored canvas document into runs: the layout is the agent
  * configuration, so this is control-plane work and needs the control key.
  */
+/**
+ * Hands the pipeline one delegation per broker request rather than one for the whole run
+ * (cloud-factory-cf-tkfb): a delegation's `jti` is single-use in the broker, and a run
+ * mints a capability for every (service, action) it touches, so reusing one token would be
+ * refused on the second sink.
+ *
+ * `first` is the token the caller already minted to prove the deployment can mint at all;
+ * it becomes the first one handed out instead of being thrown away.
+ */
+function delegationMinter(
+  env: Env,
+  repository: string,
+  login: string,
+  first?: string,
+): () => Promise<string | undefined> {
+  let next = first;
+  return async () => {
+    if (next !== undefined) {
+      const token = next;
+      next = undefined;
+      return token;
+    }
+    return mintDelegation(env, { repository, login });
+  };
+}
+
 export async function routeCanvasRun(
   request: Request,
   env: Env,
@@ -33,13 +59,15 @@ export async function routeCanvasRun(
 
   const repository = `${owner}/${repo}`;
   const sessionLogin = authz.principal.via === "session" ? authz.principal.login : undefined;
+  const firstDelegation =
+    sessionLogin === undefined ? undefined : await mintDelegation(env, { repository, login: sessionLogin });
+  if (sessionLogin !== undefined && firstDelegation === undefined) {
+    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
+  }
   const delegation =
     sessionLogin === undefined
       ? undefined
-      : await mintDelegation(env, { repository, login: sessionLogin });
-  if (delegation === undefined && sessionLogin !== undefined) {
-    return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
-  }
+      : delegationMinter(env, repository, sessionLogin, firstDelegation);
   // The only thing this endpoint reads out of the body is an optional number, so the body is
   // read against a small bound rather than buffered whole: request.json() would hold an
   // arbitrarily large body in memory (and parse it) just to look for `limit`
