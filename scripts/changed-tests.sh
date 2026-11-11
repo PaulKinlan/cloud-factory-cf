@@ -164,7 +164,11 @@ source_is_referenced() { # <workspace> <source path>
     # Assets carry no module graph, so no import can vouch for them: the workspace
     # suite the caller is about to run is the only coverage that can exist
     # (cloud-factory-cf-2ng: a stylesheet delta was failing the gate by name).
-    *.css|*.html|*.htm|*.md|*.json|*.svg|*.txt) return 0 ;;
+    # An ambient declaration is the same shape: nothing imports `*.d.ts` by name, and
+    # the workspace typecheck that runs beside the suite is what covers it
+    # (cloud-factory-cf-xnn9: adding a declaration to packages/cli/src/node-env.d.ts
+    # failed the gate with "nothing in this workspace references").
+    *.css|*.html|*.htm|*.md|*.json|*.svg|*.txt|*.d.ts) return 0 ;;
   esac
   stem="${src#*/src/}"
   stem="${stem%.*}"
