@@ -6,12 +6,17 @@ import { handlePasskeyRoute } from "../auth/passkey";
 import { brokerInternalHeaders } from "../auth/delegation";
 import { acceptPresentedControlKey, clientIdentity, controlKeyThrottle } from "../auth/throttle";
 import {
+  clearSessionSetCookies,
+  HOST_SESSION_COOKIE,
+  plainSessionCookieAccepted,
   isSessionRevoked,
   mintSessionToken,
   revokeAllSessions,
   revokeSession,
   SESSION_COOKIE,
   SESSION_TTL_SECONDS,
+  sessionCookieNames,
+  sessionSetCookie,
   sessionSigningKey,
   verifySessionToken,
 } from "../auth/sessions";
@@ -33,6 +38,7 @@ export const API_REPOS_PATH = "/api/repos";
  * and are re-exported here, where the routes and tests have always imported them.
  */
 export { SESSION_COOKIE, SESSION_TTL_SECONDS, mintSessionToken };
+export { HOST_SESSION_COOKIE, sessionCookieName, sessionSetCookie, clearSessionSetCookies } from "../auth/sessions";
 
 async function signHmacSha256(secret: string, data: string): Promise<string> {
   const enc = new TextEncoder();
@@ -67,7 +73,39 @@ function cookieAttrs(url: URL, path: string): string {
 }
 
 function sessionCookie(token: string, url: URL): string {
-  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; ${cookieAttrs(url, "/")}; Max-Age=${SESSION_TTL_SECONDS}`;
+  return sessionSetCookie(token, url);
+}
+
+/**
+ * The session token this browser presented, host-prefixed cookie first
+ * (cloud-factory-cf-d11l).
+ *
+ * The plain `cf_session` name is still read so a session minted before the prefix
+ * existed keeps working, but it never wins: only this exact host can set a `__Host-`
+ * cookie, so a `cf_session` tossed from a sibling subdomain cannot displace a real
+ * session that is present beside it.
+ */
+function getSessionCookie(headers: Headers): { token: string; name: string } | null {
+  for (const name of [HOST_SESSION_COOKIE, SESSION_COOKIE]) {
+    const token = getCookie(headers, name);
+    if (token !== null) return { token, name };
+  }
+  return null;
+}
+
+/**
+ * Every session token this request presents, one per cookie name `readSession` accepts,
+ * most specific first (cloud-factory-cf-7by9). A sign-out has to answer for all of them:
+ * clearing and revoking only the cookie this origin mints today leaves a plain
+ * `cf_session` from before the prefix in place, still authenticated.
+ */
+function getSessionCookies(headers: Headers, url: URL): string[] {
+  const tokens: string[] = [];
+  for (const name of sessionCookieNames(url)) {
+    const token = getCookie(headers, name);
+    if (token !== null && !tokens.includes(token)) tokens.push(token);
+  }
+  return tokens;
 }
 
 /**
@@ -85,8 +123,14 @@ export async function readSession(
 ): Promise<{ ok: true; login: string } | { ok: false }> {
   const signingKey = sessionSigningKey(env);
   if (!signingKey) return { ok: false };
-  const claims = await verifySessionToken(getCookie(headers, SESSION_COOKIE), signingKey, nowMs);
+  const presented = getSessionCookie(headers);
+  if (presented === null) return { ok: false };
+  const claims = await verifySessionToken(presented.token, signingKey, nowMs);
   if (!claims) return { ok: false };
+  // The plain name is only proof of a session when the token itself predates the
+  // `__Host-` name (cloud-factory-cf-79jv): a sibling subdomain can set it whenever it
+  // likes, so a freshly minted token arriving that way authenticates nothing.
+  if (presented.name === SESSION_COOKIE && !plainSessionCookieAccepted(env, claims)) return { ok: false };
   if (await isSessionRevoked(env, claims)) return { ok: false };
   return { ok: true, login: claims.login };
 }
@@ -213,8 +257,7 @@ export async function handleAuth(
     await controlKeyThrottle(env, throttleIdentity, "success");
 
     const token = await mintSessionToken(signingKey, ROOT_SESSION_LOGIN);
-    const isSecure = url.protocol === "https:";
-    const sessionCookieHeader = `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}`;
+    const sessionCookieHeader = sessionSetCookie(token, url);
 
     return Response.json(
       { ok: true, login: ROOT_SESSION_LOGIN, isRootAdmin: true },
@@ -223,18 +266,24 @@ export async function handleAuth(
   }
 
   if (url.pathname === "/api/auth/logout" && request.method === "POST") {
-    const isSecure = url.protocol === "https:";
-    const clearSession = `${SESSION_COOKIE}=; Path=/; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=0`;
-    const headers = new Headers({ "set-cookie": clearSession });
+    // Clear every name `readSession` accepts, not just the one this origin mints today
+    // (cloud-factory-cf-7by9): a pre-upgrade `cf_session` in the same browser would
+    // otherwise survive the sign-out and authenticate the very next request.
+    const headers = new Headers();
+    for (const clearSession of clearSessionSetCookies(url)) headers.append("set-cookie", clearSession);
 
     // Clearing the cookie only un-issues the token in *this* browser. Logging out is a
-    // revocation, so the token that is being discarded is added to the deny list too
+    // revocation, so every token that is being discarded is added to the deny list too
     // (cloud-factory-cf-2lbm); with `all`, every session for the login goes.
     const signingKey = sessionSigningKey(env);
-    const claims = signingKey
-      ? await verifySessionToken(getCookie(request.headers, SESSION_COOKIE), signingKey)
-      : null;
-    if (!claims) return Response.json({ ok: true, revoked: false }, { headers });
+    const claims_list = signingKey
+      ? (
+          await Promise.all(
+            getSessionCookies(request.headers, url).map((token) => verifySessionToken(token, signingKey)),
+          )
+        ).filter((claims): claims is NonNullable<typeof claims> => claims !== null)
+      : [];
+    if (claims_list.length === 0) return Response.json({ ok: true, revoked: false }, { headers });
 
     let all = url.searchParams.get("all") === "1" || url.searchParams.get("all") === "true";
     if (!all) {
@@ -246,7 +295,15 @@ export async function handleAuth(
       }
     }
 
-    const revoked = all ? await revokeAllSessions(env, claims.login) : await revokeSession(env, claims);
+    const results: boolean[] = [];
+    const clearances = new Set<string>();
+    for (const claims of claims_list) {
+      const target = all ? `all:${claims.login}` : `sid:${claims.sid}`;
+      if (clearances.has(target)) continue;
+      clearances.add(target);
+      results.push(all ? await revokeAllSessions(env, claims.login) : await revokeSession(env, claims));
+    }
+    const revoked = results.every(Boolean);
     return Response.json({ ok: true, revoked, all }, { headers });
   }
 

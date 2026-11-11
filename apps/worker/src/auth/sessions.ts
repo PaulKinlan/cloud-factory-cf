@@ -34,6 +34,87 @@ import { brokerInternalHeaders } from "./delegation";
 export const SESSION_COOKIE = "cf_session";
 export const SESSION_TTL_SECONDS = 8 * 3600;
 
+/**
+ * The session cookie's host-prefixed name (cloud-factory-cf-d11l).
+ *
+ * The `__Host-` prefix is enforced by the browser, not by this code: a cookie that
+ * carries it must be `Secure`, must carry `Path=/`, and must not carry `Domain`. That is
+ * what a plain `cf_session` cannot promise — any sibling subdomain can set
+ * `cf_session=…; Domain=<parent>` and have the browser send it here, so a toss can
+ * displace a real session. A `__Host-` cookie can only be set by this exact host.
+ */
+export const HOST_SESSION_COOKIE = `__Host-${SESSION_COOKIE}`;
+
+/**
+ * The name a session cookie must use at this origin. A browser rejects a `__Host-` cookie
+ * that is not `Secure`, so plain-http local development keeps the unprefixed name; every
+ * https deployment (i.e. every real one) gets the prefixed name.
+ */
+export function sessionCookieName(url: URL): string {
+  return url.protocol === "https:" ? HOST_SESSION_COOKIE : SESSION_COOKIE;
+}
+
+/** The `set-cookie` value that issues `token` as this origin's session cookie. */
+export function sessionSetCookie(token: string, url: URL): string {
+  const secure = url.protocol === "https:" ? "Secure; " : "";
+  return `${sessionCookieName(url)}=${encodeURIComponent(token)}; Path=/; HttpOnly; ${secure}SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}`;
+}
+
+/** The `set-cookie` value that clears this origin's session cookie. */
+export function clearSessionSetCookie(url: URL): string {
+  const secure = url.protocol === "https:" ? "Secure; " : "";
+  return `${sessionCookieName(url)}=; Path=/; HttpOnly; ${secure}SameSite=Lax; Max-Age=0`;
+}
+
+/**
+ * Every cookie name a session can arrive in, most specific first — what
+ * `readSession` accepts, and therefore what a sign-out has to clear and revoke
+ * (cloud-factory-cf-7by9). A browser can hold both at once: the plain one from before
+ * the `__Host-` prefix existed, the prefixed one from after. Clearing only the name this
+ * origin would mint today left the other one signing the browser straight back in.
+ */
+export function sessionCookieNames(url: URL): readonly string[] {
+  return url.protocol === "https:" ? [HOST_SESSION_COOKIE, SESSION_COOKIE] : [SESSION_COOKIE];
+}
+
+/** The `set-cookie` values that clear every session cookie this origin could have set. */
+export function clearSessionSetCookies(url: URL): string[] {
+  return sessionCookieNames(url).map((name) => {
+    const secure = url.protocol === "https:" ? "Secure; " : "";
+    return `${name}=; Path=/; HttpOnly; ${secure}SameSite=Lax; Max-Age=0`;
+  });
+}
+
+/**
+ * The instant the plain `cf_session` name stops being accepted on a **production**
+ * deployment (cloud-factory-cf-79jv).
+ *
+ * A token minted before this name was replaced could only ever have been issued as
+ * `cf_session`, so those keep working for the rest of their 8-hour TTL — a bounded
+ * migration. After it, a plain cookie carries no proof of where it came from: a sibling
+ * subdomain can set `cf_session` for the parent domain at any time, including with a
+ * freshly minted token, so it must not authenticate anything.
+ */
+export const LEGACY_PLAIN_COOKIE_UNTIL_MS = Date.UTC(2026, 10, 12);
+
+/**
+ * Whether a session presented as the plain `cf_session` name may authenticate.
+ *
+ * Only a genuinely pre-upgrade token, and only on a deployment that is not explicitly
+ * local. A development or test deployment mints the plain name itself (plain http cannot
+ * hold a `__Host-` cookie), so there the name is the session and it stays accepted.
+ */
+export function plainSessionCookieAccepted(env: Env, claims: SessionClaims): boolean {
+  // Only deployments that are explicitly local may accept the plain name without a
+  // cutoff: they mint it themselves over plain http. Anything else — production, staging,
+  // a value nobody expected — is treated as a public deployment that must not.
+  const environment = String(env.ENVIRONMENT ?? "").toLowerCase();
+  if (environment === "development" || environment === "dev" || environment === "test" || environment === "local") {
+    return true;
+  }
+  return claims.iat * 1000 < LEGACY_PLAIN_COOKIE_UNTIL_MS;
+}
+
 /** The Durable Object instance that holds deployment-wide auth material. */
 const AUTH_BROKER_NAME = "default";
 const BROKER_ORIGIN = "https://credential-broker.internal";

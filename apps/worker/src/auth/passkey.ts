@@ -1,6 +1,6 @@
 import type { Env } from "../env";
 import { sameSecret } from "../secrets";
-import { mintSessionToken, SESSION_COOKIE, SESSION_TTL_SECONDS } from "../routes/auth";
+import { clearSessionSetCookies, mintSessionToken, sessionSetCookie } from "../routes/auth";
 import { readSession } from "../routes/auth";
 import { brokerInternalHeaders } from "./delegation";
 import { acceptPresentedControlKey } from "./throttle";
@@ -435,7 +435,7 @@ export async function handlePasskeyRoute(
     // Mint session cookie for the user
     const sessionToken = await mintSessionToken(signingKey, verifiedCookie.subject);
     const isSecure = url.protocol === "https:";
-    const sessionCookieHeader = `${SESSION_COOKIE}=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}`;
+    const sessionCookieHeader = sessionSetCookie(sessionToken, url);
     const clearChallengeCookie = `${WEBAUTHN_CHALLENGE_COOKIE}=; Path=/api/auth/passkey; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=0`;
 
     const headers = new Headers();
@@ -657,7 +657,7 @@ export async function handlePasskeyRoute(
     const subject = String(passkey.subject);
     const sessionToken = await mintSessionToken(signingKey, subject);
     const isSecure = url.protocol === "https:";
-    const sessionCookieHeader = `${SESSION_COOKIE}=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}`;
+    const sessionCookieHeader = sessionSetCookie(sessionToken, url);
     const clearChallengeCookie = `${WEBAUTHN_CHALLENGE_COOKIE}=; Path=/api/auth/passkey; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=0`;
 
     const headers = new Headers();
@@ -769,13 +769,10 @@ export async function handlePasskeyRoute(
     const isSelf = session.ok && session.login.toLowerCase() === owner.toLowerCase();
     const headers = new Headers();
     if (isSelf) {
-      // The caller's own cookie is now dead; clear it so the next request is honest about
-      // being signed out instead of 401ing against a cookie it still holds.
-      const isSecure = url.protocol === "https:";
-      headers.set(
-        "set-cookie",
-        `${SESSION_COOKIE}=; Path=/; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=0`,
-      );
+      // The caller's own cookies are now dead; clear every name `readSession` accepts so
+      // the next request is honest about being signed out instead of 401ing against a
+      // cookie it still holds (cloud-factory-cf-7by9).
+      for (const clearSession of clearSessionSetCookies(url)) headers.append("set-cookie", clearSession);
     }
     return Response.json({ ...data, ok: true, subject: owner, sessionsRevoked, signedOut: isSelf }, { headers });
   }
