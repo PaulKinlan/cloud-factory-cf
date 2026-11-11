@@ -598,6 +598,75 @@ describe("mountConnectGate and repo selector population (cloud-factory-cf-7gm)",
     expect(gate?.scope()).toEqual({ owner: "octodev", repo: "secret-project" });
   });
 
+  // The reviewer's repro on c306732, one level above the poller's own unit case: the
+  // finding was that `applyScope` started a read only when the key FIELD had a value
+  // (apps/web/src/onboarding.ts:207), so once the exchange cleared it, choosing another
+  // repo issued no /trace/<new-scope>/connect read at all. hqw3 fixed that; this pins the
+  // scope-change path, which the poller-level case does not reach
+  // (cloud-factory-cf-70fo).
+  it("checks a newly selected scope after the key was exchanged for a session", async () => {
+    const { doc, elements } = createMockDom();
+    const connectCalls: { url: string; headers: Record<string, string> }[] = [];
+    let exchanges = 0;
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/auth/root-login")) {
+        // The exchange that clears the field: the session cookie is the credential from
+        // here on, so the response needs no body.
+        exchanges += 1;
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.includes("/api/repos")) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            count: 2,
+            repositories: [
+              { fullName: "octodev/widget-service", owner: "octodev", name: "widget-service" },
+              { fullName: "octodev/secret-project", owner: "octodev", name: "secret-project" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.includes("/connect")) {
+        connectCalls.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
+        return connectResponse(evidence({ lastPingAt: iso(0), pings: 1 }));
+      }
+      return new Response("Not found", { status: 404 });
+    });
+
+    mountConnectGate(doc as any, {
+      base: "https://factory.example",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    // 1. Type the key: it is exchanged once and the field is cleared.
+    elements["#connect-key"].value = "test-control-key";
+    elements["#connect-owner"].value = "octodev";
+    elements["#connect-key"].dispatchEvent("input");
+    await vi.waitFor(() => {
+      expect(elements["#connect-repo-select"].hidden).toBe(false);
+    });
+    expect(exchanges).toBe(1);
+    expect(elements["#connect-key"].value).toBe("");
+
+    // 2. Pick another repo with an empty key field: the cookie authorises the new scope.
+    connectCalls.length = 0;
+    elements["#connect-repo-select"].value = "octodev/secret-project";
+    elements["#connect-repo-select"].dispatchEvent("change");
+    await vi.waitFor(() => {
+      expect(connectCalls.length).toBeGreaterThan(0);
+    });
+
+    expect(connectCalls[0]!.url).toBe("https://factory.example/trace/octodev/secret-project/connect");
+    expect(connectCalls[0]!.headers["x-factory-control-key"]).toBeUndefined();
+  });
+
   it("handles connected=1 post-OAuth bootstrap to open dialog and populate dropdown", async () => {
     const { doc, elements } = createMockDom();
     const testRepos = [
