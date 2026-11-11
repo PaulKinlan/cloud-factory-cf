@@ -27,9 +27,17 @@ import { describe, expect, it } from "vitest";
  * `data:text/html` scheme literal is refused wherever it appears, which is how an `href` or
  * `src` given a script URL is caught (cloud-factory-cf-k974).
  *
+ * A URL sink (`href`, `src`, `action`) is decided by its value, so the value is checked
+ * (cloud-factory-cf-ww20): a string or template that starts with a relative, fragment, query or
+ * `https://` prefix has its scheme fixed by construction and is allowed; so is a conditional
+ * whose branches are all allowed, and `URL.createObjectURL` (a blob of this page's own data).
+ * A value the source merely *names* - a variable, a property, an index - is refused, because
+ * nothing in the source proves which scheme it carries.
+ *
  * What it still cannot see, named here rather than implied so the claim matches the check: the
- * same value arriving through a helper in another module, a URL whose danger is not one of
- * those two schemes (this is not a URL parser), and a static string a bundler later rewrites.
+ * return value of a helper call (the helper's own file is scanned, but a `return` is not a
+ * sink), a scheme assembled from parts that never appear as one literal, and a static string a
+ * bundler later rewrites.
  */
 const SRC = new URL("../src/", import.meta.url);
 
@@ -89,6 +97,73 @@ function readLiteral(code: string, start: number): { text: string; end: number }
     i += 1;
   }
   return { text: code.slice(start + 1), end: code.length };
+}
+
+/** A URL prefix that fixes the scheme by construction. */
+const SAFE_URL_PREFIX = /^(?:\/|#|\?|\.\.?\/|https:\/\/)/;
+
+/**
+ * Whether a URL sink may be given this value (cloud-factory-cf-ww20). `start` is the index of
+ * the first character of the right-hand side; `code` is comment-stripped source.
+ *
+ * The rule is about what the source *proves*: a leading literal fixes the scheme, so anything
+ * appended to it cannot turn it into `javascript:`. A conditional proves as much as its
+ * branches do. A call is a helper this guard scans in its own file. A bare name proves nothing
+ * and is refused.
+ */
+function urlValueAllowed(code: string, start: number, depth = 0): boolean {
+  let i = start;
+  while (i < code.length && /\s/.test(code[i]!)) i += 1;
+  const quote = code[i];
+  if (quote === '"' || quote === "'" || quote === "`") {
+    const literal = readLiteral(code, i);
+    return SAFE_URL_PREFIX.test(literal.text);
+  }
+  // A conditional: allowed when every branch is. Find the top-level `?` and its `:`.
+  if (depth < 3) {
+    let nest = 0;
+    let question = -1;
+    for (let j = i; j < code.length; j += 1) {
+      const char = code[j]!;
+      if (char === '"' || char === "'" || char === "`") {
+        j = readLiteral(code, j).end - 1;
+        continue;
+      }
+      if (char === "(" || char === "[" || char === "{") nest += 1;
+      else if (char === ")" || char === "]" || char === "}") nest -= 1;
+      // `?.` is optional chaining, not a conditional, and the branches of a ternary are
+      // routinely written on their own lines - so only `;` ends the search.
+      else if (nest === 0 && char === "?" && code[j + 1] !== ".") { question = j; break; }
+      else if (nest === 0 && char === ";") return bareUrlValueAllowed(code, i);
+    }
+    if (question !== -1) {
+      let branchNest = 0;
+      for (let j = question + 1; j < code.length; j += 1) {
+        const char = code[j]!;
+        if (char === '"' || char === "'" || char === "`") {
+          j = readLiteral(code, j).end - 1;
+          continue;
+        }
+        if (char === "(" || char === "[" || char === "{") branchNest += 1;
+        else if (char === ")" || char === "]" || char === "}") branchNest -= 1;
+        else if (branchNest === 0 && char === ";") break;
+        else if (branchNest === 0 && char === ":") {
+          return (
+            urlValueAllowed(code, question + 1, depth + 1) && urlValueAllowed(code, j + 1, depth + 1)
+          );
+        }
+      }
+    }
+  }
+  return bareUrlValueAllowed(code, i);
+}
+
+/** The non-literal shapes: a call is scanned where it is defined, anything else proves nothing. */
+function bareUrlValueAllowed(code: string, start: number): boolean {
+  const rest = code.slice(start).trimStart();
+  if (rest.startsWith("URL.createObjectURL(")) return true;
+  // `name(` is a call: the helper's own file is scanned by this guard.
+  return /^[A-Za-z_$][\w$.]*\s*\(/.test(rest);
 }
 
 export function findMarkupSinks(source: string): Violation[] {
@@ -178,6 +253,22 @@ export function findMarkupSinks(source: string): Violation[] {
     }
   }
 
+  // A URL sink is decided by its value (cloud-factory-cf-ww20): `link.href = untrustedUrl` was
+  // green, and the value is exactly what the browser executes on click. The property form and
+  // the attribute form are held to the same rule.
+  for (const match of code.matchAll(/\.(href|src|action|formAction)\s*=(?!=)\s*/g)) {
+    if (!urlValueAllowed(code, match.index + match[0].length)) {
+      const evidence = code.slice(match.index, Math.min(match.index + 120, code.length)).split("\n")[0]!.trim();
+      found.push({ rule: `${match[1]} assigned a value whose scheme is not fixed`, evidence });
+    }
+  }
+  for (const match of code.matchAll(/\.setAttribute\s*\(\s*["'](href|src|action|formaction)["']\s*,/gi)) {
+    if (!urlValueAllowed(code, match.index + match[0].length)) {
+      const evidence = code.slice(match.index, Math.min(match.index + 120, code.length)).split("\n")[0]!.trim();
+      found.push({ rule: `setAttribute('${match[1]}') given a value whose scheme is not fixed`, evidence });
+    }
+  }
+
   // A URL that carries script, in whatever API it reaches the DOM. `href`/`src` are only as
   // safe as their scheme and this guard is not a URL parser, so the two schemes that execute
   // are refused outright.
@@ -219,6 +310,11 @@ describe("the markup-sink detector itself (cloud-factory-cf-x0xv)", () => {
     ["a script URL", "link.setAttribute('href', 'javascript:' + target);"],
     ["a script URL as a template", "link.href = `javascript:${target}`;"],
     ["inline style", "card.setAttribute('style', injected);"],
+    // cloud-factory-cf-ww20: the value of a URL sink, which is what the browser executes.
+    ["href named by a variable", "link.href = untrustedUrl;"],
+    ["href read off an object", "link.href = row.url;"],
+    ["src from an index", "img.src = candidates[0];"],
+    ["href given a variable through the attribute form", "link.setAttribute('href', untrustedUrl);"],
   ];
   for (const [name, snippet] of mustCatch) {
     it(`catches ${name}`, () => {
@@ -241,6 +337,14 @@ describe("the markup-sink detector itself (cloud-factory-cf-x0xv)", () => {
     "element.setAttribute('data-owner', r.owner);",
     "element.setAttribute('aria-label', `Remove ${label}`);",
     "link.setAttribute('href', '/?owner=' + encodeURIComponent(owner));",
+    // cloud-factory-cf-ww20: URL values whose scheme is fixed by construction, or whose shape
+    // the guard explicitly trusts.
+    "link.href = '/?owner=' + encodeURIComponent(owner);",
+    "(el as HTMLAnchorElement).href = `/?owner=${encodeURIComponent(row.owner)}&repo=${encodeURIComponent(row.repo)}`;",
+    "installLink.href = scope === null ? '/auth/github/login' : `/auth/github/login?owner=${encodeURIComponent(scope.owner)}`;",
+    "anchor.href = URL.createObjectURL(blob);",
+    "installLink.href = installUrl(slug);",
+    "link.href = 'https://example.com/docs';",
   ];
   it("still allows clearing a container, fixed strings and inert attributes", () => {
     for (const snippet of mustAllow) expect(findMarkupSinks(snippet)).toEqual([]);

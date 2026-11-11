@@ -819,20 +819,24 @@ export function initAdminDashboard(): void {
      * `setAttribute(value, …)` would let a caller choose a sink for itself
      * (cloud-factory-cf-k974).
      */
-    row: { owner: string; repo: string } | null,
-    /** Where a link points. A same-origin path built from encoded parts, set by name. */
-    link: string | null = null,
+    row: { owner: string; repo: string },
+    /** Whether this control is the canvas link. Its URL is built here, from encoded parts. */
+    options: { link?: boolean } = {},
   ): HTMLElement => {
     const element = document.createElement(tag);
     element.className = `button button--ghost${extraClass ? ` ${extraClass}` : ''}`;
     if (tag === 'button') (element as HTMLButtonElement).type = 'button';
     if (tag === 'a') element.style.textDecoration = 'none';
     element.textContent = label;
-    if (row !== null) {
-      element.setAttribute('data-owner', row.owner);
-      element.setAttribute('data-repo', row.repo);
+    element.setAttribute('data-owner', row.owner);
+    element.setAttribute('data-repo', row.repo);
+    if (options.link === true) {
+      // A same-origin path whose every interpolated part is encoded: the leading literal fixes
+      // the scheme, so no repository name can turn this into `javascript:`. Built here rather
+      // than passed in, so no caller hands this element a URL the source cannot vouch for
+      // (cloud-factory-cf-ww20).
+      (element as HTMLAnchorElement).href = `/?owner=${encodeURIComponent(row.owner)}&repo=${encodeURIComponent(row.repo)}`;
     }
-    if (link !== null) (element as HTMLAnchorElement).href = link;
     return element;
   };
 
@@ -874,9 +878,7 @@ export function initAdminDashboard(): void {
     actions.className = 'repo-item__actions';
 
     const row = { owner: r.owner, repo: r.name };
-    actions.appendChild(
-      repoAction('a', 'Open in Canvas →', '', null, `/?owner=${encodeURIComponent(r.owner)}&repo=${encodeURIComponent(r.name)}`),
-    );
+    actions.appendChild(repoAction('a', 'Open in Canvas →', '', row, { link: true }));
     actions.appendChild(repoAction('button', 'Ping', 'btn-repo-ping', row));
     actions.appendChild(repoAction('button', 'Overrides', 'btn-repo-override', row));
 

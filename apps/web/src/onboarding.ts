@@ -187,9 +187,13 @@ export function mountConnectGate(root: Document | HTMLElement, options: ConnectG
           : `/auth/github/login?owner=${encodeURIComponent(scope.owner)}&repo=${encodeURIComponent(scope.repo)}`;
     }
     if (installLink !== null) {
+      // Both branches are calls or same-origin paths on purpose: a URL written as
+      // `${base}/auth/...` puts a variable in front of the literal, so nothing in this file
+      // proves the scheme, and the markup guard refuses that shape (cloud-factory-cf-ww20).
+      // The login routes are served by this origin, exactly like the OAuth link above.
       installLink.href = options.appSlug
         ? installUrl(options.appSlug, scope === null ? "" : `${scope.owner}/${scope.repo}`)
-        : `${base}/auth/github/login?flow=install${scope ? `&owner=${encodeURIComponent(scope.owner)}&repo=${encodeURIComponent(scope.repo)}` : ""}`;
+        : `/auth/github/login?flow=install${scope ? `&owner=${encodeURIComponent(scope.owner)}&repo=${encodeURIComponent(scope.repo)}` : ""}`;
     }
   }
 
