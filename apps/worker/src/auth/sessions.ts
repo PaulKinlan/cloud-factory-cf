@@ -66,6 +66,25 @@ export function clearSessionSetCookie(url: URL): string {
   return `${sessionCookieName(url)}=; Path=/; HttpOnly; ${secure}SameSite=Lax; Max-Age=0`;
 }
 
+/**
+ * Every cookie name a session can arrive in, most specific first — what
+ * `readSession` accepts, and therefore what a sign-out has to clear and revoke
+ * (cloud-factory-cf-7by9). A browser can hold both at once: the plain one from before
+ * the `__Host-` prefix existed, the prefixed one from after. Clearing only the name this
+ * origin would mint today left the other one signing the browser straight back in.
+ */
+export function sessionCookieNames(url: URL): readonly string[] {
+  return url.protocol === "https:" ? [HOST_SESSION_COOKIE, SESSION_COOKIE] : [SESSION_COOKIE];
+}
+
+/** The `set-cookie` values that clear every session cookie this origin could have set. */
+export function clearSessionSetCookies(url: URL): string[] {
+  return sessionCookieNames(url).map((name) => {
+    const secure = url.protocol === "https:" ? "Secure; " : "";
+    return `${name}=; Path=/; HttpOnly; ${secure}SameSite=Lax; Max-Age=0`;
+  });
+}
+
 /** The Durable Object instance that holds deployment-wide auth material. */
 const AUTH_BROKER_NAME = "default";
 const BROKER_ORIGIN = "https://credential-broker.internal";

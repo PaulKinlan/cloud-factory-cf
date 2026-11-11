@@ -131,6 +131,30 @@ describe("revoking a session (cloud-factory-cf-2lbm)", () => {
     expect(await isAuthenticated(second)).toBe(false);
   });
 
+  it("signs out a browser that still holds the pre-__Host- cookie too (cloud-factory-cf-7by9)", async () => {
+    // readSession accepts both names, so a browser can hold both: the plain one from
+    // before the prefix existed, the prefixed one from after. Clearing and revoking only
+    // the name this origin mints today left the other one signing it straight back in.
+    const recent = await mintSessionToken(SIGNING_KEY, "dual-cookie-user");
+    const legacy = await mintSessionToken(SIGNING_KEY, "dual-cookie-user");
+
+    const res = await call("/api/auth/logout", {
+      method: "POST",
+      headers: { cookie: `__Host-cf_session=${recent}; cf_session=${legacy}` },
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { revoked: boolean }).revoked).toBe(true);
+
+    // Both cookies are cleared...
+    const cleared = res.headers.get("set-cookie") ?? "";
+    expect(cleared).toContain("__Host-cf_session=;");
+    expect(cleared).toContain("cf_session=;");
+
+    // ...and both tokens are denied, so neither can be replayed or left in the browser.
+    expect(await isAuthenticated(recent)).toBe(false);
+    expect(await isAuthenticated(legacy)).toBe(false);
+  });
+
   it("clears the cookie even when the token is already invalid, and revokes nothing", async () => {
     const res = await call("/api/auth/logout", {
       method: "POST",

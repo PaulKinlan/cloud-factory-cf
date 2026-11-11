@@ -92,10 +92,15 @@ describe("session cookie name", () => {
     expect(await sessionLogin(`${SESSION_COOKIE}=${preUpgrade}`)).toBe("legacy-owner");
   });
 
-  it("clears the prefixed cookie on logout", async () => {
+  it("clears every accepted cookie name on logout", async () => {
     const token = await mintSessionToken(SIGNING_KEY, "real-owner");
     const cleared = await logout("https://example.com", `${HOST_SESSION_COOKIE}=${token}`);
-    expect(cleared.startsWith(`${HOST_SESSION_COOKIE}=;`)).toBe(true);
+    // Both names, because readSession accepts both: clearing only the one this origin
+    // mints today would leave a pre-upgrade cookie signing the browser back in
+    // (cloud-factory-cf-7by9). The deny-list half of that is pinned with the real broker
+    // binding in test/session-revocation.test.ts.
+    expect(cleared).toContain(`${HOST_SESSION_COOKIE}=;`);
+    expect(cleared).toContain(`${SESSION_COOKIE}=;`);
     expect(cleared).toContain("Max-Age=0");
     expect(cleared).toContain("Secure");
   });

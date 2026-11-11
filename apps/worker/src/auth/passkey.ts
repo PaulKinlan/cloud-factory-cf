@@ -1,6 +1,6 @@
 import type { Env } from "../env";
 import { sameSecret } from "../secrets";
-import { clearSessionSetCookie, mintSessionToken, sessionSetCookie } from "../routes/auth";
+import { clearSessionSetCookies, mintSessionToken, sessionSetCookie } from "../routes/auth";
 import { readSession } from "../routes/auth";
 import { brokerInternalHeaders } from "./delegation";
 import { acceptPresentedControlKey } from "./throttle";
@@ -769,13 +769,10 @@ export async function handlePasskeyRoute(
     const isSelf = session.ok && session.login.toLowerCase() === owner.toLowerCase();
     const headers = new Headers();
     if (isSelf) {
-      // The caller's own cookie is now dead; clear it so the next request is honest about
-      // being signed out instead of 401ing against a cookie it still holds.
-      const isSecure = url.protocol === "https:";
-      headers.set(
-        "set-cookie",
-        clearSessionSetCookie(url),
-      );
+      // The caller's own cookies are now dead; clear every name `readSession` accepts so
+      // the next request is honest about being signed out instead of 401ing against a
+      // cookie it still holds (cloud-factory-cf-7by9).
+      for (const clearSession of clearSessionSetCookies(url)) headers.append("set-cookie", clearSession);
     }
     return Response.json({ ...data, ok: true, subject: owner, sessionsRevoked, signedOut: isSelf }, { headers });
   }
