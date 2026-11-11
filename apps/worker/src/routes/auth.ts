@@ -6,12 +6,15 @@ import { handlePasskeyRoute } from "../auth/passkey";
 import { brokerInternalHeaders } from "../auth/delegation";
 import { acceptPresentedControlKey, clientIdentity, controlKeyThrottle } from "../auth/throttle";
 import {
+  clearSessionSetCookie,
+  HOST_SESSION_COOKIE,
   isSessionRevoked,
   mintSessionToken,
   revokeAllSessions,
   revokeSession,
   SESSION_COOKIE,
   SESSION_TTL_SECONDS,
+  sessionSetCookie,
   sessionSigningKey,
   verifySessionToken,
 } from "../auth/sessions";
@@ -33,6 +36,7 @@ export const API_REPOS_PATH = "/api/repos";
  * and are re-exported here, where the routes and tests have always imported them.
  */
 export { SESSION_COOKIE, SESSION_TTL_SECONDS, mintSessionToken };
+export { HOST_SESSION_COOKIE, sessionCookieName, sessionSetCookie, clearSessionSetCookie } from "../auth/sessions";
 
 async function signHmacSha256(secret: string, data: string): Promise<string> {
   const enc = new TextEncoder();
@@ -67,7 +71,20 @@ function cookieAttrs(url: URL, path: string): string {
 }
 
 function sessionCookie(token: string, url: URL): string {
-  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; ${cookieAttrs(url, "/")}; Max-Age=${SESSION_TTL_SECONDS}`;
+  return sessionSetCookie(token, url);
+}
+
+/**
+ * The session token this browser presented, host-prefixed cookie first
+ * (cloud-factory-cf-d11l).
+ *
+ * The plain `cf_session` name is still read so a session minted before the prefix
+ * existed keeps working, but it never wins: only this exact host can set a `__Host-`
+ * cookie, so a `cf_session` tossed from a sibling subdomain cannot displace a real
+ * session that is present beside it.
+ */
+function getSessionCookie(headers: Headers): string | null {
+  return getCookie(headers, HOST_SESSION_COOKIE) ?? getCookie(headers, SESSION_COOKIE);
 }
 
 /**
@@ -85,7 +102,7 @@ export async function readSession(
 ): Promise<{ ok: true; login: string } | { ok: false }> {
   const signingKey = sessionSigningKey(env);
   if (!signingKey) return { ok: false };
-  const claims = await verifySessionToken(getCookie(headers, SESSION_COOKIE), signingKey, nowMs);
+  const claims = await verifySessionToken(getSessionCookie(headers), signingKey, nowMs);
   if (!claims) return { ok: false };
   if (await isSessionRevoked(env, claims)) return { ok: false };
   return { ok: true, login: claims.login };
@@ -213,8 +230,7 @@ export async function handleAuth(
     await controlKeyThrottle(env, throttleIdentity, "success");
 
     const token = await mintSessionToken(signingKey, ROOT_SESSION_LOGIN);
-    const isSecure = url.protocol === "https:";
-    const sessionCookieHeader = `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}`;
+    const sessionCookieHeader = sessionSetCookie(token, url);
 
     return Response.json(
       { ok: true, login: ROOT_SESSION_LOGIN, isRootAdmin: true },
@@ -223,8 +239,7 @@ export async function handleAuth(
   }
 
   if (url.pathname === "/api/auth/logout" && request.method === "POST") {
-    const isSecure = url.protocol === "https:";
-    const clearSession = `${SESSION_COOKIE}=; Path=/; HttpOnly; ${isSecure ? "Secure; " : ""}SameSite=Lax; Max-Age=0`;
+    const clearSession = clearSessionSetCookie(url);
     const headers = new Headers({ "set-cookie": clearSession });
 
     // Clearing the cookie only un-issues the token in *this* browser. Logging out is a
@@ -232,7 +247,7 @@ export async function handleAuth(
     // (cloud-factory-cf-2lbm); with `all`, every session for the login goes.
     const signingKey = sessionSigningKey(env);
     const claims = signingKey
-      ? await verifySessionToken(getCookie(request.headers, SESSION_COOKIE), signingKey)
+      ? await verifySessionToken(getSessionCookie(request.headers), signingKey)
       : null;
     if (!claims) return Response.json({ ok: true, revoked: false }, { headers });
 

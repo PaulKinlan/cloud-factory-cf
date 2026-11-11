@@ -34,6 +34,38 @@ import { brokerInternalHeaders } from "./delegation";
 export const SESSION_COOKIE = "cf_session";
 export const SESSION_TTL_SECONDS = 8 * 3600;
 
+/**
+ * The session cookie's host-prefixed name (cloud-factory-cf-d11l).
+ *
+ * The `__Host-` prefix is enforced by the browser, not by this code: a cookie that
+ * carries it must be `Secure`, must carry `Path=/`, and must not carry `Domain`. That is
+ * what a plain `cf_session` cannot promise — any sibling subdomain can set
+ * `cf_session=…; Domain=<parent>` and have the browser send it here, so a toss can
+ * displace a real session. A `__Host-` cookie can only be set by this exact host.
+ */
+export const HOST_SESSION_COOKIE = `__Host-${SESSION_COOKIE}`;
+
+/**
+ * The name a session cookie must use at this origin. A browser rejects a `__Host-` cookie
+ * that is not `Secure`, so plain-http local development keeps the unprefixed name; every
+ * https deployment (i.e. every real one) gets the prefixed name.
+ */
+export function sessionCookieName(url: URL): string {
+  return url.protocol === "https:" ? HOST_SESSION_COOKIE : SESSION_COOKIE;
+}
+
+/** The `set-cookie` value that issues `token` as this origin's session cookie. */
+export function sessionSetCookie(token: string, url: URL): string {
+  const secure = url.protocol === "https:" ? "Secure; " : "";
+  return `${sessionCookieName(url)}=${encodeURIComponent(token)}; Path=/; HttpOnly; ${secure}SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}`;
+}
+
+/** The `set-cookie` value that clears this origin's session cookie. */
+export function clearSessionSetCookie(url: URL): string {
+  const secure = url.protocol === "https:" ? "Secure; " : "";
+  return `${sessionCookieName(url)}=; Path=/; HttpOnly; ${secure}SameSite=Lax; Max-Age=0`;
+}
+
 /** The Durable Object instance that holds deployment-wide auth material. */
 const AUTH_BROKER_NAME = "default";
 const BROKER_ORIGIN = "https://credential-broker.internal";
