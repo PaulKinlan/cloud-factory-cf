@@ -13,9 +13,27 @@
  */
 declare module "node:fs" {
   export function readFileSync(path: URL | string, encoding: "utf8" | "utf-8"): string;
+  /**
+   * Directory listing, for the guard that scans every file in src/ rather than a hand-kept
+   * list (cloud-factory-cf-x0xv). The defaults match Node's own: returns names only.
+   */
+  export function readdirSync(path: URL | string, options?: { withFileTypes?: false }): string[];
+  /**
+   * Recursive form, which returns subdirectory paths too (`sub/file.ts`). The markup-sink
+   * guard needs it so a future `src/<subdir>/` is scanned by default
+   * (cloud-factory-cf-149p); it builds its own throwaway tree to prove that.
+   */
+  export function readdirSync(path: URL | string, options: { recursive?: boolean }): string[];
   export function copyFileSync(source: string, destination: string): void;
   export function existsSync(path: string): boolean;
   export function mkdirSync(path: string, options?: { recursive?: boolean }): string | undefined;
+  export function mkdtempSync(prefix: string): string;
+  export function writeFileSync(path: string, data: string, encoding?: "utf8" | "utf-8"): void;
+  export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
+}
+
+declare module "node:os" {
+  export function tmpdir(): string;
 }
 
 declare module "node:path" {

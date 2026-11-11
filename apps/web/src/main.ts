@@ -674,12 +674,14 @@ required<HTMLButtonElement>("export-copy").addEventListener("click", async () =>
 
 required<HTMLButtonElement>("export-download").addEventListener("click", () => {
   const blob = new Blob([exportJson.textContent ?? "{}"], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
-  anchor.href = url;
+  // The blob URL is written straight into the sink: `anchor.href = someVariable` is exactly the
+  // shape the markup guard refuses, because a name does not show its scheme
+  // (cloud-factory-cf-ww20). `blob:` is this page's own data.
+  anchor.href = URL.createObjectURL(blob);
   anchor.download = "cloud-factory-agents.json";
   anchor.click();
-  URL.revokeObjectURL(url);
+  URL.revokeObjectURL(anchor.href);
   announce("Configuration downloaded");
 });
 
