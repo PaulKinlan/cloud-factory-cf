@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { handleAuth, mintSessionToken } from "../src/routes/auth";
-import { HOST_SESSION_COOKIE, SESSION_COOKIE } from "../src/auth/sessions";
+import { handleAuth, mintSessionToken, readSession } from "../src/routes/auth";
+import { HOST_SESSION_COOKIE, LEGACY_PLAIN_COOKIE_UNTIL_MS, SESSION_COOKIE } from "../src/auth/sessions";
 
 /**
  * The session cookie's name and attributes (cloud-factory-cf-d11l).
@@ -19,8 +19,22 @@ import { HOST_SESSION_COOKIE, SESSION_COOKIE } from "../src/auth/sessions";
 const SIGNING_KEY = "test-session-signing-key";
 const CONTROL_KEY = "test-control-key";
 
-function testEnv(): never {
-  return { BROKER_SIGNING_KEY: SIGNING_KEY, BROKER_CONTROL_KEY: CONTROL_KEY } as never;
+function testEnv(overrides: Record<string, unknown> = {}): never {
+  return { BROKER_SIGNING_KEY: SIGNING_KEY, BROKER_CONTROL_KEY: CONTROL_KEY, ENVIRONMENT: "development", ...overrides } as never;
+}
+
+/**
+ * The login a cookie authenticates as at `nowMs`, or null when it is refused. Goes through
+ * `readSession` rather than the route so a case can place the clock on either side of the
+ * migration cutoff; the route always uses the real clock.
+ */
+async function sessionLoginAt(
+  env: never,
+  cookie: string,
+  nowMs: number = Date.now(),
+): Promise<unknown> {
+  const session = await readSession(new Headers({ cookie }), env, nowMs);
+  return session.ok ? session.login : null;
 }
 
 async function rootLogin(origin: string): Promise<string> {
@@ -90,6 +104,31 @@ describe("session cookie name", () => {
   it("still reads a session minted before the prefix existed", async () => {
     const preUpgrade = await mintSessionToken(SIGNING_KEY, "legacy-owner");
     expect(await sessionLogin(`${SESSION_COOKIE}=${preUpgrade}`)).toBe("legacy-owner");
+  });
+
+  it("stops accepting a freshly minted plain cookie on a production deployment (cloud-factory-cf-79jv)", async () => {
+    // The exploit: a sibling subdomain sets cf_session for the parent domain, carrying a
+    // token the attacker obtained legitimately at this origin. Nothing about that cookie
+    // proves where it came from, so after the migration cutoff it must authenticate
+    // nothing — while a token minted BEFORE the cutoff stays valid for its TTL.
+    const afterCutoff = LEGACY_PLAIN_COOKIE_UNTIL_MS + 60 * 60 * 1000;
+    const beforeCutoff = LEGACY_PLAIN_COOKIE_UNTIL_MS - 60 * 60 * 1000;
+    const production = testEnv({ ENVIRONMENT: "production" });
+
+    const fresh = await mintSessionToken(SIGNING_KEY, "tossed-owner", afterCutoff);
+    expect(await sessionLoginAt(production, `${SESSION_COOKIE}=${fresh}`, afterCutoff)).toBeNull();
+    // ...and the same token is fine under the host-prefixed name, which only this host can
+    // set: the refusal is about the name, not about the token.
+    expect(await sessionLoginAt(production, `${HOST_SESSION_COOKIE}=${fresh}`, afterCutoff)).toBe("tossed-owner");
+
+    const preUpgrade = await mintSessionToken(SIGNING_KEY, "legacy-owner", beforeCutoff);
+    expect(await sessionLoginAt(production, `${SESSION_COOKIE}=${preUpgrade}`, beforeCutoff)).toBe(
+      "legacy-owner",
+    );
+
+    // A development deployment mints the plain name itself (plain http cannot hold a
+    // __Host- cookie), so there it is the session whatever its age.
+    expect(await sessionLoginAt(testEnv(), `${SESSION_COOKIE}=${fresh}`, afterCutoff)).toBe("tossed-owner");
   });
 
   it("clears every accepted cookie name on logout", async () => {

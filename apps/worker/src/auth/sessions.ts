@@ -85,6 +85,36 @@ export function clearSessionSetCookies(url: URL): string[] {
   });
 }
 
+/**
+ * The instant the plain `cf_session` name stops being accepted on a **production**
+ * deployment (cloud-factory-cf-79jv).
+ *
+ * A token minted before this name was replaced could only ever have been issued as
+ * `cf_session`, so those keep working for the rest of their 8-hour TTL — a bounded
+ * migration. After it, a plain cookie carries no proof of where it came from: a sibling
+ * subdomain can set `cf_session` for the parent domain at any time, including with a
+ * freshly minted token, so it must not authenticate anything.
+ */
+export const LEGACY_PLAIN_COOKIE_UNTIL_MS = Date.UTC(2026, 10, 12);
+
+/**
+ * Whether a session presented as the plain `cf_session` name may authenticate.
+ *
+ * Only a genuinely pre-upgrade token, and only on a deployment that is not explicitly
+ * local. A development or test deployment mints the plain name itself (plain http cannot
+ * hold a `__Host-` cookie), so there the name is the session and it stays accepted.
+ */
+export function plainSessionCookieAccepted(env: Env, claims: SessionClaims): boolean {
+  // Only deployments that are explicitly local may accept the plain name without a
+  // cutoff: they mint it themselves over plain http. Anything else — production, staging,
+  // a value nobody expected — is treated as a public deployment that must not.
+  const environment = String(env.ENVIRONMENT ?? "").toLowerCase();
+  if (environment === "development" || environment === "dev" || environment === "test" || environment === "local") {
+    return true;
+  }
+  return claims.iat * 1000 < LEGACY_PLAIN_COOKIE_UNTIL_MS;
+}
+
 /** The Durable Object instance that holds deployment-wide auth material. */
 const AUTH_BROKER_NAME = "default";
 const BROKER_ORIGIN = "https://credential-broker.internal";

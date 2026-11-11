@@ -8,6 +8,7 @@ import { acceptPresentedControlKey, clientIdentity, controlKeyThrottle } from ".
 import {
   clearSessionSetCookies,
   HOST_SESSION_COOKIE,
+  plainSessionCookieAccepted,
   isSessionRevoked,
   mintSessionToken,
   revokeAllSessions,
@@ -84,8 +85,12 @@ function sessionCookie(token: string, url: URL): string {
  * cookie, so a `cf_session` tossed from a sibling subdomain cannot displace a real
  * session that is present beside it.
  */
-function getSessionCookie(headers: Headers): string | null {
-  return getCookie(headers, HOST_SESSION_COOKIE) ?? getCookie(headers, SESSION_COOKIE);
+function getSessionCookie(headers: Headers): { token: string; name: string } | null {
+  for (const name of [HOST_SESSION_COOKIE, SESSION_COOKIE]) {
+    const token = getCookie(headers, name);
+    if (token !== null) return { token, name };
+  }
+  return null;
 }
 
 /**
@@ -118,8 +123,14 @@ export async function readSession(
 ): Promise<{ ok: true; login: string } | { ok: false }> {
   const signingKey = sessionSigningKey(env);
   if (!signingKey) return { ok: false };
-  const claims = await verifySessionToken(getSessionCookie(headers), signingKey, nowMs);
+  const presented = getSessionCookie(headers);
+  if (presented === null) return { ok: false };
+  const claims = await verifySessionToken(presented.token, signingKey, nowMs);
   if (!claims) return { ok: false };
+  // The plain name is only proof of a session when the token itself predates the
+  // `__Host-` name (cloud-factory-cf-79jv): a sibling subdomain can set it whenever it
+  // likes, so a freshly minted token arriving that way authenticates nothing.
+  if (presented.name === SESSION_COOKIE && !plainSessionCookieAccepted(env, claims)) return { ok: false };
   if (await isSessionRevoked(env, claims)) return { ok: false };
   return { ok: true, login: claims.login };
 }
