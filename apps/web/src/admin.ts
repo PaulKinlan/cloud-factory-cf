@@ -813,14 +813,26 @@ export function initAdminDashboard(): void {
     tag: 'a' | 'button',
     label: string,
     extraClass: string,
-    attributes: Record<string, string>,
+    /**
+     * The row a button acts on, written to the element by name. Data goes through
+     * `setAttribute` with a literal inert name, never through a name the caller supplies:
+     * `setAttribute(value, …)` would let a caller choose a sink for itself
+     * (cloud-factory-cf-k974).
+     */
+    row: { owner: string; repo: string } | null,
+    /** Where a link points. A same-origin path built from encoded parts, set by name. */
+    link: string | null = null,
   ): HTMLElement => {
     const element = document.createElement(tag);
     element.className = `button button--ghost${extraClass ? ` ${extraClass}` : ''}`;
     if (tag === 'button') (element as HTMLButtonElement).type = 'button';
     if (tag === 'a') element.style.textDecoration = 'none';
     element.textContent = label;
-    for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
+    if (row !== null) {
+      element.setAttribute('data-owner', row.owner);
+      element.setAttribute('data-repo', row.repo);
+    }
+    if (link !== null) (element as HTMLAnchorElement).href = link;
     return element;
   };
 
@@ -861,9 +873,12 @@ export function initAdminDashboard(): void {
     const actions = document.createElement('div');
     actions.className = 'repo-item__actions';
 
-    actions.appendChild(repoAction('a', 'Open in Canvas →', '', { href: `/?owner=${encodeURIComponent(r.owner)}&repo=${encodeURIComponent(r.name)}` }));
-    actions.appendChild(repoAction('button', 'Ping', 'btn-repo-ping', { 'data-owner': r.owner, 'data-repo': r.name }));
-    actions.appendChild(repoAction('button', 'Overrides', 'btn-repo-override', { 'data-owner': r.owner, 'data-repo': r.name }));
+    const row = { owner: r.owner, repo: r.name };
+    actions.appendChild(
+      repoAction('a', 'Open in Canvas →', '', null, `/?owner=${encodeURIComponent(r.owner)}&repo=${encodeURIComponent(r.name)}`),
+    );
+    actions.appendChild(repoAction('button', 'Ping', 'btn-repo-ping', row));
+    actions.appendChild(repoAction('button', 'Overrides', 'btn-repo-override', row));
 
     item.appendChild(meta);
     item.appendChild(actions);

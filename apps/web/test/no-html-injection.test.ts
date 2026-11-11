@@ -1,4 +1,6 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -18,15 +20,50 @@ import { describe, expect, it } from "vitest";
  *   el.innerHTML = rows.map(f).join('')     refused: computed, whatever it computes
  *   el.insertAdjacentHTML('beforeend', s)   refused: always a sink when given a value
  *
- * i.e. a markup sink may be cleared or given a constant string literal and nothing else. What
- * it cannot see: the same value reaching the DOM through a helper in another module,
- * `srcdoc`, `DOMParser`, `createContextualFragment`, and a static string that a bundler later
- * rewrites. Those are named here rather than implied, so the claim matches the check.
+ * i.e. a markup sink may be cleared or given a constant string literal and nothing else. The
+ * attribute form is covered too: `setAttribute` is refused when its first argument is not a
+ * literal (a name the source does not fix cannot be vouched for) or names a sink - `srcdoc`,
+ * `on*`, `srcset`, `formaction`, `action`, `xlink:href`, `style` - and a `javascript:` or
+ * `data:text/html` scheme literal is refused wherever it appears, which is how an `href` or
+ * `src` given a script URL is caught (cloud-factory-cf-k974).
+ *
+ * What it still cannot see, named here rather than implied so the claim matches the check: the
+ * same value arriving through a helper in another module, a URL whose danger is not one of
+ * those two schemes (this is not a URL parser), and a static string a bundler later rewrites.
  */
 const SRC = new URL("../src/", import.meta.url);
 
+/**
+ * Removes comments without touching the contents of string and template literals
+ * (cloud-factory-cf-149p). Stripping with a regex over raw source let a literal containing
+ * `/*` swallow every sink up to the next `*\/` - a silent false green, which is the one thing a
+ * guard may not do.
+ */
 function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    const char = source[i]!;
+    if (char === '"' || char === "'" || char === "`") {
+      const literal = readLiteral(source, i);
+      out += source.slice(i, literal.end);
+      i = literal.end;
+      continue;
+    }
+    if (char === "/" && source[i + 1] === "/") {
+      const end = source.indexOf("\n", i);
+      i = end === -1 ? source.length : end;
+      continue;
+    }
+    if (char === "/" && source[i + 1] === "*") {
+      const end = source.indexOf("*/", i + 2);
+      i = end === -1 ? source.length : end + 2;
+      continue;
+    }
+    out += char;
+    i += 1;
+  }
+  return out;
 }
 
 export interface Violation {
@@ -61,7 +98,10 @@ export function findMarkupSinks(source: string): Violation[] {
   // Walk each assignment by hand rather than with one regex: the right-hand side may be a
   // literal containing ';' or '=' (an inline style, for instance), and truncating it at the
   // first semicolon is how the first version produced a false positive on a static notice.
-  const assignment = /\.(innerHTML|outerHTML)\s*(\+?=)/g;
+  // `=` only when it is not a comparison (cloud-factory-cf-czx0): `==`, `===`, `!=` and
+  // `!==` read the element, they do not write it, and refusing a read made the guard look
+  // arbitrary to whoever hit it.
+  const assignment = /\.(innerHTML|outerHTML)\s*(\+?=)(?!=)/g;
   let match: RegExpExecArray | null;
   while ((match = assignment.exec(code)) !== null) {
     const sink = match[1]!;
@@ -115,12 +155,50 @@ export function findMarkupSinks(source: string): Violation[] {
       found.push({ rule: name, evidence: hit[0].trim() });
     }
   }
+
+  // The attribute form of the same problem (cloud-factory-cf-k974). `setAttribute` is where
+  // the o1os fix put data, so it has to be held to the same rule as the markup sinks: the
+  // name may not be dynamic, and it may not be one of the names that turn a value into
+  // behaviour. `href`/`src` are covered by the scheme rule below, because for them the value
+  // decides and the name does not.
+  const sinkAttributes = new Set(["srcdoc", "srcset", "formaction", "action", "xlink:href", "style"]);
+  for (const match of code.matchAll(/\.setAttribute\s*\(/g)) {
+    let i = match.index + match[0].length;
+    while (i < code.length && /\s/.test(code[i]!)) i += 1;
+    const quote = code[i];
+    const evidence = code.slice(match.index, Math.min(match.index + 120, code.length)).split("\n")[0]!.trim();
+    if (quote !== '"' && quote !== "'" && quote !== "`") {
+      found.push({ rule: "setAttribute named by a value", evidence });
+      continue;
+    }
+    const literal = readLiteral(code, i);
+    const name = literal.text.toLowerCase();
+    if (sinkAttributes.has(name) || name.startsWith("on")) {
+      found.push({ rule: `setAttribute('${literal.text}')`, evidence });
+    }
+  }
+
+  // A URL that carries script, in whatever API it reaches the DOM. `href`/`src` are only as
+  // safe as their scheme and this guard is not a URL parser, so the two schemes that execute
+  // are refused outright.
+  for (const hit of code.matchAll(/["'`](?:\s*javascript|\s*data:text\/html)\s*:/gi)) {
+    found.push({ rule: "script URL scheme", evidence: hit[0].trim() });
+  }
   return found;
 }
 
-const files = readdirSync(SRC)
-  .filter((name: string) => name.endsWith(".ts"))
-  .sort();
+/**
+ * Every `.ts` file under `src/`, relative to it, sorted (cloud-factory-cf-149p). Recursive: a
+ * future `src/<subdir>/` is covered by default, which is what the standalone claim below says
+ * and what a non-recursive listing quietly did not do.
+ */
+export function sourceFiles(dir: URL): string[] {
+  return readdirSync(dir, { recursive: true })
+    .filter((name: string) => name.endsWith(".ts"))
+    .sort();
+}
+
+const files = sourceFiles(SRC);
 
 describe("the markup-sink detector itself (cloud-factory-cf-x0xv)", () => {
   // The reviewer's mutations: each is a real way a value reaches markup, and the first version
@@ -133,6 +211,14 @@ describe("the markup-sink detector itself (cloud-factory-cf-x0xv)", () => {
     ["adjacent html", "el.insertAdjacentHTML('beforeend', row);"],
     ["srcdoc", "frame.srcdoc = html;"],
     ["contextual fragment", "range.createContextualFragment(html);"],
+    // cloud-factory-cf-k974: the attribute form of the same sink, and the name a value can
+    // supply for itself.
+    ["srcdoc through the attribute form", "frame.setAttribute('srcdoc', html);"],
+    ["an event handler attribute", "img.setAttribute('onerror', code);"],
+    ["an attribute named by a value", "element.setAttribute(name, value);"],
+    ["a script URL", "link.setAttribute('href', 'javascript:' + target);"],
+    ["a script URL as a template", "link.href = `javascript:${target}`;"],
+    ["inline style", "card.setAttribute('style', injected);"],
   ];
   for (const [name, snippet] of mustCatch) {
     it(`catches ${name}`, () => {
@@ -144,9 +230,44 @@ describe("the markup-sink detector itself (cloud-factory-cf-x0xv)", () => {
     "el.innerHTML = '';",
     "tbody.innerHTML = '<tr><td colspan=\"3\">Nothing here</td></tr>';",
     "container.textContent = label;",
+    // cloud-factory-cf-czx0: reading a sink is not writing it, whichever way the comparison is
+    // spelled. The guard used to refuse `===` and allow `!==`, which made the failure look
+    // arbitrary and invited the comparison to be written the other way round.
+    "if (el.innerHTML === '<b>x</b>') { go(); }",
+    "const same = el.innerHTML == '';",
+    "const other = el.innerHTML !== '';",
+    // cloud-factory-cf-k974: an inert attribute, written by name, with a value. This is the
+    // shape the o1os fix uses on the admin surface.
+    "element.setAttribute('data-owner', r.owner);",
+    "element.setAttribute('aria-label', `Remove ${label}`);",
+    "link.setAttribute('href', '/?owner=' + encodeURIComponent(owner));",
   ];
-  it("still allows clearing a container or writing a fixed string", () => {
+  it("still allows clearing a container, fixed strings and inert attributes", () => {
     for (const snippet of mustAllow) expect(findMarkupSinks(snippet)).toEqual([]);
+  });
+
+  // cloud-factory-cf-149p: a literal containing a comment opener used to delete every sink
+  // after it, so the guard reported green on markup it had never looked at.
+  it("does not treat a comment opener inside a string literal as a comment", () => {
+    const source = 'const open = "/*";\nel.innerHTML = `<b>${x}</b>`;\nconst close = "*/";';
+    expect(findMarkupSinks(source).map((v) => v.rule)).toContain(
+      "innerHTML assigned a template with an interpolation",
+    );
+  });
+
+  // ...and the scan is recursive, so a new src/<subdir>/ is covered without anyone
+  // remembering to widen it.
+  it("walks subdirectories, so a nested module is scanned too", () => {
+    const root = mkdtempSync(join(tmpdir(), "web-guard-"));
+    try {
+      mkdirSync(join(root, "nested"), { recursive: true });
+      writeFileSync(join(root, "top.ts"), "export const a = 1;\n");
+      writeFileSync(join(root, "nested", "deep.ts"), "export const b = 2;\n");
+      writeFileSync(join(root, "nested", "styles.css"), "body { margin: 0; }\n");
+      expect(sourceFiles(new URL(`file://${root}/`))).toEqual(["nested/deep.ts", "top.ts"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
