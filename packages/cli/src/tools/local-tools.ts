@@ -7,6 +7,12 @@ import { scanWorkspaceSockets, type SocketScanOptions } from './socket-scan.ts';
 
 const execAsync = promisify(exec);
 
+// node-env.d.ts (this package's hand-written Node typings) declares `realpath` but not
+// `readlink`; adding it there would make an ambient .d.ts part of every delta's coverage
+// contract, so the shape is declared here instead (same reason as execFileAsync in
+// dogfood/pr-reviewer.ts).
+const readlink = (fs as unknown as { readlink(path: string): Promise<string> }).readlink;
+
 export interface LocalToolsOptions {
   cwd?: string;
   maxFileSize?: number;
@@ -25,41 +31,86 @@ export function createLocalTools(options: LocalToolsOptions = {}): readonly Tool
   const maxFileSize = options.maxFileSize ?? 1024 * 1024; // 1 MB
   const commandTimeoutMs = options.commandTimeoutMs ?? 30000;
 
+  function isEnoent(err: unknown): boolean {
+    return (err as any)?.code === 'ENOENT' || String(err).includes('ENOENT');
+  }
+
+  function assertInsideRoot(candidate: string, filePath: string, realRoot: string, viaSymlink: boolean): void {
+    if (candidate !== realRoot && !candidate.startsWith(realRoot + path.sep)) {
+      throw new Error(
+        viaSymlink
+          ? `Path traversal denied: '${filePath}' resolves outside workspace root via symlink`
+          : `Path traversal denied: '${filePath}' is outside workspace root`,
+      );
+    }
+  }
+
+  /**
+   * Canonicalize a path whose tail does not exist yet (a write target).
+   *
+   * Returning the un-canonicalized path here let a *dangling* symlink escape the
+   * workspace: `realpath` reports ENOENT for a link whose target is missing, and
+   * writing through it creates the file wherever the link points, outside the root
+   * (cloud-factory-cf-wsxj). So resolve the deepest existing ancestor, then follow
+   * any symlink found in the not-yet-existing suffix (bounded) and re-check
+   * containment against the root after each hop.
+   */
+  async function resolveMissingPath(resolved: string, filePath: string, realRoot: string): Promise<string> {
+    const maxSymlinkHops = 32;
+    let current = resolved;
+
+    for (let hop = 0; hop <= maxSymlinkHops; hop += 1) {
+      // Deepest existing ancestor, plus the components below it that do not exist.
+      const missing: string[] = [];
+      let realAncestor: string | undefined;
+      let ancestor = current;
+      for (;;) {
+        try {
+          realAncestor = await fs.realpath(ancestor);
+          break;
+        } catch (err: any) {
+          if (!isEnoent(err)) throw err;
+          const parent = path.dirname(ancestor);
+          if (parent === ancestor) throw err;
+          missing.unshift(path.basename(ancestor));
+          ancestor = parent;
+        }
+      }
+      assertInsideRoot(realAncestor, filePath, realRoot, true);
+      const firstMissingName = missing[0];
+      if (firstMissingName === undefined) return realAncestor;
+
+      // Nothing below the first missing component can exist, but that component can
+      // itself be a symlink whose target is missing - realpath called that ENOENT.
+      const firstMissing = path.join(realAncestor, firstMissingName);
+      let linkTarget: string | undefined;
+      try {
+        linkTarget = await readlink(firstMissing);
+      } catch (err: any) {
+        if (!isEnoent(err)) throw err;
+      }
+      if (linkTarget === undefined) return path.join(realAncestor, ...missing);
+
+      // Follow it and re-run the whole analysis, so the target is canonically
+      // checked (relative to the link's own directory) like any other path.
+      current = path.resolve(path.dirname(firstMissing), linkTarget, ...missing.slice(1));
+    }
+
+    throw new Error(`Path traversal denied: '${filePath}' exceeds the symlink hop limit`);
+  }
+
   async function resolveSafePath(filePath: string, allowMissing = false): Promise<string> {
     const realRoot = await fs.realpath(rootDir).catch(() => rootDir);
     const resolved = path.resolve(realRoot, filePath);
 
-    if (resolved !== realRoot && !resolved.startsWith(realRoot + path.sep)) {
-      throw new Error(`Path traversal denied: '${filePath}' is outside workspace root`);
-    }
+    assertInsideRoot(resolved, filePath, realRoot, false);
 
     try {
       const realPath = await fs.realpath(resolved);
-      if (realPath !== realRoot && !realPath.startsWith(realRoot + path.sep)) {
-        throw new Error(`Path traversal denied: '${filePath}' resolves outside workspace root via symlink`);
-      }
+      assertInsideRoot(realPath, filePath, realRoot, true);
       return realPath;
     } catch (err: any) {
-      if (allowMissing && (err?.code === 'ENOENT' || String(err).includes('ENOENT'))) {
-        // Walk up to find the closest existing ancestor directory
-        let current = path.dirname(resolved);
-        while (current !== realRoot && current.startsWith(realRoot + path.sep)) {
-          try {
-            const realCurrent = await fs.realpath(current);
-            if (realCurrent !== realRoot && !realCurrent.startsWith(realRoot + path.sep)) {
-              throw new Error(`Path traversal denied: '${filePath}' resolves outside workspace root via symlink`);
-            }
-            return resolved;
-          } catch (e: any) {
-            if (e?.code === 'ENOENT' || String(e).includes('ENOENT')) {
-              current = path.dirname(current);
-              continue;
-            }
-            throw e;
-          }
-        }
-        return resolved;
-      }
+      if (allowMissing && isEnoent(err)) return resolveMissingPath(resolved, filePath, realRoot);
       throw err;
     }
   }

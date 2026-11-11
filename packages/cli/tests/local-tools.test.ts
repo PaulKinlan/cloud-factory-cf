@@ -561,3 +561,56 @@ test('createLocalTools: network-none masks a socket whose name ends in a space (
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('createLocalTools: write_file refuses a dangling symlink that escapes the workspace root', async () => {
+  // A symlink whose target does not exist yet is reported as ENOENT by realpath,
+  // so the "missing file" path must not return the un-canonicalized path: writing
+  // through the link would create the file wherever it points
+  // (cloud-factory-cf-wsxj).
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-dangling-'));
+  const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cli-dangling-out-'));
+  try {
+    const tools = createLocalTools({ cwd: tmpDir });
+    const writeTool = tools.find((t) => t.name === 'write_file')!;
+
+    // Dangling symlink at the leaf, target outside the root.
+    await fs.symlink(path.join(outsideDir, 'leaf.txt'), path.join(tmpDir, 'leaf-escape.txt'));
+    await assert.rejects(
+      async () => {
+        await writeTool.handler({ path: 'leaf-escape.txt', content: 'PWNED' });
+      },
+      /Path traversal denied/,
+    );
+    await assert.rejects(fs.readFile(path.join(outsideDir, 'leaf.txt'), 'utf8'), /ENOENT/);
+
+    // Dangling symlink inside an existing subdirectory.
+    await fs.mkdir(path.join(tmpDir, 'sub'));
+    await fs.symlink(path.join(outsideDir, 'nested.txt'), path.join(tmpDir, 'sub', 'escape.txt'));
+    await assert.rejects(
+      async () => {
+        await writeTool.handler({ path: 'sub/escape.txt', content: 'PWNED' });
+      },
+      /Path traversal denied/,
+    );
+    await assert.rejects(fs.readFile(path.join(outsideDir, 'nested.txt'), 'utf8'), /ENOENT/);
+
+    // Dangling symlink used as a directory component.
+    await fs.symlink(path.join(outsideDir, 'newdir'), path.join(tmpDir, 'escdir'));
+    await assert.rejects(
+      async () => {
+        await writeTool.handler({ path: 'escdir/file.txt', content: 'PWNED' });
+      },
+      /Path traversal denied/,
+    );
+    await assert.rejects(fs.readdir(path.join(outsideDir, 'newdir')), /ENOENT/);
+
+    // A dangling symlink pointing *inside* the root is still writable: the target
+    // is resolved and containment is checked on the canonical target.
+    await fs.symlink(path.join(tmpDir, 'inside.txt'), path.join(tmpDir, 'alias.txt'));
+    await writeTool.handler({ path: 'alias.txt', content: 'inside-ok' });
+    assert.equal(await fs.readFile(path.join(tmpDir, 'inside.txt'), 'utf8'), 'inside-ok');
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+    await fs.rm(outsideDir, { recursive: true, force: true });
+  }
+});
