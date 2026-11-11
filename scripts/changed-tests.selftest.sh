@@ -337,6 +337,16 @@ unset FAKE_SELECT
 check "a barrel file counts as referenced through its directory import" 'test "$RC" -eq 0 && out_lacks "references these changed source files"'
 reset_tree
 
+# 4h. An ambient declaration (*.d.ts) has no module graph either: nothing imports it by
+#     name, so the reference rule must not fire on it — the workspace typecheck that runs
+#     beside the suite is what covers it (cloud-factory-cf-xnn9: adding a declaration to
+#     packages/cli/src/node-env.d.ts failed the gate while the suite and typecheck passed).
+printf 'declare const probe: number;\n' > "$FIX/packages/nodep/src/ambient.d.ts"
+printf '\n// touch\n' >> "$FIX/packages/nodep/tests/n.test.ts"
+run_gate
+check "an ambient declaration does not fail the reference rule" 'test "$RC" -eq 0 && out_lacks "references these changed source files" && out_has "FAKE npm test in nodep"'
+reset_tree
+
 # 5. A source delta selects the affected vitest files.
 printf '\n// touch\n' >> "$FIX/apps/web/src/m.ts"
 export FAKE_SELECT="apps/web/test/a.test.ts"
