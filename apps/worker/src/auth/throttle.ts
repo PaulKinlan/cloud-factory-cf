@@ -24,9 +24,14 @@ import { sameSecret } from "../secrets";
  *    successful calls and must not be locked out by its own concurrency: only rejections
  *    count there.
  *
- * Both fail open (return null) when the broker cannot answer. A throttle that cannot read
- * its own state must not lock an operator out of their own deployment; the key comparison
- * that follows is still what decides the request.
+ * Both fail CLOSED when the broker cannot answer (cloud-factory-cf-m3hx): the reading comes
+ * back as `unavailable`, never as an assumption of `allowed`. A throttle that skips itself
+ * whenever its own storage is unhappy is a throttle an attacker turns off by making the
+ * broker busy - which is exactly when a guessing run would go unnoticed. Callers therefore
+ * refuse the key comparison and say why; a browser session on the same route is unaffected,
+ * so an operator who can sign in is not locked out of their deployment by a broker outage.
+ * The one case still answered as `null` is a deployment with no broker binding at all: there
+ * is no counter to read and never was, so the route's own key comparison is all it has.
  */
 export const CONTROL_KEY_ATTEMPT_LIMIT = 5;
 /**
@@ -42,7 +47,26 @@ export const CONTROL_KEY_ATTEMPT_LIMIT = 5;
 export const CONTROL_KEY_ATTEMPT_LIMIT_MACHINE = 20;
 export const CONTROL_KEY_WINDOW_MS = 15 * 60 * 1000;
 
-export type ThrottleOutcome = { allowed: boolean; retryAfterSec: number; failures: number };
+export type ThrottleOutcome = {
+  allowed: boolean;
+  retryAfterSec: number;
+  failures: number;
+  /**
+   * The broker is bound but could not answer, so this reading proves nothing
+   * (cloud-factory-cf-m3hx). `allowed` is false so a caller that forgets to look here still
+   * fails closed; a caller that does look can say "throttle unavailable" instead of
+   * pretending the address ran out of attempts.
+   */
+  unavailable?: true;
+};
+
+/** No reading at all: the deployment has no broker binding, so it has no counter to read. */
+const NO_THROTTLE_BACKEND = null;
+
+/** The key comparison could not be assessed because the counter was unreadable. */
+function throttleUnavailable(): ThrottleOutcome {
+  return { allowed: false, retryAfterSec: 0, failures: 0, unavailable: true };
+}
 
 export type ThrottleOperation = "check" | "attempt" | "failure" | "success";
 
@@ -66,7 +90,7 @@ export async function controlKeyThrottle(
   operation: ThrottleOperation,
   options: { limit?: number; windowMs?: number } = {},
 ): Promise<ThrottleOutcome | null> {
-  if (!env.CREDENTIAL_BROKER) return null;
+  if (!env.CREDENTIAL_BROKER) return NO_THROTTLE_BACKEND;
   const limit = options.limit ?? CONTROL_KEY_ATTEMPT_LIMIT;
   const windowMs = options.windowMs ?? CONTROL_KEY_WINDOW_MS;
   const path =
@@ -83,7 +107,7 @@ export async function controlKeyThrottle(
         outcome: operation,
       }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) return throttleUnavailable();
     const data = (await res.json().catch(() => null)) as
       | { allowed?: boolean; retryAfterSec?: number; failures?: number }
       | null;
@@ -94,7 +118,7 @@ export async function controlKeyThrottle(
       failures: Number(data?.failures ?? 0) || 0,
     };
   } catch {
-    return null;
+    return throttleUnavailable();
   }
 }
 
@@ -103,14 +127,21 @@ export async function controlKeyThrottle(
  * through `authorizeControlPlane` (the passkey administration routes and the repo list).
  * Without this they are uncounted oracles: the same secret, compared at full speed, with
  * nothing incrementing the counter the entry gate reads (cloud-factory-cf-96mr).
+ *
+ * Three answers, because two could not tell "this key is wrong" from "the counter could not
+ * be read" (cloud-factory-cf-m3hx). `unavailable` refuses the key just as `refused` does - it
+ * never falls through to accepting it - but lets the route say so, and lets a route that also
+ * accepts a session still use it.
  */
+export type ControlKeyDecision = "accepted" | "refused" | "unavailable";
+
 export async function acceptPresentedControlKey(
   request: Request,
   env: Env,
   presented: string | null,
-): Promise<boolean> {
+): Promise<ControlKeyDecision> {
   const controlKey = env.BROKER_CONTROL_KEY;
-  if (!controlKey || !presented) return false;
+  if (!controlKey || !presented) return "refused";
   const identity = clientIdentity(request);
   // Reserve before comparing, release on a match: the slot is atomic, so concurrent
   // guesses cannot all be compared, and only rejections spend the window
@@ -118,13 +149,14 @@ export async function acceptPresentedControlKey(
   const reservation = await controlKeyThrottle(env, identity, "attempt", {
     limit: CONTROL_KEY_ATTEMPT_LIMIT_MACHINE,
   });
-  if (reservation && !reservation.allowed) return false;
+  if (reservation?.unavailable) return "unavailable";
+  if (reservation && !reservation.allowed) return "refused";
   if (await sameSecret(controlKey, presented)) {
     await controlKeyThrottle(env, identity, "success");
-    return true;
+    return "accepted";
   }
   // Close the reservation and count the rejection, so the slot is not held against the next
   // caller and these routes stop being uncounted oracles (cloud-factory-cf-r012 / 96mr).
   await controlKeyThrottle(env, identity, "failure");
-  return false;
+  return "refused";
 }

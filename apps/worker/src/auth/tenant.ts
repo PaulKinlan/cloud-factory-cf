@@ -36,7 +36,13 @@ export type ControlPrincipal =
   | { via: "control-key" }
   | { via: "session"; login: string };
 
-export type ControlDenialReason = "unconfigured" | "unauthorised" | "cross-tenant" | "throttled";
+export type ControlDenialReason =
+  | "unconfigured"
+  | "unauthorised"
+  | "cross-tenant"
+  | "throttled"
+  /** The counter could not be read, so the key was not compared (cloud-factory-cf-m3hx). */
+  | "throttle-unavailable";
 
 export type ControlAuthz =
   | { ok: true; principal: ControlPrincipal }
@@ -127,6 +133,7 @@ export async function authorizeControlPlane(
 ): Promise<ControlAuthz> {
   const controlKey = env.BROKER_CONTROL_KEY;
   const presented = request.headers.get("x-factory-control-key");
+  let throttleUnavailable = false;
   if (controlKey && presented) {
     // This is where every machine-key comparison happens (admin, broker, audit, trace,
     // passkey, the legacy proxy). The slot is taken atomically BEFORE the comparison, so a
@@ -138,18 +145,25 @@ export async function authorizeControlPlane(
     const reservation = await controlKeyThrottle(env, identity, "attempt", {
       limit: CONTROL_KEY_ATTEMPT_LIMIT_MACHINE,
     });
-    if (reservation && !reservation.allowed) {
+    if (reservation?.unavailable) {
+      // The machine key cannot be judged, so it is not compared and not accepted
+      // (cloud-factory-cf-m3hx). A session below still authorises the caller - a broker
+      // outage must not lock an operator out of their own deployment - and only when
+      // nothing else authorises does the reason surface, as a 503 rather than a 401 nobody
+      // could act on.
+      throttleUnavailable = true;
+    } else if (reservation && !reservation.allowed) {
       return { ok: false, reason: "throttled", retryAfterSec: reservation.retryAfterSec };
-    }
-    if (await sameSecret(controlKey, presented)) {
+    } else if (await sameSecret(controlKey, presented)) {
       await controlKeyThrottle(env, identity, "success");
       return { ok: true, principal: { via: "control-key" } };
+    } else {
+      // The reservation this attempt took has to be closed either way: a slot left in flight
+      // would be held against the next caller from this address, and a rejected guess that is
+      // not recorded is the oracle this throttle exists to close (cloud-factory-cf-r012 would
+      // otherwise have made valid callers pay for it).
+      await controlKeyThrottle(env, identity, "failure");
     }
-    // The reservation this attempt took has to be closed either way: a slot left in flight
-    // would be held against the next caller from this address, and a rejected guess that is
-    // not recorded is the oracle this throttle exists to close (cloud-factory-cf-r012 would
-    // otherwise have made valid callers pay for it).
-    await controlKeyThrottle(env, identity, "failure");
   }
 
   const signingKey = sessionSigningKey(env);
@@ -176,6 +190,7 @@ export async function authorizeControlPlane(
   if (!controlKey && !signingKey) {
     return { ok: false, reason: "unconfigured" };
   }
+  if (throttleUnavailable) return { ok: false, reason: "throttle-unavailable" };
   return { ok: false, reason: "unauthorised" };
 }
 
@@ -184,6 +199,7 @@ const DEFAULT_MESSAGES: Record<ControlDenialReason, string> = {
   unauthorised: "not authorised",
   "cross-tenant": "not authorised for another account's tenancy",
   throttled: "too many control key attempts; try again later",
+  "throttle-unavailable": "control key throttle unavailable; try again shortly",
 };
 
 const STATUS: Record<ControlDenialReason, number> = {
@@ -191,6 +207,7 @@ const STATUS: Record<ControlDenialReason, number> = {
   unauthorised: 401,
   "cross-tenant": 403,
   throttled: 429,
+  "throttle-unavailable": 503,
 };
 
 /**

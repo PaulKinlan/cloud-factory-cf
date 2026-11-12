@@ -48,6 +48,15 @@ export default {
       // about a capability or a session, and counting those would lock out honest
       // machine traffic.
       const gate = await controlKeyThrottle(env, controlIdentity, "check");
+      if (gate?.unavailable) {
+        // The counter could not be read, so this gate knows nothing about the address and a
+        // key compared now would be compared unthrottled (cloud-factory-cf-m3hx). Refuse the
+        // key rather than wave it through; sessions never reach this branch.
+        return Response.json(
+          { ok: false, error: "control key throttle unavailable; try again shortly" },
+          { status: 503 },
+        );
+      }
       if (gate && !gate.allowed) {
         return Response.json(
           { ok: false, error: "too many control key attempts; try again later" },

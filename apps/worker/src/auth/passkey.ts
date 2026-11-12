@@ -248,7 +248,7 @@ export async function handlePasskeyRoute(
     // Counted like every other control-key comparison: five rejections here lock the
     // address for the window instead of leaving this route a free oracle
     // (cloud-factory-cf-96mr).
-    const hasValidControlKey = await acceptPresentedControlKey(request, env, controlKey);
+    const hasValidControlKey = (await acceptPresentedControlKey(request, env, controlKey)) === "accepted";
 
     let body: Record<string, any> = {};
     try {
@@ -680,7 +680,7 @@ export async function handlePasskeyRoute(
     const session = await readSession(request.headers, env);
     const controlKey = request.headers.get("x-factory-control-key");
     const isRoot = Boolean(
-      (await acceptPresentedControlKey(request, env, controlKey)) ||
+      (await acceptPresentedControlKey(request, env, controlKey)) === "accepted" ||
       (session.ok && session.login === "__root__"),
     );
 
@@ -708,7 +708,7 @@ export async function handlePasskeyRoute(
     const session = await readSession(request.headers, env);
     const controlKey = request.headers.get("x-factory-control-key");
     const isRoot = Boolean(
-      (await acceptPresentedControlKey(request, env, controlKey)) ||
+      (await acceptPresentedControlKey(request, env, controlKey)) === "accepted" ||
       (session.ok && session.login === "__root__"),
     );
 

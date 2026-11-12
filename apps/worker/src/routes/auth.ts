@@ -225,6 +225,15 @@ export async function handleAuth(
     // limit true for concurrent callers too. A success clears the streak.
     const throttleIdentity = clientIdentity(request);
     const reservation = await controlKeyThrottle(env, throttleIdentity, "attempt");
+    if (reservation?.unavailable) {
+      // No readable counter, so no attempt can be charged; comparing the key now would be an
+      // unthrottled oracle for the one secret that mints a root session
+      // (cloud-factory-cf-m3hx).
+      return Response.json(
+        { ok: false, error: "control key throttle unavailable; try again shortly" },
+        { status: 503 },
+      );
+    }
     if (reservation && !reservation.allowed) {
       return Response.json(
         { ok: false, error: "Too many root login attempts; try again later" },
@@ -315,7 +324,7 @@ export async function handleAuth(
       request,
       env,
       request.headers.get("x-factory-control-key"),
-    );
+    ) === "accepted";
     if (!authorised) {
       const session = await readSession(request.headers, env);
       authorised = Boolean(session.ok && (isRootLogin(session.login, env) || session.login === ROOT_SESSION_LOGIN));
@@ -1245,12 +1254,15 @@ export async function handleApiRepos(
 
   let owner = url.searchParams.get("owner");
   let authorised = false;
+  let throttleUnavailable = false;
 
   // Machine callers present the control key (unchanged contract).
   const presented = request.headers.get("x-factory-control-key");
   // Counted, like every other control-key comparison (cloud-factory-cf-96mr).
-  if (presented && (await acceptPresentedControlKey(request, env, presented))) {
-    authorised = true;
+  if (presented) {
+    const decision = await acceptPresentedControlKey(request, env, presented);
+    authorised = decision === "accepted";
+    throttleUnavailable = decision === "unavailable";
   }
 
   if (!authorised && signingKey) {
@@ -1279,6 +1291,15 @@ export async function handleApiRepos(
   if (!authorised) {
     if (presented && !controlKey) {
       return Response.json({ ok: false, error: "control key not configured" }, { status: 503 });
+    }
+    // Nothing else authorised the caller and the key could not be judged: say that, instead
+    // of a 401 that sends the operator looking for a credential problem
+    // (cloud-factory-cf-m3hx).
+    if (throttleUnavailable) {
+      return Response.json(
+        { ok: false, error: "control key throttle unavailable; try again shortly" },
+        { status: 503 },
+      );
     }
     return Response.json({ ok: false, error: "not authorised to access repository metadata" }, { status: 401 });
   }

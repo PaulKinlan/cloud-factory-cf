@@ -1,10 +1,15 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import type { Env } from "../src/env";
 import {
+  acceptPresentedControlKey,
   CONTROL_KEY_ATTEMPT_LIMIT,
   CONTROL_KEY_ATTEMPT_LIMIT_MACHINE,
   CONTROL_KEY_WINDOW_MS,
+  controlKeyThrottle,
 } from "../src/auth/throttle";
+import { authzDenial, authorizeControlPlane, sessionSigningKey } from "../src/auth/tenant";
+import { mintSessionToken, SESSION_COOKIE } from "../src/routes/auth";
 
 /**
  * `POST /api/auth/root-login` trades the deployment's control key for a root session and
@@ -331,5 +336,98 @@ describe("root login throttle policy", () => {
     expect(CONTROL_KEY_ATTEMPT_LIMIT).toBeGreaterThan(0);
     expect(CONTROL_KEY_ATTEMPT_LIMIT).toBeLessThanOrEqual(10);
     expect(CONTROL_KEY_WINDOW_MS).toBeGreaterThanOrEqual(60 * 1000);
+  });
+});
+
+/**
+ * The counter is the only thing standing between an internet-facing key comparison and a
+ * guessing run, so a broker that cannot answer must not be read as "allowed"
+ * (cloud-factory-cf-m3hx). Before this, every `return null` in the throttle was an outage
+ * an attacker could arrange: make the Durable Object unhappy and every comparison in the
+ * window is unthrottled.
+ */
+describe("the throttle fails closed when the counter cannot be read (cloud-factory-cf-m3hx)", () => {
+  /** A broker namespace whose one object answers however this case needs it to. */
+  function brokerThat(
+    answer: (request: Request) => Response | Promise<Response>,
+  ): Env["CREDENTIAL_BROKER"] {
+    return {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch: async (input: Request | string, init?: RequestInit) =>
+          answer(typeof input === "string" ? new Request(input, init) : input),
+      }),
+    } as unknown as Env["CREDENTIAL_BROKER"];
+  }
+
+  function envWith(broker: Env["CREDENTIAL_BROKER"]): Env {
+    return { ...(env as unknown as Env), CREDENTIAL_BROKER: broker };
+  }
+
+  const unreadable = () => brokerThat(() => new Response("broker exploded", { status: 500 }));
+  const throwing = () =>
+    brokerThat(() => {
+      throw new Error("broker unreachable");
+    });
+  /**
+   * The realistic outage for this bead: the throttle route is broken while the rest of the
+   * broker still answers. That is the shape a deploy skew or a handler bug takes, and it is
+   * the one where the session fallback below has to keep working.
+   */
+  const throttleRouteDown = () =>
+    brokerThat((request) =>
+      new URL(request.url).pathname.startsWith("/auth-throttle")
+        ? new Response("no", { status: 500 })
+        : Response.json({ ok: true, revoked: false }),
+    );
+
+  it("reports an unreadable counter as unavailable, and as not allowed", async () => {
+    for (const broker of [unreadable(), throwing()]) {
+      const check = await controlKeyThrottle(envWith(broker), "198.51.100.10", "check");
+      expect(check).toMatchObject({ allowed: false, unavailable: true });
+      const attempt = await controlKeyThrottle(envWith(broker), "198.51.100.11", "attempt");
+      expect(attempt).toMatchObject({ allowed: false, unavailable: true });
+    }
+  });
+
+  it("refuses a correct control key rather than comparing it unthrottled", async () => {
+    const request = new Request("https://example.com/api/repos", {
+      headers: { "cf-connecting-ip": "198.51.100.12", "x-factory-control-key": CONTROL_KEY },
+    });
+    const decision = await acceptPresentedControlKey(request, envWith(unreadable()), CONTROL_KEY);
+    // The key is right, and it is still not accepted: nothing here could have charged it.
+    expect(decision).toBe("unavailable");
+    expect(decision).not.toBe("accepted");
+  });
+
+  it("still lets a browser session authorise while the machine key cannot be judged", async () => {
+    const scoped = envWith(throttleRouteDown());
+    const session = await mintSessionToken(sessionSigningKey(scoped)!, "octocat");
+    const request = new Request("https://example.com/api/admin/status", {
+      headers: {
+        "cf-connecting-ip": "198.51.100.13",
+        "x-factory-control-key": CONTROL_KEY,
+        cookie: `${SESSION_COOKIE}=${session}`,
+      },
+    });
+    const authz = await authorizeControlPlane(request, scoped);
+    // A broker outage must not lock an operator out of their own deployment.
+    expect(authz).toEqual({ ok: true, principal: { via: "session", login: "octocat" } });
+  });
+
+  it("says the throttle was unavailable when nothing else authorises, and answers 503", async () => {
+    const request = new Request("https://example.com/api/admin/status", {
+      headers: { "cf-connecting-ip": "198.51.100.14", "x-factory-control-key": CONTROL_KEY },
+    });
+    const authz = await authorizeControlPlane(request, envWith(throwing()));
+    expect(authz).toEqual({ ok: false, reason: "throttle-unavailable" });
+    if (authz.ok) throw new Error("expected a denial");
+    // 503, not a 429 that blames the caller or a 401 that sends them hunting for a credential.
+    expect(authzDenial(authz).status).toBe(503);
+  });
+
+  it("keeps the documented no-binding case: with no broker there is no counter to read", async () => {
+    const unbounded = { ...(env as unknown as Env), CREDENTIAL_BROKER: undefined } as unknown as Env;
+    expect(await controlKeyThrottle(unbounded, "198.51.100.15", "check")).toBeNull();
   });
 });
