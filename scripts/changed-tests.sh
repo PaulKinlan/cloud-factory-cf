@@ -559,7 +559,13 @@ for ws in "${WS_ORDER[@]}"; do
       # nothing for 900s, twice, killing the fast gate at its bound (8xzi's delta),
       # while the very same file runs by name in about two minutes.
       files=()
-      while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done <<< "$selected_files"
+      # Resolve each selected suite relative to its OWN workspace before handing it to the
+      # runner, which is started in that workspace (cloud-factory-cf-wj0b's rule extended
+      # to the named-files path main introduced). `vitest list --changed` prints paths
+      # relative to the workspace it ran in, so this is usually a no-op; it is what stops a
+      # repo-relative path (a pin, or any caller that names one) from being handed to a
+      # runner that cannot see it.
+      while IFS= read -r f; do [ -n "$f" ] && files+=("${f#"$ws"/}"); done <<< "$selected_files"
       run_ws_tests "$ws" npx vitest run "${files[@]}" || status=1
       continue
     fi
@@ -630,7 +636,8 @@ for ws in "${WS_ORDER[@]}"; do
     # `--changed`: one vitest bootstrap cheaper per source delta, and the invocation
     # shape the fast tier can afford (cloud-factory-cf-56j5).
     files=()
-    while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done <<< "$selected_files"
+    # Same workspace-relative resolution as the test-file delta above (cloud-factory-cf-wj0b).
+    while IFS= read -r f; do [ -n "$f" ] && files+=("${f#"$ws"/}"); done <<< "$selected_files"
     run_ws_tests "$ws" npx vitest run "${files[@]}" || status=1
     continue
   fi

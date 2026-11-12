@@ -214,13 +214,16 @@ export FAKE_SELECT="apps/web/test/a.test.ts"
 export FAKE_VITEST_ARGS="$TMP/vitest.args"
 run_gate
 check "a modified test file runs the affected suites, not the whole suite" 'test "$RC" -eq 0 && out_has "1 affected test file(s) (test-file delta" && out_has "FAKE vitest run in web"'
-# 3b-ii. The affected suites are passed BY NAME. A `--changed` run re-derives the
+# 3b-ii. The affected suites are passed BY NAME, and the name is relative to the workspace
+#        the runner starts in (cloud-factory-cf-wj0b) - the fake rejects a path it cannot
+#        see, so an assertion on the repo-relative form would be asserting the bug.
+#        A `--changed` run re-derives the
 #        selection from git inside the workspace, and in apps/worker that run never
 #        reached a test: the banner printed, then nothing for the whole 900s bound, and
 #        the fast gate was KILLED at it twice (cloud-factory-cf-8xzi's delta), while the
 #        same file runs by name in about two minutes. Naming them is also one vitest
 #        bootstrap cheaper, which is the point of the fast tier.
-check "the affected suites are run by name, not by a --changed run" 'test "$RC" -eq 0 && grep -qx "args web apps/web/test/a.test.ts" "$FAKE_VITEST_ARGS" && ! grep -q -- "--changed" "$FAKE_VITEST_ARGS"'
+check "the affected suites are run by name, not by a --changed run" 'test "$RC" -eq 0 && grep -qx "args web test/a.test.ts" "$FAKE_VITEST_ARGS" && ! grep -q -- "--changed" "$FAKE_VITEST_ARGS"'
 run_gate --list
 check "--list reports affected suites for a modified test file" 'test "$RC" -eq 0 && out_has "1 affected test file(s) (test-file delta"'
 unset FAKE_SELECT FAKE_VITEST_ARGS
@@ -382,7 +385,7 @@ check "source delta runs the affected vitest files" 'test "$RC" -eq 0 && out_has
 #     (cloud-factory-cf-56j5).
 : > "$FAKE_VITEST_ARGS"
 run_gate
-check "a source delta runs the selected suites by name, with no --changed run" 'test "$RC" -eq 0 && grep -qx "args web apps/web/test/a.test.ts" "$FAKE_VITEST_ARGS" && ! grep -q -- "--changed" "$FAKE_VITEST_ARGS"'
+check "a source delta runs the selected suites by name, with no --changed run" 'test "$RC" -eq 0 && grep -qx "args web test/a.test.ts" "$FAKE_VITEST_ARGS" && ! grep -q -- "--changed" "$FAKE_VITEST_ARGS"'
 run_gate --list
 check "--list names the same selection for a source delta" 'test "$RC" -eq 0 && out_has "1 affected test file(s)" && out_has "apps/web/test/a.test.ts"'
 unset FAKE_SELECT FAKE_VITEST_ARGS
