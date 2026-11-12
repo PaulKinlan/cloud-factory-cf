@@ -365,11 +365,15 @@ describe("sink upstream status strictness (cloud-factory-cf-g9aw follow-up)", ()
     // `includeStatus` answers are what the broker returns; `pipeline.ts` turns a missing
     // status into 0, so a sink has to refuse anything outside 200-399 rather than trust
     // "no throw".
+    // The capability helper is generic - callers name the shape they expect - so the stub
+    // has to be generic too: it hands back whatever this payload is, exactly as a broker
+    // answering with it would (cloud-factory-cf-m1la caught the non-generic version).
+    const executeSignedRequest = async <T = unknown>(): Promise<T> => result as T;
     return createAgentContext({
       repo: { owner: "acme", name: "action-sinks" },
       org: { id: "acme" },
       credentials: {
-        executeSignedRequest: async () => result,
+        executeSignedRequest,
         hasPermission: async () => true,
       },
     });
