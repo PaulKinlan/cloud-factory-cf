@@ -100,12 +100,23 @@ function testEnv(
       // A session-authenticated route also reads the revocation list on this same object
       // (cloud-factory-cf-2lbm); it is bookkeeping, not a passkey operation.
       if (target.startsWith(SESSION_CHECK_PREFIX)) return Response.json({ ok: true, revoked: false });
+      // The control-key comparison reserves a throttle slot before it compares, and the real
+      // broker serves that on this same object (cloud-factory-cf-m3hx). Answering 404 here
+      // would model a deployment whose counter cannot be read, which the throttle now refuses
+      // to treat as "allowed".
+      if (target.startsWith("https://credential-broker.internal/auth-throttle/")) {
+        return Response.json({ ok: true, allowed: true, failures: 0, retryAfterSec: 0 });
+      }
       return Response.json({ ok: false, error: "unexpected broker path" }, { status: 404 });
     },
   };
   return {
     BROKER_SIGNING_KEY: SIGNING_KEY,
     BROKER_CONTROL_KEY: "test-passkey-control-key",
+    // A local deployment, which is what this stub models: the unprefixed `cf_session` name
+    // only authenticates there, or for a token minted before the d11l migration cutoff
+    // (cloud-factory-cf-tp22).
+    ENVIRONMENT: "test",
     CREDENTIAL_BROKER: { idFromName: (name: string) => name, get: () => broker },
     ...extra,
   } as never;
