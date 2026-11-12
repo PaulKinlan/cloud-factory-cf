@@ -97,16 +97,21 @@ export async function controlKeyThrottle(
     operation === "check" || operation === "attempt" ? `/auth-throttle/${operation}` : "/auth-throttle/record";
   try {
     const stub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName("default"));
-    const res = await stub.fetch(`https://credential-broker.internal${path}`, {
-      method: "POST",
-      headers: await brokerInternalHeaders(env, "default", { "content-type": "application/json" }),
-      body: JSON.stringify({
-        identity,
-        limit,
-        windowMs,
-        outcome: operation,
+    // A `Request`, not a (url, init) pair: the broker is addressed the same way by the
+    // session-revocation read in auth/sessions.ts, and a test stub that models that object
+    // then sees one shape instead of two.
+    const res = await stub.fetch(
+      new Request(`https://credential-broker.internal${path}`, {
+        method: "POST",
+        headers: await brokerInternalHeaders(env, "default", { "content-type": "application/json" }),
+        body: JSON.stringify({
+          identity,
+          limit,
+          windowMs,
+          outcome: operation,
+        }),
       }),
-    });
+    );
     if (!res.ok) return throttleUnavailable();
     const data = (await res.json().catch(() => null)) as
       | { allowed?: boolean; retryAfterSec?: number; failures?: number }

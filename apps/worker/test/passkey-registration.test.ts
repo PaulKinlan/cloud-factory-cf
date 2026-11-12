@@ -33,7 +33,9 @@ function testEnv() {
   const challenges = new Set<string>();
   const broker = {
     fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
-      const target = String(input);
+      // The broker is addressed with a `Request` for the throttle and with a URL string for
+      // the passkey calls; both name the same object.
+      const target = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (target === CHALLENGE_URL) {
         const body = JSON.parse(String(init?.body ?? "{}")) as { challenge?: string };
         if (typeof body.challenge === "string") challenges.add(body.challenge);
@@ -47,6 +49,13 @@ function testEnv() {
           : Response.json({ ok: false, error: "unknown or already used challenge" }, { status: 409 });
       }
       if (target === SAVE_URL) return Response.json({ ok: true });
+      // The control-key comparison reserves a throttle slot before it compares, and the real
+      // broker serves that on this same object (cloud-factory-cf-m3hx). Answering 404 here
+      // would model a deployment whose counter cannot be read, which the throttle now refuses
+      // to treat as "allowed".
+      if (target.startsWith("https://credential-broker.internal/auth-throttle/")) {
+        return Response.json({ ok: true, allowed: true, failures: 0, retryAfterSec: 0 });
+      }
       return Response.json({ ok: false, error: "unexpected broker path" }, { status: 404 });
     },
   };
@@ -270,7 +279,18 @@ describe("passkey challenges are single use", () => {
       BROKER_CONTROL_KEY: CONTROL_KEY,
       CREDENTIAL_BROKER: {
         idFromName: (name: string) => name,
-        get: () => ({ fetch: async () => Response.json({ ok: false }, { status: 503 }) }),
+        get: () => ({
+          fetch: async (input: Request | string) => {
+            const target = typeof input === "string" ? input : input.url;
+            // Only the challenge table is broken. The throttle has to keep answering, or the
+            // control-key caller is refused before the write this case is about is attempted
+            // (cloud-factory-cf-m3hx).
+            if (target.startsWith("https://credential-broker.internal/auth-throttle/")) {
+              return Response.json({ ok: true, allowed: true, failures: 0, retryAfterSec: 0 });
+            }
+            return Response.json({ ok: false }, { status: 503 });
+          },
+        }),
       },
     } as never;
 

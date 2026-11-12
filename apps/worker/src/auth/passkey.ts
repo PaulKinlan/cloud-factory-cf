@@ -248,7 +248,8 @@ export async function handlePasskeyRoute(
     // Counted like every other control-key comparison: five rejections here lock the
     // address for the window instead of leaving this route a free oracle
     // (cloud-factory-cf-96mr).
-    const hasValidControlKey = (await acceptPresentedControlKey(request, env, controlKey)) === "accepted";
+    const controlKeyDecision = await acceptPresentedControlKey(request, env, controlKey);
+    const hasValidControlKey = controlKeyDecision === "accepted";
 
     let body: Record<string, any> = {};
     try {
@@ -267,6 +268,13 @@ export async function handlePasskeyRoute(
       subject = session.login;
       role = "user";
     } else {
+      // Nothing the deployment can verify: say which half failed (cloud-factory-cf-m3hx).
+      if (controlKeyDecision === "unavailable") {
+        return Response.json(
+          { ok: false, error: "control key throttle unavailable; try again shortly" },
+          { status: 503 },
+        );
+      }
       return Response.json({ ok: false, error: "Authentication required to register a passkey" }, { status: 401 });
     }
 
@@ -679,12 +687,18 @@ export async function handlePasskeyRoute(
   if (url.pathname === "/api/auth/passkeys" && request.method === "GET") {
     const session = await readSession(request.headers, env);
     const controlKey = request.headers.get("x-factory-control-key");
+    const controlKeyDecision = await acceptPresentedControlKey(request, env, controlKey);
     const isRoot = Boolean(
-      (await acceptPresentedControlKey(request, env, controlKey)) === "accepted" ||
-      (session.ok && session.login === "__root__"),
+      controlKeyDecision === "accepted" || (session.ok && session.login === "__root__"),
     );
 
     if (!session.ok && !isRoot) {
+      if (controlKeyDecision === "unavailable") {
+        return Response.json(
+          { ok: false, error: "control key throttle unavailable; try again shortly" },
+          { status: 503 },
+        );
+      }
       return Response.json({ ok: false, error: "Authentication required" }, { status: 401 });
     }
 
@@ -707,12 +721,18 @@ export async function handlePasskeyRoute(
   if (url.pathname === "/api/auth/passkeys" && request.method === "DELETE") {
     const session = await readSession(request.headers, env);
     const controlKey = request.headers.get("x-factory-control-key");
+    const controlKeyDecision = await acceptPresentedControlKey(request, env, controlKey);
     const isRoot = Boolean(
-      (await acceptPresentedControlKey(request, env, controlKey)) === "accepted" ||
-      (session.ok && session.login === "__root__"),
+      controlKeyDecision === "accepted" || (session.ok && session.login === "__root__"),
     );
 
     if (!session.ok && !isRoot) {
+      if (controlKeyDecision === "unavailable") {
+        return Response.json(
+          { ok: false, error: "control key throttle unavailable; try again shortly" },
+          { status: 503 },
+        );
+      }
       return Response.json({ ok: false, error: "Authentication required" }, { status: 401 });
     }
 
