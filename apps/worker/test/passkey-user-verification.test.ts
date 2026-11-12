@@ -21,6 +21,7 @@ const CHALLENGE_URL = "https://credential-broker.internal/passkeys/challenge";
 const CONSUME_URL = `${CHALLENGE_URL}/consume`;
 const LOOKUP_PREFIX = "https://credential-broker.internal/passkeys?id=";
 const TOUCH_URL = "https://credential-broker.internal/passkeys/touch";
+const SETTINGS_URL = "https://credential-broker.internal/settings";
 
 function base64Url(bytes: Uint8Array): string {
   let binary = "";
@@ -59,7 +60,13 @@ interface StoredCredential {
   algorithm: number;
 }
 
-function testEnv(credential: StoredCredential, extra: Record<string, unknown> = {}) {
+function testEnv(
+  credential: StoredCredential,
+  extra: Record<string, unknown> = {},
+  /** The platform `customers` policy; absent means allow-all, which is what an
+   *  unconfigured deployment has (cloud-factory-cf-welo). */
+  customers?: { allowAllGithubUsers: boolean; allowedUsers: string[] },
+) {
   const challenges = new Set<string>();
   const broker = {
     fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -87,6 +94,9 @@ function testEnv(credential: StoredCredential, extra: Record<string, unknown> = 
         });
       }
       if (target === TOUCH_URL) return Response.json({ ok: true });
+      // Every session-minting path reads the customer access policy from the reserved
+      // scope before it mints (cloud-factory-cf-welo).
+      if (target === SETTINGS_URL) return Response.json({ ok: true, customers });
       // A session-authenticated route also reads the revocation list on this same object
       // (cloud-factory-cf-2lbm); it is bookkeeping, not a passkey operation.
       if (target.startsWith(SESSION_CHECK_PREFIX)) return Response.json({ ok: true, revoked: false });
@@ -359,5 +369,58 @@ describe("a root passkey requires user verification", () => {
     );
     const userBody = (await userOptions!.json()) as { options: { userVerification: string } };
     expect(userBody.options.userVerification).toBe("preferred");
+  });
+});
+
+/**
+ * A passkey proves an identity; it does not prove the deployment admits it
+ * (cloud-factory-cf-welo). `login/verify` minted a session for whatever subject the
+ * credential carried while the OAuth callback honoured `customers.allowAllGithubUsers`, so
+ * removing a user from the allowlist left their passkey working.
+ *
+ * The assertion here is a fully valid one (right signature, right challenge, UV set), so
+ * the only thing that can refuse it is the customer policy.
+ */
+describe("a passkey login still needs the customer allowlist (cloud-factory-cf-welo)", () => {
+  it("refuses a valid assertion for a login the deployment does not admit", async () => {
+    const { privateKey, credential } = await makeCredential("user", "bob");
+    const env = testEnv(credential, { PLATFORM_OWNERS: "alice" }, {
+      allowAllGithubUsers: false,
+      allowedUsers: ["alice"],
+    });
+
+    const login = await startLogin(env);
+    const valid = await assertion(privateKey, credential.credentialId, login.challenge, 0x05); // UP | UV
+    const refused = await handlePasskeyRoute(
+      post("/api/auth/passkey/login/verify", valid, { cookie: login.cookie }),
+      env,
+      verifyUrl,
+    );
+
+    expect(refused?.status).toBe(403);
+    await expect(refused!.json()).resolves.toMatchObject({
+      ok: false,
+      error: "not_allowed_on_this_deployment",
+    });
+    expect(refused!.headers.get("set-cookie") ?? "").not.toContain("cf_session");
+  });
+
+  it("admits the same assertion once the allowlist names that login", async () => {
+    const { privateKey, credential } = await makeCredential("user", "bob");
+    const env = testEnv(credential, { PLATFORM_OWNERS: "alice" }, {
+      allowAllGithubUsers: false,
+      allowedUsers: ["alice", "Bob"],
+    });
+
+    const login = await startLogin(env);
+    const valid = await assertion(privateKey, credential.credentialId, login.challenge, 0x05);
+    const accepted = await handlePasskeyRoute(
+      post("/api/auth/passkey/login/verify", valid, { cookie: login.cookie }),
+      env,
+      verifyUrl,
+    );
+
+    expect(accepted?.status).toBe(200);
+    expect(accepted!.headers.get("set-cookie") ?? "").toContain("cf_session");
   });
 });
