@@ -22,6 +22,10 @@ function testEnv(overrides: Record<string, unknown> = {}) {
   return {
     BROKER_SIGNING_KEY: SIGNING_KEY,
     BROKER_CONTROL_KEY: CONTROL_KEY,
+    // A local deployment, which is what this stub models: the unprefixed `cf_session` name
+    // only authenticates there, or for a token minted before the d11l migration cutoff
+    // (cloud-factory-cf-tp22).
+    ENVIRONMENT: "test",
     GITHUB_CLIENT_ID: "gh_test_client_id",
     GITHUB_CLIENT_SECRET: "gh_test_client_secret",
     GITHUB_APP_SLUG: "cloud-factory-dev",
