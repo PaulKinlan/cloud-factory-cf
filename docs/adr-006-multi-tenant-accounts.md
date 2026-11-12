@@ -20,7 +20,7 @@ What exists today, precisely:
 | Piece | Reality |
 | --- | --- |
 | Tenant | The `:owner` path segment. There is no membership record for it. |
-| Human identity | A GitHub OAuth login, carried in the `cf_session` cookie (`routes/auth.ts`). |
+| Human identity | A GitHub OAuth login, carried in the `__Host-cf_session` cookie on https (`routes/auth.ts`, `auth/sessions.ts`). |
 | Machine identity | `BROKER_CONTROL_KEY` — one key, names no tenant, reaches every repository. |
 | Authorisation | `apps/worker/src/auth/tenant.ts`: control key (any tenant) **or** session (only its own login). One rule for every route. |
 | Org state | `OrgCoordinator` Durable Object per org: `github_installations(installation_id, account_login, account_type, installed_at)` and `authorized_repos(full_name, owner, name, is_private, default_branch, installation_id, updated_at)`. |

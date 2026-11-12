@@ -28,7 +28,7 @@ That has three properties, and only the first was ever intended:
    (`apps/web/src/sync.ts`, `admin.html`).
 
 Two narrow fixes already shipped pointed at the real answer without completing it: a
-signed `cf_session` cookie for `/api/repos` (`cloud-factory-cf-d33`), and the rule that
+signed session cookie for `/api/repos` (`cloud-factory-cf-d33`), and the rule that
 install-only callbacks must never mint a session because an installation id proves no
 identity (`cloud-factory-cf-dnrm`). What was missing was the decision to make the
 session the *general* control-plane credential and to say what happens to the key.
@@ -38,7 +38,7 @@ session the *general* control-plane credential and to say what happens to the ke
 **The browser's GitHub OAuth session is the only human control-plane credential, and
 `:owner` is the tenant boundary.**
 
-- The session is an HMAC-signed cookie `cf_session = <login>.<iat>.<exp>.<sid>.<sig>`,
+- The session is an HMAC-signed cookie `__Host-cf_session = <login>.<iat>.<exp>.<sid>.<sig>`,
   minted only after a GitHub OAuth `code` exchange has named the login (`routes/auth.ts`,
   `auth/sessions.ts`). It is `HttpOnly`, `SameSite=Lax`, `Secure` on https, 8h TTL, and
   bound to one login. `sid` is a random per-session id and `iat` its issue time: the pair
