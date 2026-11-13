@@ -7,6 +7,10 @@ describe("repository GitHub App settings isolation", () => {
   it("does not promote a tenant session's GitHub App to the platform default broker", async () => {
     const writes: Array<{ repository: string; request: Request }> = [];
     const env = {
+      // A local deployment over plain http mints the plain `cf_session` name, so say so:
+      // otherwise the pre-upgrade cutoff for a public deployment rejects the token
+      // (cloud-factory-cf-tp22).
+      ENVIRONMENT: "test",
       BROKER_SIGNING_KEY: "tenant-session-signing-key",
       BROKER_CONTROL_KEY: "platform-control-key",
       CREDENTIAL_BROKER: {

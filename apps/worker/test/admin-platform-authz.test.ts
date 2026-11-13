@@ -20,6 +20,10 @@ const CONTROL_KEY = "platform-control-key";
 function testEnv(): { env: Env; calls: Array<{ repository: string; request: Request }> } {
   const calls: Array<{ repository: string; request: Request }> = [];
   const env = {
+    // The stub models a local deployment over plain http, so the plain `cf_session`
+    // cookie these cases mint is the session; a public deployment's pre-upgrade cutoff
+    // would reject a token minted today (cloud-factory-cf-tp22).
+    ENVIRONMENT: "test",
     BROKER_SIGNING_KEY: SIGNING_KEY,
     BROKER_CONTROL_KEY: CONTROL_KEY,
     CREDENTIAL_BROKER: {

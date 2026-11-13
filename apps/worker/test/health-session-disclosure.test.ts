@@ -20,6 +20,11 @@ const CONTROL_KEY = "test-control-key";
 
 function testEnv(overrides: Record<string, unknown> = {}) {
   return {
+    // This stub models a local deployment reached over plain http, where the plain
+    // `cf_session` name is what the mint path itself sets; without an explicit
+    // environment it is treated as a public deployment and the pre-upgrade cutoff
+    // rejects the token (cloud-factory-cf-tp22).
+    ENVIRONMENT: "test",
     BROKER_SIGNING_KEY: SIGNING_KEY,
     BROKER_CONTROL_KEY: CONTROL_KEY,
     GITHUB_CLIENT_ID: "gh_test_client_id",
