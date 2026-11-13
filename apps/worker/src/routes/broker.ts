@@ -1,6 +1,7 @@
 import type { Env } from "../env";
 import { authorizeControlPlane, authzDenial } from "../auth/tenant";
 import { brokerInternalHeaders, mintDelegation, verifyDelegation } from "../auth/delegation";
+import { resolveBrokerRepository } from "../repo-coordinator-addressing";
 
 export const BROKER_PATH =
   /^\/broker\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?<operation>capabilities|permissions|provisioning|overrides|proxy|audit|settings)$/;
@@ -96,7 +97,11 @@ export async function routeBroker(
     }
   }
 
-  const stub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository));
+  // Canonical lowercase broker name; the verbatim spelling rides the header the object
+  // already reads for pre-canonicalisation settings (cloud-factory-cf-n23o).
+  const stub = env.CREDENTIAL_BROKER.get(
+    env.CREDENTIAL_BROKER.idFromName(resolveBrokerRepository(repository)),
+  );
   const forwarded = new Request(
     `https://credential-broker.internal/${operation}${search}`,
     {

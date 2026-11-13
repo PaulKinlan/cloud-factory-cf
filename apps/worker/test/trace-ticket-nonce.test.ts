@@ -48,13 +48,15 @@ describe("trace ticket nonces are single-use across isolates", () => {
     expect(await consume(ticket)).toBe(true);
     expect(await consume(ticket)).toBe(false);
 
-    // ... and the key keeps the ticket's exact spelling, because coordinator objects are
-    // case-sensitive and a real delivery for `Acme/Widget` lives in github:Acme/Widget
-    // (cloud-factory-cf-skhd). Folding the case here streamed an empty coordinator.
+    // ... and the key is canonical lowercase, because the addressing canonicalised
+    // (cloud-factory-cf-n23o): ingestion, the URL and the ticket all resolve to the SAME
+    // object now, so folding no longer streams an empty coordinator - the skhd premise
+    // ("deliveries live under the verbatim casing") is gone. Minted-spelling and lowercase
+    // tickets land in one store, which is strictly stronger for replay refusal.
     expect(ticketRepositoryKey({ platform: "github", owner: "Acme", repo: "Widget" })).toBe(
-      "github:Acme/Widget",
+      "github:acme/widget",
     );
-    expect(ticketRepositoryKey({ platform: "github", owner: "Acme", repo: "Widget" })).not.toBe(
+    expect(ticketRepositoryKey({ platform: "github", owner: "Acme", repo: "Widget" })).toBe(
       ticketRepositoryKey({ platform: "github", owner: "acme", repo: "widget" }),
     );
   });
@@ -176,16 +178,16 @@ describe("the socket route refuses a ticket replayed under another spelling", ()
     );
     expect(replay?.status).toBe(401);
   });
-  it("streams the repository the ticket was minted for, spelling and all", async () => {
-    // cloud-factory-cf-skhd: the ticket used to be case-folded, so a ticket for
-    // /trace/Acme/Widget/ticket opened github:acme/widget - an empty object - while the
-    // webhook and session paths use github:Acme/Widget. The identity the controller receives
-    // is the ticket's own spelling, and the coordinator key follows it exactly.
+  it("streams the repository the ticket was minted for, whichever case it was typed in", async () => {
+    // cloud-factory-cf-skhd's property - the socket streams the repository the ticket
+    // names, not whatever the URL spells - with the n23o canonical key: the ticket, the
+    // URL and webhook deliveries all fold to the same lowercase object, so the identity
+    // keeps the minted spelling while the coordinator key is canonical.
     const { ticket } = await mintTraceTicket(SECRET, "Acme", "Widget");
     const identity = (await verifyTraceTicket(SECRET, ticket))!;
     expect(identity.owner).toBe("Acme");
     expect(identity.repo).toBe("Widget");
-    expect(ticketRepositoryKey(identity)).toBe("github:Acme/Widget");
+    expect(ticketRepositoryKey(identity)).toBe("github:acme/widget");
 
     const url = new URL(`https://example.com/trace/Acme/Widget/socket?ticket=${encodeURIComponent(ticket)}`);
     const res = await handleTrace(new Request(url.toString(), { method: "GET" }), env, url);

@@ -398,9 +398,18 @@ export async function resolveGithubCredentials(
   // 1. Check CredentialBroker candidates
   if (env.CREDENTIAL_BROKER) {
     const candidates: string[] = [];
-    if (owner && repo) candidates.push(`${owner}/${repo}`);
-    if (owner) candidates.push(owner);
-    candidates.push("default", "global");
+    const addCandidate = (name: string) => {
+      if (!candidates.includes(name)) candidates.push(name);
+    };
+    // Canonical (lowercase) spellings first - that is where writes land since addressing
+    // canonicalised - then the verbatim spellings a pre-canonicalisation store was written
+    // under, so existing tenants keep resolving (cloud-factory-cf-n23o).
+    if (owner && repo) addCandidate(`${owner}/${repo}`);
+    if (owner) addCandidate(owner);
+    if (owner && repo) addCandidate(`${owner}/${repo}`.toLowerCase());
+    if (owner) addCandidate(owner.toLowerCase());
+    addCandidate("default");
+    addCandidate("global");
 
     for (const name of candidates) {
       if (result.clientId && result.clientSecret && result.appId && result.privateKey) {

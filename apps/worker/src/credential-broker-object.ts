@@ -60,6 +60,17 @@ export function parseQuotaLimit(raw: unknown): number {
  */
 export const RESERVATION_TTL_MS = 60_000;
 
+/**
+ * Header carrying the repository spelling the caller used before the addressing
+ * canonicalised to lowercase (cloud-factory-cf-n23o). Written by the coordinator's
+ * authorise() forward, the routes' broker forwards, and the pipeline broker wrapper;
+ * consumed by resolveEffectiveSetting to find settings stored in a sibling object.
+ */
+const ORIGINAL_REPOSITORY_HEADER = "x-factory-original-repository";
+
+/** Settings key holding the recorded sibling spelling (never surfaced: /settings reads explicit keys). */
+const RECORDED_ORIGINAL_REPOSITORY_KEY = "migration.original_repository";
+
 export class CredentialBroker extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -84,6 +95,13 @@ export class CredentialBroker extends DurableObject<Env> {
         !(await this.isInternalCaller(request))) {
       return Response.json({ ok: false, error: "not authorised for broker internal route" }, { status: 401 });
     }
+
+    // Remember the caller's pre-canonicalisation spelling (same-repo case variants only):
+    // settings stored in the sibling object named by that spelling stay reachable from
+    // here, including for alarm-driven drains that carry no hint of their own
+    // (cloud-factory-cf-n23o). Behind the auth gate on purpose: an unauthenticated caller
+    // must not teach this object anything.
+    this.recordOriginalRepository(request.headers.get(ORIGINAL_REPOSITORY_HEADER));
 
     if (request.method === "POST" && url.pathname === "/capabilities") {
       return this.issue(request);
@@ -444,19 +462,23 @@ export class CredentialBroker extends DurableObject<Env> {
       return Response.json({ ok: true, login, sid: sid || "*", revokedBefore });
     }
     if (url.pathname === "/effective-webhook-secret") {
-      const effective = (await this.resolveEffectiveSetting("webhook.secret")) ?? this.env.WEBHOOK_SECRET ?? null;
+      const effective =
+        (await this.resolveEffectiveSetting("webhook.secret", request.headers.get(ORIGINAL_REPOSITORY_HEADER))) ??
+        this.env.WEBHOOK_SECRET ??
+        null;
       if (!effective) {
         return Response.json({ ok: false, error: "no webhook secret configured" }, { status: 503 });
       }
       return Response.json({ ok: true, secret: effective });
     }
     if (url.pathname === "/effective-github-app") {
-      const appId = (await this.resolveEffectiveSetting("github.app_id")) || this.env.GITHUB_APP_ID || null;
-      const appSlug = (await this.resolveEffectiveSetting("github.app_slug")) || this.env.GITHUB_APP_SLUG || null;
-      const clientId = (await this.resolveEffectiveSetting("github.client_id")) || this.env.GITHUB_CLIENT_ID || null;
-      const clientSecret = (await this.resolveEffectiveSetting("github.client_secret")) || this.env.GITHUB_CLIENT_SECRET || null;
-      const privateKey = (await this.resolveEffectiveSetting("github.private_key")) || this.env.GITHUB_PRIVATE_KEY || null;
-      const webhookSecret = (await this.resolveEffectiveSetting("webhook.secret")) || this.env.WEBHOOK_SECRET || null;
+      const hint = request.headers.get(ORIGINAL_REPOSITORY_HEADER);
+      const appId = (await this.resolveEffectiveSetting("github.app_id", hint)) || this.env.GITHUB_APP_ID || null;
+      const appSlug = (await this.resolveEffectiveSetting("github.app_slug", hint)) || this.env.GITHUB_APP_SLUG || null;
+      const clientId = (await this.resolveEffectiveSetting("github.client_id", hint)) || this.env.GITHUB_CLIENT_ID || null;
+      const clientSecret = (await this.resolveEffectiveSetting("github.client_secret", hint)) || this.env.GITHUB_CLIENT_SECRET || null;
+      const privateKey = (await this.resolveEffectiveSetting("github.private_key", hint)) || this.env.GITHUB_PRIVATE_KEY || null;
+      const webhookSecret = (await this.resolveEffectiveSetting("webhook.secret", hint)) || this.env.WEBHOOK_SECRET || null;
       return Response.json({
         ok: true,
         appId,
@@ -853,7 +875,7 @@ export class CredentialBroker extends DurableObject<Env> {
     if (envForService) {
       const settingKey = this.settingKeyForEnv(envForService);
       if (settingKey) {
-        const val = await this.resolveEffectiveSetting(settingKey);
+        const val = await this.resolveEffectiveSetting(settingKey, request.headers.get(ORIGINAL_REPOSITORY_HEADER));
         if (val) resolvedCredentialValue = val;
       }
     }
@@ -1594,9 +1616,67 @@ export class CredentialBroker extends DurableObject<Env> {
     return rows.length > 0 && rows[0] ? rows[0].value : null;
   }
 
-  private async resolveEffectiveSetting(key: string): Promise<string | null> {
+  /**
+   * Persists a caller's pre-canonicalisation spelling for later lookups (see
+   * resolveEffectiveSetting). Only same-repo case variants are ever recorded, and only
+   * through authenticated requests (the call site sits behind the internal/auth gate).
+   */
+  private recordOriginalRepository(hint: string | null | undefined): void {
+    const sibling = this.siblingRepository(hint);
+    if (!sibling) return;
+    const recorded = this.getSetting(RECORDED_ORIGINAL_REPOSITORY_KEY);
+    if (recorded === sibling) return;
+    this.setSetting(RECORDED_ORIGINAL_REPOSITORY_KEY, sibling, new Date().toISOString());
+  }
+
+  /**
+   * The bare repository spelling a hint names, when it is a case variant of THIS object's
+   * repository and not the canonical spelling itself. Anything else - another repository,
+   * a bare owner, a reserved address - returns null: a hint must never widen a lookup
+   * across tenants (cloud-factory-cf-n23o).
+   */
+  private siblingRepository(hint: string | null | undefined): string | null {
+    const trimmed = hint?.trim();
+    if (!trimmed) return null;
+    const withoutPrefix = trimmed.includes(":") ? trimmed.split(":").slice(1).join(":") : trimmed;
+    const own = this.repository;
+    if (withoutPrefix.toLowerCase() !== own.toLowerCase()) return null;
+    if (withoutPrefix === own) return null;
+    return withoutPrefix;
+  }
+
+  private async resolveEffectiveSetting(
+    key: string,
+    originalRepositoryHint?: string | null,
+  ): Promise<string | null> {
     const direct = this.getSetting(key);
     if (direct !== null && direct.length > 0) return direct;
+
+    // Settings written before the addressing canonicalised sit in a sibling object named
+    // by the caller's spelling (cloud-factory-cf-n23o). Probe that sibling - the fresh
+    // hint first, then the recorded spelling - and COPY what it holds: the canonical
+    // object converges instead of looking empty forever. Settings are copied values, not
+    // counters, so a copy cannot double-count anything.
+    for (const spelling of [originalRepositoryHint, this.getSetting(RECORDED_ORIGINAL_REPOSITORY_KEY)]) {
+      const sibling = this.siblingRepository(spelling);
+      if (!sibling) continue;
+      try {
+        const siblingStub = this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(sibling));
+        const res = await siblingStub.fetch(
+          `https://credential-broker.internal/internal-setting?key=${encodeURIComponent(key)}`,
+          { headers: await brokerInternalHeaders(this.env, sibling) },
+        );
+        if (res.ok) {
+          const data = (await res.json().catch(() => null)) as { ok?: boolean; value?: string | null } | null;
+          if (data?.ok && typeof data.value === "string" && data.value.length > 0) {
+            this.setSetting(key, data.value, new Date().toISOString());
+            return data.value;
+          }
+        }
+      } catch {
+        // ignore lookup failure
+      }
+    }
 
     const repoStr = this.repository;
     const cleanRepo = repoStr.includes(":") ? repoStr.split(":")[1]! : repoStr;

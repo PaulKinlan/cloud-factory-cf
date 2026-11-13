@@ -1,8 +1,15 @@
 import type { Env } from "../env";
 import { MAX_WEBHOOK_BYTES, verifyGithubSignature } from "../webhooks";
-import { type DevPlatform, repositoryKey } from "@factory-cloud/sdk";
 import { readBodyWithinLimit } from "../events/helpers";
 import { resolveRepositoryKey } from "../repo-coordinator-addressing";
+
+/**
+ * Header carrying the repository spelling the caller used BEFORE canonicalisation
+ * (cloud-factory-cf-n23o). The coordinator probes it as a migration candidate, so
+ * history stored under a pre-canonicalisation spelling (GitHub's own casing, or an
+ * un-prefixed legacy object) stays reachable from the canonical object.
+ */
+export const LEGACY_REPOSITORY_HEADER = "x-factory-legacy-repository";
 
 export const WEBHOOK_PATH = /^\/webhooks\/(?<provider>github|gitlab|gitea)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/;
 export const GLOBAL_GITHUB_WEBHOOK_PATH = "/webhooks/github";
@@ -12,8 +19,15 @@ export const GLOBAL_GITHUB_WEBHOOK_PATH = "/webhooks/github";
  * `content-length`/`host` on a new Request with a different body is a
  * foot-gun in the Workers runtime.
  */
-export function forwardableHeaders(headers: Headers, repository: string): Headers {
+export function forwardableHeaders(
+  headers: Headers,
+  repository: string,
+  repositoryAsSpelled?: string,
+): Headers {
   const forwarded = new Headers({ "x-factory-repository": repository });
+  if (repositoryAsSpelled) {
+    forwarded.set(LEGACY_REPOSITORY_HEADER, repositoryAsSpelled);
+  }
   for (const name of [
     // GitHub
     "x-hub-signature-256",
@@ -73,12 +87,15 @@ export async function routeWebhooks(
   // /widgets` builds the string `github:acme/widgets`, which parses as a prefixed key, so a
   // GITLAB delivery was addressed to the GITHUB coordinator for acme/widgets - cross-provider
   // key spoofing from URL text alone (cloud-factory-cf-6eqm). A colon is the key separator, so
-  // an owner or repository segment may not contain one at all.
+  // an owner or repository segment may not contain one at all. The colon refusal below is
+  // what makes the resolver's prefix handling inert here, so resolving through it (rather
+  // than building the key directly) costs nothing and keeps ONE canonicaliser for every
+  // ingress branch - the path branch and the payload branch must never fork (n23o).
   const repository = `${owner}/${repo}`;
   if (repository.includes(":")) {
     return Response.json({ ok: false, error: "invalid repository" }, { status: 400 });
   }
-  const repoKey = repositoryKey(provider as DevPlatform, repository);
+  const repoKey = resolveRepositoryKey(repository, provider);
   const stub = env.REPO_COORDINATOR.get(
     env.REPO_COORDINATOR.idFromName(repoKey),
   );
@@ -87,7 +104,7 @@ export async function routeWebhooks(
     `https://repo-coordinator.internal/events?provider=${encodeURIComponent(provider)}`,
     {
       method: "POST",
-      headers: forwardableHeaders(request.headers, repoKey),
+      headers: forwardableHeaders(request.headers, repoKey, repository),
       body: bodyText,
     },
   );
@@ -180,11 +197,13 @@ export async function handleGlobalGithubWebhook(
   if (typeof repoFullName === "string" && /^[^/:\s]+\/[^/:\s]+$/.test(repoFullName)) {
     const repoKey = resolveRepositoryKey(repoFullName, "github");
     const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(repoKey));
+    // The payload casing is GitHub's own canonical spelling - exactly how pre-canonicalisation
+    // objects were named, so it is the strongest migration hint this request can carry.
     const forwarded = new Request(
       `https://repo-coordinator.internal/events?provider=github`,
       {
         method: "POST",
-        headers: forwardableHeaders(request.headers, repoKey),
+        headers: forwardableHeaders(request.headers, repoKey, repoFullName),
         body: bodyText,
       },
     );

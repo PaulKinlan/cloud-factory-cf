@@ -57,6 +57,17 @@ In Worker route handlers (`webhooks.ts`, `canvas.ts`, `runs.ts`, `trace.ts`, `au
   2. If `platformHint` is provided (e.g. from `/webhooks/:provider` or `?platform=`), use `repositoryKey(platformHint, repository)`.
   3. Otherwise, default to GitHub: `repositoryKey('github', repository)`.
 
+**Canonical casing (cloud-factory-cf-n23o):** the helper (`resolveRepositoryKey`) folds the
+owner/repo part of every key to lowercase, for every caller and both DO families
+(RepoCoordinator prefixed keys, CredentialBroker bare keys via `resolveBrokerRepository`).
+Webhook payloads carry the provider's own casing while trace URLs carry the operator's
+typing; without one canonical spelling the same repository forked into two objects and a
+mixed-case tenant read 0 evidence. State already stored under a pre-canonicalisation
+spelling is recovered by the §3.2 read-through (a prefixed mixed-case candidate derived
+from the caller's spelling), and CredentialBroker settings written under a case-variant
+spelling are found through the `x-factory-original-repository` hint and copied on first
+read.
+
 ### 3.2 Read-Through Migration Protocol in `RepoCoordinator`
 
 1. **Migration Flag Table**:

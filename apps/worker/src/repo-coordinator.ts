@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { parseRepositoryKey } from "@factory-cloud/sdk";
 import type { Env } from "./env";
+import { resolveRepositoryKey } from "./repo-coordinator-addressing";
 import { planAgents, sourceMatches } from "./canvas-runs";
 import { readBodyWithinLimit, safeParseJson } from "./events/helpers";
 import { isMissingSchemaError } from "./events/sql-errors";
@@ -133,11 +134,14 @@ export class RepoCoordinator extends DurableObject<Env> {
       // Legacy un-prefixed DO: proxy request to platform-prefixed DO (ADR 003 Slice 3).
       // Carry this object's own name: it is the only surviving record of the spelling
       // the caller used, so the prefixed object can probe it as a migration candidate
-      // instead of orphaning its history (cloud-factory-cf-ik4w).
+      // instead of orphaning its history (cloud-factory-cf-ik4w). The target goes through
+      // the resolver so the proxy lands on the CANONICAL spelling, not a verbatim copy of
+      // this object's name - addressing changed once, it must not fork again
+      // (cloud-factory-cf-n23o).
       const headers = new Headers(request.headers);
       headers.set(LEGACY_REPOSITORY_HEADER, name);
       const targetStub = this.env.REPO_COORDINATOR.get(
-        this.env.REPO_COORDINATOR.idFromName(`github:${name}`),
+        this.env.REPO_COORDINATOR.idFromName(resolveRepositoryKey(name)),
       );
       return targetStub.fetch(new Request(request, { headers }));
     }
@@ -226,10 +230,14 @@ export class RepoCoordinator extends DurableObject<Env> {
    *   been probed and every merge was lossless (cloud-factory-cf-tgu9). An empty probe
    *   never seals, and an existing seal never stops a spelling that is seen later.
    *
-   * The candidates are this object's own un-prefixed name and the spelling the caller
-   * used, which the un-prefixed proxy in `fetch` carries in `x-factory-legacy-repository`.
-   * That header can only name the same repository (a case variant of it), so it can
-   * never point the migration at another tenant's object.
+   * The candidates are this object's own un-prefixed name, the spelling the caller used
+   * (which the un-prefixed proxy in `fetch` carries in `x-factory-legacy-repository`, and
+   * which the webhook/trace edges now forward too), and - since the addressing became
+   * canonical-lowercase - the caller's spelling as a PLATFORM-PREFIXED name, because a
+   * pre-canonicalisation object named `github:Acme/Widget` is exactly where a mixed-case
+   * tenant's whole history sits (cloud-factory-cf-n23o). A hint that names a *different*
+   * repository is ignored, and a candidate that IS this object is dropped: probing
+   * yourself would export your own state and sum it back into you.
    */
   private async ensureMigrated(legacyHint?: string | null): Promise<void> {
     const name = this.ctx.id.name ?? "";
@@ -242,7 +250,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       throw new Error(`BROKER_CONTROL_KEY is unconfigured: migration for ${parsed.repository} cannot proceed`);
     }
 
-    const candidates = legacyCandidateNames(parsed.repository, legacyHint);
+    const candidates = legacyCandidateNames(parsed.repository, legacyHint, name);
 
     // Nothing left to learn and nothing left to write: once the repository is sealed and
     // every known spelling is probed, this must not touch the database at all. It used to
@@ -924,8 +932,14 @@ export class RepoCoordinator extends DurableObject<Env> {
           const parsed = parseRepositoryKey(repoName);
           const brokerRepo = parsed ? parsed.repository : repoName;
           const broker = this.env.CREDENTIAL_BROKER.get(this.env.CREDENTIAL_BROKER.idFromName(brokerRepo));
+          const brokerHeaders = await brokerInternalHeaders(this.env, brokerRepo);
+          // Forward the caller's original spelling: a delivery arriving under the canonical
+          // lowercase name must still find broker settings stored pre-canonicalisation under
+          // the payload casing, or its signature check 401s (cloud-factory-cf-w4w1/n23o).
+          const originalSpelling = headers.get(LEGACY_REPOSITORY_HEADER)?.trim();
+          if (originalSpelling) brokerHeaders.set("x-factory-original-repository", originalSpelling);
           const res = await broker.fetch("https://credential-broker.internal/effective-webhook-secret", {
-            headers: await brokerInternalHeaders(this.env, brokerRepo),
+            headers: brokerHeaders,
           });
           if (res.ok) {
             const data = (await res.json().catch(() => ({}))) as { secret?: string };
@@ -1003,7 +1017,17 @@ export class RepoCoordinator extends DurableObject<Env> {
     const rawRepo = this.ctx.id.name;
     const parsed = rawRepo ? parseRepositoryKey(rawRepo) : null;
     const repoName = parsed ? parsed.repository : rawRepo;
-    const owner = repoName ? repoName.split("/")[0] : null;
+    let owner = repoName ? repoName.split("/")[0] : null;
+    // Org objects are still named by the login's own casing (installation payloads write
+    // verbatim logins), so the folded repository key's owner segment would silently move
+    // this traffic to a lowercase org object no installation ever wrote to. The caller's
+    // original spelling carries the pre-fold casing when it names the same repository;
+    // anything else is refused as a hint (cloud-factory-cf-n23o).
+    const hint = request.headers.get(LEGACY_REPOSITORY_HEADER)?.trim();
+    if (owner && hint) {
+      const hintOwner = (parseRepositoryKey(hint)?.repository ?? hint).split("/")[0];
+      if (hintOwner && sameRepository(hint, repoName ?? "")) owner = hintOwner;
+    }
     if (!owner || !this.env.ORG_COORDINATOR) {
       return Response.json({ ok: false, error: "org coordinator not available" }, { status: 503 });
     }
@@ -1074,19 +1098,33 @@ const LEGACY_REPOSITORY_HEADER = "x-factory-legacy-repository";
  * name the un-prefixed proxy carried; a hint that names a *different* repository is
  * ignored, so a caller cannot point the migration at another tenant's object.
  */
-function legacyCandidateNames(repository: string, hint?: string | null): string[] {
+function legacyCandidateNames(
+  repository: string,
+  hint?: string | null,
+  ownName = "",
+): string[] {
   const names: string[] = [];
   const add = (value: string | null | undefined) => {
     const trimmed = value?.trim();
-    if (!trimmed || names.includes(trimmed)) return;
+    // Never probe the canonical object itself: the probe would export this object's own
+    // state and merge it back, double-counting the connect counter.
+    if (!trimmed || trimmed === ownName || names.includes(trimmed)) return;
     names.push(trimmed);
   };
+
+  const platform = parseRepositoryKey(ownName)?.platform ?? "github";
 
   const hintName = hint?.trim();
   if (hintName) {
     const parsedHint = parseRepositoryKey(hintName);
     const plain = parsedHint ? parsedHint.repository : hintName;
     if (plain.toLowerCase() === repository.toLowerCase()) {
+      // The caller's spelling may name a whole second object holding this repository's
+      // history: pre-canonicalisation, deliveries were stored under `github:<payload
+      // casing>` (cloud-factory-cf-n23o), and before prefixed addressing existed, under a
+      // bare un-prefixed name (cloud-factory-cf-ik4w). Both spellings get probed.
+      if (parsedHint) add(hintName);
+      else add(`${platform}:${plain}`);
       add(plain);
       add(plain.toLowerCase());
     }

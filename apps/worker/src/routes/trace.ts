@@ -3,6 +3,7 @@ import { sameSecret } from "../secrets";
 import { getRepoCoordinator, resolveRepositoryKey } from "../repo-coordinator-addressing";
 import { isDevPlatform } from "@factory-cloud/sdk";
 import { authorizeControlPlane, authzDenial, sessionMayAddressPlatform } from "../auth/tenant";
+import { LEGACY_REPOSITORY_HEADER } from "./webhooks";
 
 /**
  * Public surface for the observability suite (cloud-factory-cf-2ng).
@@ -90,11 +91,12 @@ export interface TraceTicketIdentity {
  * (cloud-factory-cf-idqf). Resolving from the ticket's own fields means every replay lands in
  * the same object and is refused there.
  *
- * The spelling is used EXACTLY as the ticket carries it, never case-folded: coordinator
- * objects are case-sensitive, and a real GitHub delivery for `Acme/Widget` is stored in
- * `github:Acme/Widget`, so folding here would stream an empty coordinator instead of the
- * repository's own trace (cloud-factory-cf-skhd). The URL no longer contributes to the key,
- * which is what makes folding unnecessary rather than what makes it safe.
+ * The spelling is canonicalised like every other caller's: the resolver folds owner/repo
+ * to lowercase, so the ticket's object IS the object webhook deliveries land in, whatever
+ * casing either side used (cloud-factory-cf-n23o). That is also what keeps the skhd
+ * property true - the store is derived from the TICKET, and with canonical addressing the
+ * ticket, the URL and ingestion all resolve to one object, so a case-flipped URL cannot
+ * move the nonce store and folding cannot strand the stream on an empty coordinator.
  */
 export function ticketRepositoryKey(identity: Pick<TraceTicketIdentity, "platform" | "owner" | "repo">): string {
   return resolveRepositoryKey(`${identity.owner}/${identity.repo}`, identity.platform);
@@ -261,10 +263,12 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
 
     const limit = url.searchParams.get("limit");
     const forwarded = limit === null ? "" : `?limit=${encodeURIComponent(limit)}`;
+    const socketHeaders = new Headers(request.headers);
+    socketHeaders.set(LEGACY_REPOSITORY_HEADER, `${owner}/${repo}`);
     return socketStub.fetch(
       new Request(`https://repo-coordinator.internal/trace/socket${forwarded}`, {
         method: "GET",
-        headers: request.headers,
+        headers: socketHeaders,
       }),
     );
   }
@@ -282,11 +286,31 @@ export async function handleTrace(request: Request, env: Env, url: URL): Promise
   }
 
   if (operation === "usage") {
-    return stub.fetch("https://repo-coordinator.internal/trace/usage");
+    return stub.fetch("https://repo-coordinator.internal/trace/usage", {
+      headers: traceHintHeaders(owner, repo),
+    });
   }
   if (operation === "connect") {
-    return stub.fetch("https://repo-coordinator.internal/connect");
+    return stub.fetch("https://repo-coordinator.internal/connect", {
+      headers: traceHintHeaders(owner, repo),
+    });
   }
   const query = url.searchParams.toString();
-  return stub.fetch(`https://repo-coordinator.internal/trace${query === "" ? "" : `?${query}`}`);
+  return stub.fetch(
+    `https://repo-coordinator.internal/trace${query === "" ? "" : `?${query}`}`,
+    { headers: traceHintHeaders(owner, repo) },
+  );
+}
+
+/**
+ * Carries the spelling the caller typed into the coordinator (cloud-factory-cf-n23o): a
+ * read is often the FIRST request after a deploy that changed the canonical spelling, and
+ * the hint is what lets the canonical object probe - and recover - history stored under
+ * the pre-canonicalisation one. The coordinator re-checks that the hint names the same
+ * repository, so a mistyped URL cannot point the migration at another tenant's object.
+ */
+function traceHintHeaders(owner: string, repo: string): Headers {
+  const headers = new Headers();
+  headers.set(LEGACY_REPOSITORY_HEADER, `${owner}/${repo}`);
+  return headers;
 }

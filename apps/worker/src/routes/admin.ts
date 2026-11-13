@@ -1,5 +1,5 @@
 import type { Env } from "../env";
-import { getRepoCoordinator } from "../repo-coordinator-addressing";
+import { getRepoCoordinator, resolveBrokerRepository } from "../repo-coordinator-addressing";
 import {
   authorizeControlPlane,
   authzDenial,
@@ -88,7 +88,11 @@ export async function routeAdminSettings(
   }
 
   const repository = `${owner}/${repo}`;
-  const stub = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository));
+  // Canonical lowercase broker name, so settings written here are the ones the (also
+  // canonical) coordinator and delegation paths read (cloud-factory-cf-n23o).
+  const stub = env.CREDENTIAL_BROKER.get(
+    env.CREDENTIAL_BROKER.idFromName(resolveBrokerRepository(repository)),
+  );
 
   const headers = new Headers({ "content-type": "application/json" });
   const controlKey = request.headers.get("x-factory-control-key");
@@ -141,10 +145,16 @@ export async function routeAdminTestPing(
   const repository = `${owner}/${repo}`;
   let secret: string | undefined = undefined;
 
-  const broker = env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository));
+  const broker = env.CREDENTIAL_BROKER.get(
+    env.CREDENTIAL_BROKER.idFromName(resolveBrokerRepository(repository)),
+  );
   try {
+    const pingHeaders = await brokerInternalHeaders(env, resolveBrokerRepository(repository));
+    // Keep the caller's spelling discoverable for settings stored pre-canonicalisation
+    // (cloud-factory-cf-n23o).
+    pingHeaders.set("x-factory-original-repository", repository);
     const secretRes = await broker.fetch("https://credential-broker.internal/effective-webhook-secret", {
-      headers: await brokerInternalHeaders(env, repository),
+      headers: pingHeaders,
     });
     if (secretRes.ok) {
       const data = (await secretRes.json().catch(() => ({}))) as { secret?: string };

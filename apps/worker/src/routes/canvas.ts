@@ -3,7 +3,7 @@ import { traceSink } from "../events";
 import { runCanvasDocument } from "../canvas-runs";
 import { authorizeControlPlane, authzDenial, sessionMayAddressPlatform } from "../auth/tenant";
 import { mintDelegation } from "../auth/delegation";
-import { getRepoCoordinator } from "../repo-coordinator-addressing";
+import { brokerWithOriginalRepository, getRepoCoordinator } from "../repo-coordinator-addressing";
 import { MAX_CANVAS_BODY_BYTES, MAX_CANVAS_RUN_BODY_BYTES } from "../canvas-store";
 import { readBodyWithinLimit } from "../events/helpers";
 
@@ -95,7 +95,7 @@ export async function routeCanvasRun(
         ? { controlKey: env.BROKER_CONTROL_KEY as string }
         : { delegation }),
       coordinator,
-      broker: env.CREDENTIAL_BROKER.get(env.CREDENTIAL_BROKER.idFromName(repository)),
+      broker: brokerWithOriginalRepository(env, repository),
       onStep: traceSink(coordinator),
       ...(env.TELEMETRY_ENDPOINT === undefined ? {} : { telemetryEndpoint: env.TELEMETRY_ENDPOINT }),
     },
