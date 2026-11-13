@@ -237,6 +237,56 @@ describe("tenant-bound control-plane sessions (cloud-factory-cf-e1ql)", () => {
 });
 
 /**
+ * A platform owner (a login in the deployment allowlist, ADR 006) has the whole deployment
+ * as its tenant scope, but it is still a browser session: it keeps its login, and it stays
+ * on the provider it signed in with. Promoting it to the machine principal is what let a
+ * GitHub cookie address a GitLab tenant with a nameless principal in the audit trail
+ * (cloud-factory-cf-l6ya).
+ */
+describe("platform owner sessions keep their login and their provider (cloud-factory-cf-l6ya)", () => {
+  const ownerBindings = () => ({ ...env, PLATFORM_OWNERS: "octodev" });
+
+  it("may address another tenant's audit log, as a session", async () => {
+    const res = await call(
+      "/audit/events/victimorg/widget-service",
+      { headers: { cookie: await session("octodev") } },
+      ownerBindings(),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; repository: string };
+    expect(body.repository).toBe("victimorg/widget-service");
+  });
+
+  it("cannot switch provider: a session names one provider, whoever its login is", async () => {
+    for (const route of [
+      "/audit/events/octodev/widget-service?platform=gitlab",
+      "/audit/events/victimorg/widget-service?platform=gitlab",
+    ]) {
+      const res = await call(route, { headers: { cookie: await session("octodev") } }, ownerBindings());
+      expect(res.status, `${route} must refuse a provider switch for a platform owner's session`).toBe(403);
+    }
+  });
+
+  it("keeps the machine key as the lever for other providers", async () => {
+    // The operator keeps the deployment-wide lever; it is the key, not the cookie.
+    const res = await call(
+      "/audit/events/victimorg/widget-service?platform=gitlab",
+      { headers: { "x-factory-control-key": CONTROL_KEY } },
+    );
+    expect(res.status).not.toBe(403);
+  });
+
+  it("still binds a login that is not on the allowlist to its own tenant", async () => {
+    const res = await call(
+      "/audit/events/victimorg/widget-service",
+      { headers: { cookie: await session("mallory") } },
+      ownerBindings(),
+    );
+    expect(res.status).toBe(403);
+  });
+});
+
+/**
  * A GitHub login that collides with a reserved CredentialBroker scope
  * (cloud-factory-cf-htc0).
  *

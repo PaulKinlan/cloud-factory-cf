@@ -15,8 +15,11 @@ const CAPABILITY_AUTHORISED_OPERATIONS: readonly string[] = ["proxy"];
 
 /**
  * Operations the broker object only accepts the machine control key for. A browser
- * session is a tenant credential, not the platform operator, so the route refuses it
- * with a 403 instead of letting the object answer a bare 401.
+ * session is a tenant credential, not the machine key, so the route refuses it with a 403
+ * instead of letting the object answer a bare 401 — and that includes a platform owner's
+ * session: its scope is the whole deployment (ADR 006), but it is still a cookie, not the
+ * operator's key, so provisioning, overrides and cross-tenant broker audit stay a machine
+ * action (cloud-factory-cf-l6ya).
  */
 const MACHINE_KEY_OPERATIONS: readonly string[] = ["provisioning", "overrides", "audit"];
 
@@ -82,16 +85,19 @@ export async function routeBroker(
         );
       }
       // The browser proved a login, not the master key: hand the object a delegation
-      // for this repository alone, never a key that names every tenant.
+      // for this repository alone, never a key that names every tenant. A platform
+      // owner's session is still a session, so its cross-tenant reach arrives as a
+      // delegation naming its login rather than as the deployment key
+      // (cloud-factory-cf-l6ya).
       const delegation = await mintDelegation(env, { repository, login: authz.principal.login });
       if (delegation === undefined) {
         return Response.json({ ok: false, error: "broker signing key not configured" }, { status: 503 });
       }
       headers.set("x-factory-delegation", delegation);
     } else {
-      // Machine principal (or the platform owner's session): present the deployment's
-      // own credential. A caller-supplied header is never forwarded, so the object only
-      // ever sees a key this Worker authenticated or a delegation it minted.
+      // Machine principal: present the deployment's own credential. A caller-supplied
+      // header is never forwarded, so the object only ever sees a key this Worker
+      // authenticated or a delegation it minted.
       headers = await brokerInternalHeaders(env, repository, baseHeaders);
     }
   }

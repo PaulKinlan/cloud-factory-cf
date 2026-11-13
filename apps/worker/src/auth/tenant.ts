@@ -18,8 +18,9 @@ import { CONTROL_KEY_ATTEMPT_LIMIT_MACHINE, clientIdentity, controlKeyThrottle }
  *
  * | Caller | Credential | May touch |
  * | --- | --- | --- |
- * | Machine (CLI, scheduler, operator) | `x-factory-control-key` | any tenant |
- * | Browser | `cf_session` cookie | only the login it was minted for |
+ * | Machine (CLI, scheduler, operator) | `x-factory-control-key` | any provider, any tenant |
+ * | Browser | `cf_session` cookie | the login it was minted for, on its provider |
+ * | Browser, platform owner (`PLATFORM_OWNERS`) | `cf_session` cookie | any tenant of its provider |
  *
  * The binding is the tenant boundary: a valid session for `alice` reading
  * `/audit/events/bob/widgets` is a `cross-tenant` denial (403), not a retry with a
@@ -34,7 +35,20 @@ import { CONTROL_KEY_ATTEMPT_LIMIT_MACHINE, clientIdentity, controlKeyThrottle }
 /** Who called, and which credential proved it. */
 export type ControlPrincipal =
   | { via: "control-key" }
-  | { via: "session"; login: string };
+  /**
+   * A browser session proves one login on one provider. `platformOwner` marks a login in
+   * the deployment's `PLATFORM_OWNERS` allowlist (ADR 006), whose tenant scope is the
+   * whole deployment: the `:owner` binding is widened for it and nothing else is.
+   */
+  | { via: "session"; login: string; platformOwner?: true };
+
+/**
+ * Whether this principal is the deployment operator's *browser session* — a login in the
+ * `PLATFORM_OWNERS` allowlist — as opposed to the machine key (ADR 006).
+ */
+export function isPlatformOwnerPrincipal(principal: ControlPrincipal): boolean {
+  return principal.via === "session" && principal.platformOwner === true;
+}
 
 export type ControlDenialReason = "unconfigured" | "unauthorised" | "cross-tenant" | "throttled";
 
@@ -76,6 +90,11 @@ export interface ControlAuthzOptions {
  *
  * Without this, an owner-only comparison plus `?platform=gitlab` reads another provider's
  * data (cloud-factory-cf-tw9d, -fcwm).
+ *
+ * A platform owner's session is a session: it signed in through one provider, so it names
+ * one provider too. Treating it as the machine principal here is what let a GitHub cookie
+ * reach a GitLab tenant (cloud-factory-cf-l6ya); the operator lever for the rest of the
+ * deployment is the control key, which this function already allows.
  */
 export function sessionMayAddressPlatform(
   principal: ControlPrincipal,
@@ -156,14 +175,24 @@ export async function authorizeControlPlane(
   if (signingKey) {
     const session = await readSession(request.headers, env);
     if (session.ok) {
-      if (isRootLogin(session.login, env)) {
-        return { ok: true, principal: { via: "control-key" } };
-      }
+      // A platform owner (a login in the deployment allowlist, ADR 006) may address any
+      // tenant, but it is still a *browser session*: it keeps its login and its provider.
+      // This used to be rewritten to `via: "control-key"`, which handed a cookie the
+      // machine principal - any provider, a nameless entry in the audit trail, the
+      // machine-key-only broker operations, and `undefined` wherever a route minted a
+      // delegation from `principal.login` (cloud-factory-cf-l6ya).
+      const platformOwner = isRootLogin(session.login, env);
       const owner = options.owner;
-      if (owner !== undefined && owner.toLowerCase() !== session.login.toLowerCase()) {
+      if (
+        !platformOwner &&
+        owner !== undefined &&
+        owner.toLowerCase() !== session.login.toLowerCase()
+      ) {
         return { ok: false, reason: "cross-tenant" };
       }
-      const principal: ControlPrincipal = { via: "session", login: session.login };
+      const principal: ControlPrincipal = platformOwner
+        ? { via: "session", login: session.login, platformOwner: true }
+        : { via: "session", login: session.login };
       if (!sessionMayAddressPlatform(principal, options.platform)) {
         return { ok: false, reason: "cross-tenant" };
       }
