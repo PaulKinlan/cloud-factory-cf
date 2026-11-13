@@ -20,7 +20,8 @@
     "run_worker_first": true
   },
   "vars": {
-    "ENVIRONMENT": "development",
+    // No committed ENVIRONMENT: deployments default to the strict session-cookie policy
+    // (cloud-factory-cf-nmjd). See apps/worker/wrangler.jsonc for the rationale.
     "GITHUB_APP_SLUG": "cloud-agent-factory"
   },
   "durable_objects": {

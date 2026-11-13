@@ -19,6 +19,11 @@ export default defineConfig({
           BROKER_QUOTA_PER_MINUTE: "4",
           GITHUB_TOKEN: "ghp_test_github_credential",
           GITLAB_TOKEN: "glpat_test_gitlab_credential",
+          // Local mode for the test environment: the plain cf_session name is what the
+          // suite mints, and the production refusal for it is pinned explicitly in
+          // session-cookie-name.test.ts. This used to come from wrangler.jsonc vars;
+          // deployments no longer carry it (cloud-factory-cf-nmjd).
+          ENVIRONMENT: "development",
           // Beads sink: a test host + token so the broker path can be exercised
           // end to end without any real service.
           BEADS_API_HOST: "beads.test",

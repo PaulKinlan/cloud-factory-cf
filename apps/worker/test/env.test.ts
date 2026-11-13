@@ -28,10 +28,11 @@ describe("Worker environment configuration", () => {
   it("detects when a required binding is missing from an environment record", () => {
     const incompleteEnv: Record<string, unknown> = {
       REPO_COORDINATOR: env.REPO_COORDINATOR,
-      // CREDENTIAL_BROKER and ENVIRONMENT intentionally omitted
+      // CREDENTIAL_BROKER intentionally omitted; ENVIRONMENT is an optional deployment
+      // setting, not a required binding (cloud-factory-cf-nmjd).
     };
 
     const missing = REQUIRED_WORKER_BINDINGS.filter((binding) => incompleteEnv[binding] === undefined);
-    expect(missing).toEqual(["CREDENTIAL_BROKER", "ENVIRONMENT"]);
+    expect(missing).toEqual(["CREDENTIAL_BROKER"]);
   });
 });

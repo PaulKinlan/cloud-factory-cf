@@ -131,6 +131,27 @@ describe("session cookie name", () => {
     expect(await sessionLoginAt(testEnv(), `${SESSION_COOKIE}=${fresh}`, afterCutoff)).toBe("tossed-owner");
   });
 
+  it("treats an unset ENVIRONMENT like production, never like local (cloud-factory-cf-nmjd)", async () => {
+    // A deployment that carries no ENVIRONMENT at all — the state this repo's wrangler
+    // configs now ship — must get the strict policy. The committed `development` default
+    // used to flip exactly this branch and re-open 79jv on every public URL that did not
+    // override it.
+    const unset = testEnv({ ENVIRONMENT: undefined });
+    const now = LEGACY_PLAIN_COOKIE_UNTIL_MS + 60 * 60 * 1000;
+
+    const fresh = await mintSessionToken(SIGNING_KEY, "tossed-owner", now);
+    expect(await sessionLoginAt(unset, `${SESSION_COOKIE}=${fresh}`, now)).toBeNull();
+
+    const preUpgrade = await mintSessionToken(
+      SIGNING_KEY,
+      "legacy-owner",
+      LEGACY_PLAIN_COOKIE_UNTIL_MS - 60 * 60 * 1000,
+    );
+    expect(
+      await sessionLoginAt(unset, `${SESSION_COOKIE}=${preUpgrade}`, LEGACY_PLAIN_COOKIE_UNTIL_MS - 60 * 60 * 1000),
+    ).toBe("legacy-owner");
+  });
+
   it("clears every accepted cookie name on logout", async () => {
     const token = await mintSessionToken(SIGNING_KEY, "real-owner");
     const cleared = await logout("https://example.com", `${HOST_SESSION_COOKIE}=${token}`);

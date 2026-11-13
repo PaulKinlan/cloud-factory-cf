@@ -63,7 +63,15 @@ plain variable:
 
 | Kind | Name | Value in the repo |
 | --- | --- | --- |
-| var | `ENVIRONMENT` | `development` in `wrangler.jsonc` — override per deployment |
+| var | `GITHUB_APP_SLUG` | `cloud-agent-factory` in `wrangler.jsonc` |
+
+`ENVIRONMENT` is deliberately **not** set in the repo (cloud-factory-cf-nmjd): a
+deployment without it enforces the strict session-cookie policy, so a plain `cf_session`
+cookie only authenticates below the legacy migration cutoff. The old committed
+`development` default silently re-opened that door on every deployment that did not
+override it. Only a genuinely local `wrangler dev` should set `ENVIRONMENT=development`
+(via `.dev.vars` — see [`apps/worker/.dev.vars.example`](../apps/worker/.dev.vars.example):
+plain http cannot hold a `__Host-` cookie), and a public deployment must never set it.
 
 Everything else is a secret, read through `FactoryEnv` in
 [`apps/worker/src/env.ts`](../apps/worker/src/env.ts):
@@ -118,9 +126,9 @@ npm run deploy -w @factory-cloud/worker    # wrangler deploy, cwd=apps/worker
 
 Both paths were verified with `--dry-run` on this repo: the bundle uploads
 ~200 KiB (39 KiB gzip), reads 5 files from `apps/web/dist`, and reports
-`REPO_COORDINATOR`, `CREDENTIAL_BROKER`, `ORG_COORDINATOR`, `ASSETS` and
-`ENVIRONMENT`. The deploy prints the Worker URL
-(`https://cloud-factory-cf.<subdomain>.workers.dev` unless you set a route/domain).
+`REPO_COORDINATOR`, `CREDENTIAL_BROKER`, `ORG_COORDINATOR` and `ASSETS`. The deploy prints
+the Worker URL (`https://cloud-factory-cf.<subdomain>.workers.dev` unless you set a
+route/domain).
 
 **Do not** run `wrangler deploy` from the repo root without `-c`: there is no
 root-level wrangler config, so wrangler would fail to find one.

@@ -27,7 +27,13 @@
     "run_worker_first": true
   },
   "vars": {
-    "ENVIRONMENT": "development",
+    // No committed ENVIRONMENT: a deployment without it runs the strict session-cookie
+    // policy (plain cf_session only honoured below the migration cutoff), which is the
+    // safe default for anything public (cloud-factory-cf-nmjd). A local `wrangler dev`
+    // sets ENVIRONMENT=development in .dev.vars (see .dev.vars.example) — plain http
+    // there cannot hold a __Host- cookie. A deployment that deliberately wants the
+    // permissive policy must pass it explicitly, e.g. `wrangler deploy --var
+    // ENVIRONMENT=development`, and owns the risk.
     "GITHUB_APP_SLUG": "cloud-agent-factory"
   },
   "durable_objects": {

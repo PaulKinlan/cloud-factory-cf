@@ -69,13 +69,17 @@ export interface FactoryEnv {
    */
   PLATFORM_OWNERS?: string;
   ROOT_ADMIN_LOGINS?: string;
-  ENVIRONMENT: string;
+  /**
+   * Unset on any real deployment since cloud-factory-cf-nmjd: the committed default was
+   * `development`, which let a plain `cf_session` cookie authenticate anywhere. Only a
+   * deliberately local deployment (wrangler dev via .dev.vars) may set it.
+   */
+  ENVIRONMENT?: string;
 }
 
 export const REQUIRED_WORKER_BINDINGS = [
   "REPO_COORDINATOR",
   "CREDENTIAL_BROKER",
-  "ENVIRONMENT",
 ] as const;
 
 /** The bindings the Worker itself sees. */
