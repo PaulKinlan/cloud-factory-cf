@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -15,9 +15,9 @@ import { describe, expect, it } from "vitest";
  * `wrangler dev` gets `ENVIRONMENT=development` from `.dev.vars` instead.
  */
 describe("wrangler deploy configs", () => {
-  it("commit no ENVIRONMENT default (cloud-factory-cf-nmjd)", async () => {
+  it("commit no ENVIRONMENT default (cloud-factory-cf-nmjd)", () => {
     for (const config of ["wrangler.jsonc", "apps/worker/wrangler.jsonc"]) {
-      const text = await readFile(new URL(`../../../${config}`, import.meta.url), "utf8");
+      const text = readFileSync(new URL(`../../../${config}`, import.meta.url), "utf8");
       expect({ config, setsEnvironment: /"ENVIRONMENT"\s*:/.test(text) }).toEqual({
         config,
         setsEnvironment: false,
@@ -25,11 +25,11 @@ describe("wrangler deploy configs", () => {
     }
   });
 
-  it("ship the local-mode var in .dev.vars.example, never as a deploy var", async () => {
+  it("ship the local-mode var in .dev.vars.example, never as a deploy var", () => {
     // The one sanctioned place for ENVIRONMENT=development is the copy-me file for
     // `wrangler dev`: plain http there cannot hold a __Host- cookie, so local login needs
     // the plain name and the explicit local marking.
-    const example = await readFile(new URL("../../../apps/worker/.dev.vars.example", import.meta.url), "utf8");
+    const example = readFileSync(new URL("../../../apps/worker/.dev.vars.example", import.meta.url), "utf8");
     expect(example).toMatch(/^ENVIRONMENT=development$/m);
   });
 });
