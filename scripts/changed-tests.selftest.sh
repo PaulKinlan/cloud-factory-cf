@@ -53,6 +53,14 @@ case "${1:-}" in
        # The arguments of a run are recorded so a check can assert the gate names the
        # affected files instead of asking vitest to re-derive them with --changed.
        [ -n "${FAKE_VITEST_ARGS:-}" ] && echo "args $(basename "$PWD") ${*:2}" >> "$FAKE_VITEST_ARGS"
+       # A real runner fails on a path that does not exist in its own cwd; without this the
+       # fake would vouch for a wrongly resolved suite path (cloud-factory-cf-wj0b).
+       shift
+       for arg in "$@"; do
+         case "$arg" in
+           *test*/*) [ -e "$arg" ] || { echo "FAKE vitest: no such test file $arg" >&2; exit 1; } ;;
+         esac
+       done
        exit "${FAKE_VITEST_RC:-0}" ;;
   *) exit 0 ;;
 esac
@@ -112,8 +120,22 @@ SH
     # a stylesheet is source with no node suite of its own (cloud-factory-cf-9jb)
     printf 'body { margin: 0; }\n' > apps/web/src/styles.css
     # the smoke set names these two worker files explicitly
-    for f in worker assets; do
+    for f in worker assets auth git-tree; do
       printf 'export {};\n' > "apps/worker/test/$f.test.ts"
+    done
+    mkdir -p .fleet apps/worker/src/auth apps/worker/src/routes
+    cat > .fleet/coverage-contract.json <<'JSON'
+{
+  "apps/worker/src/auth/tenant.ts": ["apps/worker/test/auth.test.ts"],
+  "apps/worker/src/routes/auth.ts": ["apps/worker/test/auth.test.ts"],
+  "apps/worker/src/routes/git-tree.ts": ["apps/worker/test/git-tree.test.ts"]
+}
+JSON
+    # Every contracted key is a real path in the tree: the gate refuses a contract whose
+    # keys no longer match reality (cloud-factory-cf-fwji).
+    for src in apps/worker/src/auth/tenant.ts apps/worker/src/routes/auth.ts apps/worker/src/routes/git-tree.ts; do
+      mkdir -p "${src%/*}"
+      printf 'export const routed = 1;\n' > "$src"
     done
     # The buildable packages apps/worker imports through their dist entry points; they
     # have a build script and no tests of their own (kind: none).
@@ -192,13 +214,16 @@ export FAKE_SELECT="apps/web/test/a.test.ts"
 export FAKE_VITEST_ARGS="$TMP/vitest.args"
 run_gate
 check "a modified test file runs the affected suites, not the whole suite" 'test "$RC" -eq 0 && out_has "1 affected test file(s) (test-file delta" && out_has "FAKE vitest run in web"'
-# 3b-ii. The affected suites are passed BY NAME. A `--changed` run re-derives the
+# 3b-ii. The affected suites are passed BY NAME, and the name is relative to the workspace
+#        the runner starts in (cloud-factory-cf-wj0b) - the fake rejects a path it cannot
+#        see, so an assertion on the repo-relative form would be asserting the bug.
+#        A `--changed` run re-derives the
 #        selection from git inside the workspace, and in apps/worker that run never
 #        reached a test: the banner printed, then nothing for the whole 900s bound, and
 #        the fast gate was KILLED at it twice (cloud-factory-cf-8xzi's delta), while the
 #        same file runs by name in about two minutes. Naming them is also one vitest
 #        bootstrap cheaper, which is the point of the fast tier.
-check "the affected suites are run by name, not by a --changed run" 'test "$RC" -eq 0 && grep -qx "args web apps/web/test/a.test.ts" "$FAKE_VITEST_ARGS" && ! grep -q -- "--changed" "$FAKE_VITEST_ARGS"'
+check "the affected suites are run by name, not by a --changed run" 'test "$RC" -eq 0 && grep -qx "args web test/a.test.ts" "$FAKE_VITEST_ARGS" && ! grep -q -- "--changed" "$FAKE_VITEST_ARGS"'
 run_gate --list
 check "--list reports affected suites for a modified test file" 'test "$RC" -eq 0 && out_has "1 affected test file(s) (test-file delta"'
 unset FAKE_SELECT FAKE_VITEST_ARGS
@@ -360,7 +385,7 @@ check "source delta runs the affected vitest files" 'test "$RC" -eq 0 && out_has
 #     (cloud-factory-cf-56j5).
 : > "$FAKE_VITEST_ARGS"
 run_gate
-check "a source delta runs the selected suites by name, with no --changed run" 'test "$RC" -eq 0 && grep -qx "args web apps/web/test/a.test.ts" "$FAKE_VITEST_ARGS" && ! grep -q -- "--changed" "$FAKE_VITEST_ARGS"'
+check "a source delta runs the selected suites by name, with no --changed run" 'test "$RC" -eq 0 && grep -qx "args web test/a.test.ts" "$FAKE_VITEST_ARGS" && ! grep -q -- "--changed" "$FAKE_VITEST_ARGS"'
 run_gate --list
 check "--list names the same selection for a source delta" 'test "$RC" -eq 0 && out_has "1 affected test file(s)" && out_has "apps/web/test/a.test.ts"'
 unset FAKE_SELECT FAKE_VITEST_ARGS
@@ -370,6 +395,71 @@ reset_tree
 printf '\n// touch\n' >> "$FIX/apps/web/src/m.ts"
 run_gate
 check "source delta that selects no suite FAILs" 'test "$RC" -ne 0 && err_has "match no suite in this workspace"'
+reset_tree
+
+# 6b. Edge-routed modules are not imported directly by tests; a changed test can
+#     otherwise hide their unmapped state behind the workspace's selected suites.
+for route in auth/tenant routes/auth routes/git-tree; do
+  printf '\n// touch\n' >> "$FIX/apps/worker/src/$route.ts"
+  export FAKE_SELECT="apps/worker/test/assets.test.ts"
+  run_gate
+  check "edge-routed $route selects its pinned integration suite" 'test "$RC" -eq 0 && out_has "pinned suite apps/worker/test/"'
+  run_gate --list
+  check "--list includes the pinned suite for $route" 'test "$RC" -eq 0 && out_has "pinned suite apps/worker/test/"'
+  unset FAKE_SELECT
+  reset_tree
+done
+mkdir -p "$FIX/apps/worker/src/routes"
+printf '\n// touch\n' >> "$FIX/apps/worker/src/routes/auth.ts"
+rm "$FIX/apps/worker/test/auth.test.ts"
+run_gate
+check "a removed contracted suite FAILs rather than silently passing" 'test "$RC" -ne 0 && err_has "contracted suite apps/worker/test/auth.test.ts is missing"'
+reset_tree
+
+# 6c. The contract's own integrity: a selection whose status was discarded used to leave
+#     every pin disabled and the gate green (cloud-factory-cf-fwji).
+contract="$FIX/.fleet/coverage-contract.json"
+printf '\n// touch\n' >> "$FIX/apps/worker/src/routes/auth.ts"
+printf '{ "apps/worker/src/routes/auth.ts": ["apps/worker/test/auth.test.ts",] }\n' > "$contract"
+run_gate
+check "unparseable coverage contract FAILs instead of disabling every pin" 'test "$RC" -ne 0 && err_has ".fleet/coverage-contract.json is not valid JSON" && err_has "cannot be used"'
+run_gate --list
+check "--list also FAILs on an unparseable coverage contract" 'test "$RC" -ne 0 && err_has ".fleet/coverage-contract.json is not valid JSON"'
+printf '{ "apps/worker/src/routes/auth.ts": "apps/worker/test/auth.test.ts" }\n' > "$contract"
+run_gate
+check "a contract entry that is not a list of suites FAILs" 'test "$RC" -ne 0 && err_has "must name at least one suite path"'
+printf '{ "apps/worker/src/routes/auth.ts": [] }\n' > "$contract"
+run_gate
+check "an empty suite list FAILs rather than pinning nothing" 'test "$RC" -ne 0 && err_has "must name at least one suite path"'
+printf '{ "./apps/worker/src/routes/auth.ts": ["apps/worker/test/auth.test.ts"] }\n' > "$contract"
+run_gate
+check "a contract key that is not a path in the tree FAILs" 'test "$RC" -ne 0 && err_has "is not a path in this tree" && err_has "./apps/worker/src/routes/auth.ts"'
+reset_tree
+
+# 6c2. A docs/config-only delta runs no suites at all, but the contract is validated
+#      before that early exit: a stale contract must not stay silently disabled
+#      (rev-cloudfactorycffwji on cloud-factory-cf-fwji).
+printf '{ "apps/worker/src/routes/auth.ts": ["apps/worker/test/auth.test.ts",] }\n' > "$contract"
+printf '\n// touch\n' >> "$FIX/docs/speed.md"
+run_gate
+check "a docs-only delta FAILs on an unparseable contract instead of running the smoke set" 'test "$RC" -ne 0 && err_has ".fleet/coverage-contract.json is not valid JSON" && out_lacks "smoke set"'
+printf '{ "apps/worker/src/routes/gone.ts": ["apps/worker/test/auth.test.ts"] }\n' > "$contract"
+run_gate
+check "a docs-only delta FAILs on a contract key that no longer exists" 'test "$RC" -ne 0 && err_has "is not a path in this tree" && err_has "apps/worker/src/routes/gone.ts"'
+reset_tree
+
+# 6d. A pin in a workspace other than apps/worker resolves relative to ITS workspace
+#     (cloud-factory-cf-wj0b).
+cat > "$contract" <<'JSON'
+{
+  "apps/web/src/m.ts": ["apps/web/test/a.test.ts"]
+}
+JSON
+printf '\n// touch\n' >> "$FIX/apps/web/src/m.ts"
+run_gate
+check "a pin outside apps/worker runs in its own workspace" 'test "$RC" -eq 0 && out_has "pinned suite apps/web/test/a.test.ts" && out_has "FAKE vitest run in web"'
+run_gate --list
+check "--list reports the workspace-relative pin" 'test "$RC" -eq 0 && out_has "pinned suite apps/web/test/a.test.ts"'
 reset_tree
 
 # 7. DECLARED_UNVERIFIED source still runs the workspace suite for evidence.
