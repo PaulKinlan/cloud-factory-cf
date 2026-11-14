@@ -413,7 +413,19 @@ mkdir -p "$FIX/apps/worker/src/routes"
 printf '\n// touch\n' >> "$FIX/apps/worker/src/routes/auth.ts"
 rm "$FIX/apps/worker/test/auth.test.ts"
 run_gate
-check "a removed contracted suite FAILs rather than silently passing" 'test "$RC" -ne 0 && err_has "contracted suite apps/worker/test/auth.test.ts is missing"'
+check "a removed contracted suite FAILs at validation instead of silently passing (cloud-factory-cf-jl8x)" 'test "$RC" -ne 0 && err_has "contracted suite apps/worker/test/auth.test.ts" && err_has "is not a path in this tree"'
+run_gate --list
+check "--list also refuses a removed contracted suite (cloud-factory-cf-jl8x)" 'test "$RC" -ne 0 && err_has "contracted suite apps/worker/test/auth.test.ts"'
+reset_tree
+
+# 5b. A key that names a DIRECTORY passes existsSync but can never match a changed path,
+#     so its pin used to be silently disabled forever (cloud-factory-cf-p70z).
+printf '{ "apps/worker/src": ["apps/worker/test/auth.test.ts"] }\n' > "$FIX/.fleet/coverage-contract.json"
+printf '\n// touch\n' >> "$FIX/apps/worker/src/routes/auth.ts"
+run_gate
+check "a contract key that names a DIRECTORY FAILs instead of pinning nothing (cloud-factory-cf-p70z)" 'test "$RC" -ne 0 && err_has "is not a source file in this tree" && err_has "apps/worker/src"'
+run_gate --list
+check "--list also refuses a directory contract key (cloud-factory-cf-p70z)" 'test "$RC" -ne 0 && err_has "is not a source file in this tree"'
 reset_tree
 
 # 6c. The contract's own integrity: a selection whose status was discarded used to leave
@@ -434,6 +446,15 @@ check "an empty suite list FAILs rather than pinning nothing" 'test "$RC" -ne 0 
 printf '{ "./apps/worker/src/routes/auth.ts": ["apps/worker/test/auth.test.ts"] }\n' > "$contract"
 run_gate
 check "a contract key that is not a path in the tree FAILs" 'test "$RC" -ne 0 && err_has "is not a path in this tree" && err_has "./apps/worker/src/routes/auth.ts"'
+reset_tree
+
+# 6c3. A stale suite entry must be refused on every run, not discovered only when its
+#      source next changes (cloud-factory-cf-jl8x): a docs-only delta validates the
+#      contract too, so the failure surfaces even where no pin would have fired.
+printf '{ "apps/worker/src/auth/tenant.ts": ["apps/worker/test/ghost.test.ts"] }\n' > "$contract"
+printf '\n// touch\n' >> "$FIX/docs/speed.md"
+run_gate
+check "a contracted suite that does not exist FAILs a docs-only delta (cloud-factory-cf-jl8x)" 'test "$RC" -ne 0 && err_has "contracted suite apps/worker/test/ghost.test.ts" && err_has "is not a path in this tree" && out_lacks "smoke set"'
 reset_tree
 
 # 6c2. A docs/config-only delta runs no suites at all, but the contract is validated

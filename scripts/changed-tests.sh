@@ -79,12 +79,23 @@ if ! pinned_selection=$(node -e '
       fail("contracted source " + source + " is not a path in this tree (" + path.posix.normalize(source) + ")");
     }
     if (!fs.existsSync(source)) fail("contracted source " + source + " is not a path in this tree");
+    // existsSync is true for a DIRECTORY too, and git never reports a directory as a
+    // changed path - so a directory key passed every check yet its pin could never be
+    // selected, the same silent-pin-off class as a stale key (cloud-factory-cf-p70z).
+    if (!fs.statSync(source).isFile()) fail("contracted source " + source + " is not a source file in this tree");
     if (!Array.isArray(tests) || tests.length === 0) {
       fail("contracted source " + source + " must name at least one suite path");
     }
     for (const test of tests) {
       if (typeof test !== "string" || test === "") {
         fail("contracted source " + source + " has a suite entry that is not a path");
+      }
+      // A pin to a suite that does not exist can never run: refuse it here, on every run,
+      // instead of letting it wait for its source to change before anyone notices
+      // (cloud-factory-cf-jl8x). The check at run time stays as the belt for a file that
+      // disappears between validation and selection.
+      if (!fs.existsSync(test)) {
+        fail("contracted suite " + test + " (for " + source + ") is not a path in this tree");
       }
     }
     if (changed.has(source)) for (const test of tests) console.log(source + "\t" + test);
