@@ -1,5 +1,6 @@
 import type { ActionSink, SinkAction, SinkDispatchResult, BeadsTaskPayload } from '../types/sinks.ts';
 import type { AgentContext } from '../types/context.ts';
+import { assertUpstreamAccepted, type SignedBrokerResult } from './broker-result.ts';
 
 export type BeadsTaskExecutor = (
   payload: BeadsTaskPayload,
@@ -117,20 +118,48 @@ export class BeadsTaskSink implements ActionSink {
         };
       }
 
-      const result = await ctx.credentials.executeSignedRequest({
+      // The broker's beads actions carry title/description/priority/assignee/status, and
+      // the policy refuses parameters it does not carry, so labels and a parent cannot
+      // travel. Refuse rather than file a task that quietly lost them
+      // (cloud-factory-cf-v1y0).
+      const notForwarded = [
+        payload.labels === undefined || payload.labels.length === 0 ? null : 'labels',
+        payload.parentId === undefined ? null : 'parentId',
+      ].filter((field): field is string => field !== null);
+      if (notForwarded.length > 0) {
+        return {
+          sinkName: this.name,
+          actionId: action.id,
+          actionType: action.type,
+          success: false,
+          error: `Invalid payload: ${notForwarded.join(', ')} are not forwarded by the broker's ${isUpdate ? 'task.update' : 'task.create'} action; use a custom executor`,
+          durationMs: Date.now() - start,
+        };
+      }
+
+      const result = await ctx.credentials.executeSignedRequest<SignedBrokerResult>({
         service: 'beads',
-        action: isUpdate ? 'update_task' : 'create_task',
-        params: {
-          id: isUpdate ? taskId : (payload.id ?? payload.taskId),
-          taskId: isUpdate ? taskId : (payload.taskId ?? payload.id),
-          title: payload.title,
-          description: payload.description,
-          priority: payload.priority,
-          labels: payload.labels,
-          assignee: payload.assignee,
-          parentId: payload.parentId,
-          status: payload.status,
-        },
+        // The broker's action names are `task.create`/`task.update`; `create_task` and
+        // `update_task` are refused as unknown actions before Beads sees them
+        // (cloud-factory-cf-g9aw). Its `task.update` route needs `{taskId}`.
+        action: isUpdate ? 'task.update' : 'task.create',
+        includeStatus: true,
+        params: isUpdate
+          ? {
+              taskId,
+              title: payload.title,
+              description: payload.description,
+              ...(payload.priority === undefined ? {} : { priority: payload.priority }),
+              ...(payload.assignee === undefined ? {} : { assignee: payload.assignee }),
+              ...(payload.status === undefined ? {} : { status: payload.status }),
+            }
+          : {
+              title: payload.title,
+              description: payload.description,
+              ...(payload.priority === undefined ? {} : { priority: payload.priority }),
+              ...(payload.assignee === undefined ? {} : { assignee: payload.assignee }),
+              ...(payload.status === undefined ? {} : { status: payload.status }),
+            },
       });
 
       return {
@@ -138,7 +167,7 @@ export class BeadsTaskSink implements ActionSink {
         actionId: action.id,
         actionType: action.type,
         success: true,
-        result,
+        result: assertUpstreamAccepted(result, isUpdate ? 'beads task.update' : 'beads task.create'),
         durationMs: Date.now() - start,
       };
     } catch (err: unknown) {

@@ -1,5 +1,6 @@
 import type { ActionSink, SinkAction, SinkDispatchResult, GitHubPRReviewPayload } from '../types/sinks.ts';
 import type { AgentContext } from '../types/context.ts';
+import { assertUpstreamAccepted, type SignedBrokerResult } from './broker-result.ts';
 
 export type GitHubPRReviewExecutor = (
   payload: GitHubPRReviewPayload,
@@ -86,16 +87,34 @@ export class GitHubPRReviewSink implements ActionSink {
         };
       }
 
-      const result = await ctx.credentials.executeSignedRequest({
+      // Inline review comments are structured objects the broker's `pr.review` action
+      // cannot carry (its body is body/event/commit_id), so refuse rather than file a
+      // review that quietly lost them (cloud-factory-cf-v1y0). A custom executor gets
+      // the whole payload and can carry them.
+      if (payload.comments !== undefined && payload.comments.length > 0) {
+        return {
+          sinkName: this.name,
+          actionId: action.id,
+          actionType: action.type,
+          success: false,
+          error: 'Invalid payload: inline comments are not forwarded by the broker\'s pr.review action; use a custom executor',
+          durationMs: Date.now() - start,
+        };
+      }
+
+      const result = await ctx.credentials.executeSignedRequest<SignedBrokerResult>({
         service: 'github',
-        action: 'create_pr_review',
+        // The broker's own action name (`pr.review`), not a GitHub-style verb: an
+        // unknown action is refused before it reaches GitHub (cloud-factory-cf-g9aw).
+        action: 'pr.review',
+        includeStatus: true,
         params: {
-          repo: ctx.repo ? `${ctx.repo.owner}/${ctx.repo.name}` : undefined,
-          prNumber: payload.prNumber,
+          // The broker fills `{number}` from this path parameter.
+          number: payload.prNumber,
           event: payload.event,
           body: payload.body,
-          commitSha: payload.commitSha,
-          comments: payload.comments,
+          // Pins the review to the commit it describes; the policy forwards `commit_id`.
+          ...(payload.commitSha === undefined ? {} : { commit_id: payload.commitSha }),
         },
       });
 
@@ -104,7 +123,7 @@ export class GitHubPRReviewSink implements ActionSink {
         actionId: action.id,
         actionType: action.type,
         success: true,
-        result,
+        result: assertUpstreamAccepted(result, 'pr.review'),
         durationMs: Date.now() - start,
       };
     } catch (err: unknown) {

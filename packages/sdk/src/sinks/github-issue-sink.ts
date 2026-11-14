@@ -1,5 +1,6 @@
 import type { ActionSink, SinkAction, SinkDispatchResult, GitHubIssuePayload } from '../types/sinks.ts';
 import type { AgentContext } from '../types/context.ts';
+import { assertUpstreamAccepted, type SignedBrokerResult } from './broker-result.ts';
 
 export type GitHubIssueExecutor = (
   payload: GitHubIssuePayload,
@@ -75,15 +76,33 @@ export class GitHubIssueSink implements ActionSink {
         };
       }
 
-      const result = await ctx.credentials.executeSignedRequest({
+      // The broker's `issue.create` body is title/body only, and the policy refuses
+      // parameters it does not carry, so labels and assignees cannot travel. Refuse
+      // rather than file an issue that quietly lost them (cloud-factory-cf-v1y0).
+      const notForwarded = [
+        payload.labels === undefined || payload.labels.length === 0 ? null : 'labels',
+        payload.assignees === undefined || payload.assignees.length === 0 ? null : 'assignees',
+      ].filter((field): field is string => field !== null);
+      if (notForwarded.length > 0) {
+        return {
+          sinkName: this.name,
+          actionId: action.id,
+          actionType: action.type,
+          success: false,
+          error: `Invalid payload: ${notForwarded.join(', ')} are not forwarded by the broker's issue.create action; use a custom executor`,
+          durationMs: Date.now() - start,
+        };
+      }
+
+      const result = await ctx.credentials.executeSignedRequest<SignedBrokerResult>({
         service: 'github',
-        action: 'create_issue',
+        // The broker's action name is `issue.create`; `create_issue` is refused as an
+        // unknown action before GitHub sees it (cloud-factory-cf-g9aw).
+        action: 'issue.create',
+        includeStatus: true,
         params: {
-          repo: ctx.repo ? `${ctx.repo.owner}/${ctx.repo.name}` : undefined,
           title: payload.title,
           body: payload.body,
-          labels: payload.labels,
-          assignees: payload.assignees,
         },
       });
 
@@ -92,7 +111,7 @@ export class GitHubIssueSink implements ActionSink {
         actionId: action.id,
         actionType: action.type,
         success: true,
-        result,
+        result: assertUpstreamAccepted(result, 'issue.create'),
         durationMs: Date.now() - start,
       };
     } catch (err: unknown) {
