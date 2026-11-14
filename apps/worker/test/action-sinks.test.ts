@@ -252,6 +252,44 @@ describe("telemetry sink", () => {
     expect(result.error ?? "").toContain("500");
   });
 
+  it("refuses an endpoint that is not an absolute http(s) URL (cloud-factory-cf-i1my)", async () => {
+    const action = {
+      id: "a-3",
+      type: "telemetry:log",
+      payload: { level: "info", message: "handled pull_request.opened" },
+    };
+    const cases: Array<[string, string]> = [
+      ["telemetry.test/ingest", "not an absolute URL"],
+      ["file:///etc/passwd", "must be http(s)"],
+      ["ftp://telemetry.test/ingest", "must be http(s)"],
+      ["https://", "not an absolute URL"],
+      ["http://telemetry.test/ingest", "must be https off loopback"],
+    ];
+    for (const [endpoint, expected] of cases) {
+      // A refused endpoint must never be fetched: the dispatch fails with a reason an
+      // operator can act on instead of sending the payload somewhere unconfigured.
+      const calls = stubUpstream(202);
+      const sink = telemetrySink({ telemetryEndpoint: endpoint, log: () => {} });
+      const result = await sink.handle(action as never, telemetryContext());
+      expect(result.success, endpoint).toBe(false);
+      expect(result.error ?? "", endpoint).toContain(expected);
+      expect(calls.calls, endpoint).toHaveLength(0);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("still exports to a loopback http endpoint, which is how a local deployment runs", async () => {
+    const calls = stubUpstream(202);
+    const sink = telemetrySink({ telemetryEndpoint: "http://localhost:8789/ingest", log: () => {} });
+    const result = await sink.handle(
+      { id: "a-4", type: "telemetry:log", payload: { level: "info", message: "x" } } as never,
+      telemetryContext(),
+    );
+    expect(result.success).toBe(true);
+    expect(calls.calls[0]?.url).toBe("http://localhost:8789/ingest");
+    vi.unstubAllGlobals();
+  });
+
   it("runs in a canvas layout, falling back to the log when no endpoint is set", async () => {
     const documentId = await storeDocument(layout("telemetry"));
     deliverySeq += 1;

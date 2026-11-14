@@ -130,6 +130,35 @@ export function beadsTaskSink(): ActionSink {
 }
 
 /**
+ * Whether a telemetry endpoint may be fetched at all.
+ *
+ * The endpoint is deployment configuration, but a relative value, a non-http(s) scheme or
+ * a plain-http host sends the run's payload somewhere the operator never configured (or
+ * nowhere, from deep inside `fetch`). https is required except on loopback, where a local
+ * dev deployment legitimately runs plain http (cloud-factory-cf-i1my).
+ */
+function telemetryUrl(endpoint: string): URL {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    throw new Error(`telemetry endpoint is not an absolute URL: ${endpoint}`);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(`telemetry endpoint must be http(s), not ${url.protocol}`);
+  }
+  if (url.hostname.length === 0) {
+    throw new Error(`telemetry endpoint has no host: ${endpoint}`);
+  }
+  const loopback =
+    url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  if (url.protocol === "http:" && !loopback) {
+    throw new Error(`telemetry endpoint must be https off loopback: ${endpoint}`);
+  }
+  return url;
+}
+
+/**
  * Telemetry: exported to `TELEMETRY_ENDPOINT` when configured, otherwise written
  * to the structured log. Both are observable, and neither can be dropped
  * silently, so a run that emits telemetry always says where it went.
@@ -149,7 +178,7 @@ export function telemetrySink(deps: SinkDeps = {}): ActionSink {
         log({ sink: "cloud-telemetry-sink", exported: "log", ...record });
         return { exported: "log" };
       }
-      const response = await fetch(deps.telemetryEndpoint, {
+      const response = await fetch(telemetryUrl(deps.telemetryEndpoint), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(record),
