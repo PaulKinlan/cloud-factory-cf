@@ -59,6 +59,12 @@ Three human tiers over one identity source, plus the machine principal.
 `PLATFORM_OWNERS` is deployment configuration (a secret on the Worker), not customer
 data: it answers "who owns this deployment", which no tenant record can.
 
+A platform owner's tier is exercised **through its session**, not by becoming the machine
+principal: the `:owner` tenant binding is widened for an allowlisted login, while its
+provider binding and its login stay (`auth/tenant.ts`). The machine-only broker operations
+(`provisioning`, `overrides`, cross-tenant broker `audit`) therefore still require
+`BROKER_CONTROL_KEY`; a browser cookie never carries them (cloud-factory-cf-l6ya).
+
 ### 2. Identity resolution — one function, no ambient authority
 
 `auth/tenant.ts` grows from "who presented a credential" to "what may they do":

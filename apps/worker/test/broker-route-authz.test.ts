@@ -17,8 +17,10 @@ import { BROKER_PATH } from "../src/routes/broker";
  * - A session's request is forwarded as a delegation scoped to that one repository, so
  *   the object never needs the master key for a browser (the master key names every
  *   tenant, which is exactly what a browser must not be given).
- * - The platform owner's session and machine callers keep the documented "any tenant"
- *   contract; the key the object sees is the deployment's own, never the caller's.
+ * - The platform owner's session keeps the documented "any tenant" contract, but as a
+ *   session: a delegation naming its login, never the deployment key (cloud-factory-cf-l6ya).
+ * - The machine-key operations (`provisioning`, `overrides`, `audit`) refuse every browser
+ *   session, the platform owner's included; only machine callers reach the deployment's key.
  * - `proxy` is left to the object: it authorises a capability token in the body, which
  *   is minted for one repository, and that is all an agent runner holds.
  *
@@ -181,7 +183,11 @@ describe("/broker/:owner/:repo other operations go through the same tenant gate"
     });
   });
 
-  it("lets the platform owner's session provision, because the Worker holds the key", async () => {
+  it("refuses the platform owner's browser session the machine-key operations too (cloud-factory-cf-l6ya)", async () => {
+    // The platform owner's tenant scope is the whole deployment (ADR 006), but provisioning
+    // is a machine action: the route must never hand a browser cookie the deployment's
+    // control key. Before this, `authorizeControlPlane` rewrote the session to
+    // `via: "control-key"` and this write succeeded.
     const repository = "octodev/route-authz-provision-root";
     const write = await post(
       repository,
@@ -189,14 +195,51 @@ describe("/broker/:owner/:repo other operations go through the same tenant gate"
       { agent: "runner", service: "github", action: "pr.comment" },
       { cookie: await session("__root__") },
     );
+    expect(write.status).toBe(403);
+    expect(await write.json()).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("machine control key"),
+    });
+
+    // The same refusal for an owner named by the deployment allowlist rather than the
+    // synthetic root subject.
+    const bindings = { ...env, PLATFORM_OWNERS: "octodev" };
+    const handler = await import("../src/index").then((module) => module.default);
+    const allowlisted = await handler.fetch(
+      new Request(brokerUrl("octodev/route-authz-provision-owner", "provisioning"), {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: await session("octodev") },
+        body: JSON.stringify({ agent: "runner", service: "github", action: "pr.comment" }),
+      }),
+      bindings as never,
+    );
+    expect(allowlisted.status).toBe(403);
+  });
+
+  it("keeps the platform owner's any-tenant reach, as a delegation naming its login", async () => {
+    const repository = "victimorg/route-authz-owner-settings";
+    const bindings = { ...env, PLATFORM_OWNERS: "octodev" };
+    const handler = await import("../src/index").then((module) => module.default);
+    const write = await handler.fetch(
+      new Request(brokerUrl(repository, "settings"), {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: await session("octodev") },
+        body: JSON.stringify({
+          githubApp: { appId: "9911", appSlug: "owner-app", clientId: "client", clientSecret: "secret" },
+        }),
+      }),
+      bindings as never,
+    );
     expect(write.status).toBe(200);
 
-    const read = await SELF.fetch(brokerUrl(repository, "provisioning"), {
+    // The object minted no master-key path: the write is visible only through the
+    // tenant's own broker, read back here with the machine key.
+    const read = await SELF.fetch(brokerUrl(repository, "settings"), {
       headers: { "x-factory-control-key": CONTROL_KEY },
     });
     expect(read.status).toBe(200);
-    const payload = (await read.json()) as { entries: Array<{ agent: string }> };
-    expect(payload.entries.map((entry) => entry.agent)).toContain("runner");
+    const payload = (await read.json()) as { githubApp: { appId: string } };
+    expect(payload.githubApp.appId).toBe("9911");
   });
 
   it("keeps the machine contract: the control key reaches any tenant", async () => {

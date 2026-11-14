@@ -36,8 +36,10 @@ import { describe, expect, it } from "vitest";
  *
  * What it still cannot see, named here rather than implied so the claim matches the check: the
  * return value of a helper call (the helper's own file is scanned, but a `return` is not a
- * sink), a scheme assembled from parts that never appear as one literal, and a static string a
- * bundler later rewrites.
+ * sink), a scheme assembled from parts that never appear as one literal, a static string a
+ * bundler later rewrites, a member named by a variable (`el[name] = value`, which is only a
+ * sink when the name resolves to one) and a sink copied in by spread (`el = { ...el, innerHTML:
+ * value }`).
  */
 const SRC = new URL("../src/", import.meta.url);
 
@@ -97,6 +99,70 @@ function readLiteral(code: string, start: number): { text: string; end: number }
     i += 1;
   }
   return { text: code.slice(start + 1), end: code.length };
+}
+
+/**
+ * The text between `openParen` and its matching close, honouring literals
+ * (cloud-factory-cf-kdfh), so a rule about a call's arguments cannot be fooled by a `)` in a
+ * string or by an earlier, unrelated call.
+ */
+function callArguments(code: string, openParen: number): string {
+  let depth = 0;
+  for (let i = openParen; i < code.length; i += 1) {
+    const char = code[i]!;
+    if (char === '"' || char === "'" || char === "`") {
+      i = readLiteral(code, i).end - 1;
+      continue;
+    }
+    if (char === "(") depth += 1;
+    else if (char === ")") {
+      depth -= 1;
+      if (depth === 0) return code.slice(openParen + 1, i);
+    }
+  }
+  return code.slice(openParen + 1);
+}
+
+/**
+ * Whether every argument of a call whose `(` is at `openParen` is a plain string literal, so
+ * whatever the method is, its result is still a constant (cloud-factory-cf-kdfh). This is what
+ * separates `'<b>'.trim()` from `'<b>'.concat(name, '</b>')`: the second builds markup from a
+ * value, and the first version of this guard only knew how to catch the `+` spelling of it.
+ */
+function argsAreLiterals(code: string, openParen: number): boolean {
+  let i = openParen + 1;
+  let depth = 0;
+  let expectArgument = true;
+  while (i < code.length) {
+    const char = code[i]!;
+    if (/\s/.test(char)) {
+      i += 1;
+      continue;
+    }
+    if (char === ")" && depth === 0) return true;
+    if (char === "," && depth === 0) {
+      expectArgument = true;
+      i += 1;
+      continue;
+    }
+    if (expectArgument) {
+      if (char !== '"' && char !== "'" && char !== "`") return false;
+      const literal = readLiteral(code, i);
+      // A template with an interpolation is not a constant whatever its arguments are.
+      if (literal.text.includes("${")) return false;
+      expectArgument = false;
+      i = literal.end;
+      continue;
+    }
+    // A literal argument followed by anything but `,` or `)` - an operator, typically - is an
+    // expression built from a value.
+    if (char === "(" || char === "[" || char === "{") depth += 1;
+    else if (char === ")" && depth > 0) depth -= 1;
+    else if (char === "]" || char === "}") depth -= 1;
+    else return false;
+    i += 1;
+  }
+  return false;
 }
 
 /** A URL prefix that fixes the scheme by construction. */
@@ -176,11 +242,15 @@ export function findMarkupSinks(source: string): Violation[] {
   // `=` only when it is not a comparison (cloud-factory-cf-czx0): `==`, `===`, `!=` and
   // `!==` read the element, they do not write it, and refusing a read made the guard look
   // arbitrary to whoever hit it.
-  const assignment = /\.(innerHTML|outerHTML)\s*(\+?=)(?!=)/g;
+  // The same write with a bracket-quoted member name, `el['innerHTML'] = payload`, used to be
+  // invisible to this rule (cloud-factory-cf-kdfh): the sink is chosen by the name, not by the
+  // punctuation that reaches it.
+  const assignment =
+    /(?:\.(innerHTML|outerHTML)|\[\s*(["'`])(innerHTML|outerHTML)\2\s*\])\s*(\+?=)(?!=)/g;
   let match: RegExpExecArray | null;
   while ((match = assignment.exec(code)) !== null) {
-    const sink = match[1]!;
-    const operator = match[2]!;
+    const sink = (match[1] ?? match[3])!;
+    const operator = match[4]!;
     let i = assignment.lastIndex;
     while (i < code.length && /\s/.test(code[i]!)) i += 1;
     const quote = code[i];
@@ -207,6 +277,16 @@ export function findMarkupSinks(source: string): Violation[] {
         assignment.lastIndex = end === -1 ? code.length : end;
         continue;
       }
+      // `'<b>'.concat(name, '</b>')` builds markup from a value the same way `'<b>' + name`
+      // does (cloud-factory-cf-kdfh). A method call on the literal is only a constant when
+      // every argument is itself a literal - `' x '.trim()` is, `'<b>'.concat(name)` is not.
+      const method = /^\.\s*[A-Za-z_$][\w$]*\s*\(/.exec(code.slice(after));
+      if (method !== null && !argsAreLiterals(code, after + method[0].length - 1)) {
+        found.push({ rule: `${sink} assigned a literal built from a value`, evidence });
+        const end = code.indexOf(";", after);
+        assignment.lastIndex = end === -1 ? code.length : end;
+        continue;
+      }
       assignment.lastIndex = literal.end;
       continue;
     }
@@ -216,6 +296,16 @@ export function findMarkupSinks(source: string): Violation[] {
     const rhs = code.slice(i, end === -1 ? Math.min(i + 80, code.length) : end).trim();
     found.push({ rule: `${sink} assigned a computed value`, evidence: `${evidence} [rhs: ${rhs.slice(0, 60)}]` });
     assignment.lastIndex = end === -1 ? code.length : end;
+  }
+
+  // `Object.assign(el, { innerHTML: payload })` writes the same sink with no assignment
+  // operator at all (cloud-factory-cf-kdfh). The property name is what makes it a sink, so
+  // the name is what is looked for inside the call's own arguments.
+  for (const match of code.matchAll(/Object\.assign\s*\(/g)) {
+    const open = match.index + match[0].length - 1;
+    if (!/(?:^|[{,\s])["'`]?(?:innerHTML|outerHTML)["'`]?\s*[:,}]/.test(callArguments(code, open))) continue;
+    const evidence = code.slice(match.index, Math.min(match.index + 120, code.length)).split("\n")[0]!.trim();
+    found.push({ rule: "markup sink handed to Object.assign", evidence });
   }
 
   const sinks: Array<{ name: string; pattern: RegExp }> = [
@@ -256,10 +346,11 @@ export function findMarkupSinks(source: string): Violation[] {
   // A URL sink is decided by its value (cloud-factory-cf-ww20): `link.href = untrustedUrl` was
   // green, and the value is exactly what the browser executes on click. The property form and
   // the attribute form are held to the same rule.
-  for (const match of code.matchAll(/\.(href|src|action|formAction)\s*=(?!=)\s*/g)) {
+  const urlAssignment = /(?:\.(href|src|action|formAction)|\[\s*(["'`])(href|src|action|formAction)\2\s*\])\s*=(?!=)\s*/gi;
+  for (const match of code.matchAll(urlAssignment)) {
     if (!urlValueAllowed(code, match.index + match[0].length)) {
       const evidence = code.slice(match.index, Math.min(match.index + 120, code.length)).split("\n")[0]!.trim();
-      found.push({ rule: `${match[1]} assigned a value whose scheme is not fixed`, evidence });
+      found.push({ rule: `${match[1] ?? match[3]} assigned a value whose scheme is not fixed`, evidence });
     }
   }
   for (const match of code.matchAll(/\.setAttribute\s*\(\s*["'](href|src|action|formaction)["']\s*,/gi)) {
@@ -315,6 +406,12 @@ describe("the markup-sink detector itself (cloud-factory-cf-x0xv)", () => {
     ["href read off an object", "link.href = row.url;"],
     ["src from an index", "img.src = candidates[0];"],
     ["href given a variable through the attribute form", "link.setAttribute('href', untrustedUrl);"],
+    // cloud-factory-cf-kdfh: the three spellings that reached a markup sink without using the
+    // operator or the member access the earlier rules keyed on.
+    ["a literal built by a method call", "el.innerHTML = '<b>'.concat(name, '</b>');"],
+    ["a bracket-quoted sink name", "el['innerHTML'] = payload;"],
+    ["markup handed to Object.assign", "Object.assign(el, { innerHTML: payload });"],
+    ["a bracket-quoted URL sink", "link['href'] = untrustedUrl;"],
   ];
   for (const [name, snippet] of mustCatch) {
     it(`catches ${name}`, () => {
@@ -345,6 +442,12 @@ describe("the markup-sink detector itself (cloud-factory-cf-x0xv)", () => {
     "anchor.href = URL.createObjectURL(blob);",
     "installLink.href = installUrl(slug);",
     "link.href = 'https://example.com/docs';",
+    // cloud-factory-cf-kdfh: refusing every method call on a literal would be a false positive,
+    // because a call whose arguments are all literals still produces a constant. Only a call
+    // given a value is a sink.
+    "el.innerHTML = '   '.trim();",
+    "Object.assign(flags, { ready: true });",
+    "Object.assign(state, row);",
   ];
   it("still allows clearing a container, fixed strings and inert attributes", () => {
     for (const snippet of mustAllow) expect(findMarkupSinks(snippet)).toEqual([]);
