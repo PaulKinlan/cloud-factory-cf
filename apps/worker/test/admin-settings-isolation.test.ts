@@ -9,14 +9,11 @@ describe("repository GitHub App settings isolation", () => {
     const env = {
       // A local deployment over plain http mints the plain `cf_session` name, so say so:
       // otherwise the pre-upgrade cutoff for a public deployment rejects the token
-      // (cloud-factory-cf-tp22).
+      // (cloud-factory-cf-tp22). It also only authenticates on a local deployment, or for a
+      // token minted before the d11l migration cutoff.
       ENVIRONMENT: "test",
       BROKER_SIGNING_KEY: "tenant-session-signing-key",
       BROKER_CONTROL_KEY: "platform-control-key",
-      // A local deployment, which is what this stub models: the unprefixed `cf_session`
-      // name only authenticates there, or for a token minted before the d11l migration
-      // cutoff (cloud-factory-cf-tp22).
-      ENVIRONMENT: "test",
       CREDENTIAL_BROKER: {
         idFromName: (name: string) => name,
         get: (repository: string) => ({

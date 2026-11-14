@@ -22,14 +22,11 @@ function testEnv(): { env: Env; calls: Array<{ repository: string; request: Requ
   const env = {
     // The stub models a local deployment over plain http, so the plain `cf_session`
     // cookie these cases mint is the session; a public deployment's pre-upgrade cutoff
-    // would reject a token minted today (cloud-factory-cf-tp22).
+    // would reject a token minted today (cloud-factory-cf-tp22). It also only authenticates
+    // on a local deployment, or for a token minted before the d11l migration cutoff.
     ENVIRONMENT: "test",
     BROKER_SIGNING_KEY: SIGNING_KEY,
     BROKER_CONTROL_KEY: CONTROL_KEY,
-    // A local deployment, which is what this stub models: the unprefixed `cf_session` name
-    // only authenticates there, or for a token minted before the d11l migration cutoff
-    // (cloud-factory-cf-tp22).
-    ENVIRONMENT: "test",
     CREDENTIAL_BROKER: {
       idFromName: (name: string) => name,
       get: (repository: string) => ({

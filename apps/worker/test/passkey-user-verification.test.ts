@@ -113,14 +113,11 @@ function testEnv(
   return {
     // A local deployment over plain http mints the plain `cf_session` name, so say so:
     // otherwise a token minted now is past the public deployment's pre-upgrade cutoff and
-    // the session-authenticated routes answer 401 (cloud-factory-cf-tp22).
+    // the session-authenticated routes answer 401 (cloud-factory-cf-tp22). It also only
+    // authenticates on a local deployment, or for a token minted before the d11l cutoff.
     ENVIRONMENT: "test",
     BROKER_SIGNING_KEY: SIGNING_KEY,
     BROKER_CONTROL_KEY: "test-passkey-control-key",
-    // A local deployment, which is what this stub models: the unprefixed `cf_session` name
-    // only authenticates there, or for a token minted before the d11l migration cutoff
-    // (cloud-factory-cf-tp22).
-    ENVIRONMENT: "test",
     CREDENTIAL_BROKER: { idFromName: (name: string) => name, get: () => broker },
     ...extra,
   } as never;
