@@ -117,10 +117,6 @@ function testEnv(
     ENVIRONMENT: "test",
     BROKER_SIGNING_KEY: SIGNING_KEY,
     BROKER_CONTROL_KEY: "test-passkey-control-key",
-    // A local deployment, which is what this stub models: the unprefixed `cf_session` name
-    // only authenticates there, or for a token minted before the d11l migration cutoff
-    // (cloud-factory-cf-tp22).
-    ENVIRONMENT: "test",
     CREDENTIAL_BROKER: { idFromName: (name: string) => name, get: () => broker },
     ...extra,
   } as never;
