@@ -58,7 +58,7 @@ rather than sanitised.
 | Binding | Purpose |
 | --- | --- |
 | `CREDENTIAL_BROKER` | Durable Object namespace (one per repository, migration `v3`) |
-| `BROKER_SIGNING_KEY` | HMAC-SHA256 key for capability tokens **and for the `cf_session` browser credential** |
+| `BROKER_SIGNING_KEY` | HMAC-SHA256 key for capability tokens **and for the browser session cookie, `__Host-cf_session` on https** |
 | `BROKER_CONTROL_KEY` | Machine/operator key: grants capability issuance and any tenant's control-plane reads |
 | `GITHUB_TOKEN`, `GITLAB_TOKEN` | Upstream credentials, read by the broker only |
 
@@ -73,8 +73,15 @@ A control-plane route accepts **one of two credentials** (`src/auth/tenant.ts`,
 | Caller | Credential | May touch | Denial |
 | --- | --- | --- | --- |
 | Machine (CLI, scheduler, operator) | `x-factory-control-key` = `BROKER_CONTROL_KEY` | any tenant | 401 |
-| Browser | `cf_session` cookie, minted by `/auth/github/callback` | only the login it was minted for — the `:owner` in the path | 403 `cross-tenant` |
+| Browser | `__Host-cf_session` cookie, minted by `/auth/github/callback` | only the login it was minted for — the `:owner` in the path | 403 `cross-tenant` |
 | Neither | — | nothing | 401, or 503 when **no** credential is configured |
+
+Cookie name: `__Host-cf_session` on https, which a browser only lets this exact host
+set. The unprefixed `cf_session` name is accepted on a plain-http local deployment
+(`ENVIRONMENT` = `development`, `dev`, `test` or `local`) and, as a migration window that
+closed on 2026-11-12, for a token minted before that instant
+(`LEGACY_PLAIN_COOKIE_UNTIL_MS` in `apps/worker/src/auth/sessions.ts`). Logout clears
+both names.
 
 The `:owner` segment **is** the tenant boundary. A valid session for `alice`
 reading `/audit/events/bob/widgets` is refused as another account's tenancy
