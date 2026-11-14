@@ -10,9 +10,9 @@
     "deploy": "wrangler deploy",
     "build": "wrangler deploy --dry-run --outdir dist",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run",
-    "test:file": "vitest run",
-    "test:changed": "vitest run --changed $(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)",
+    "test": "NODE_OPTIONS=\"${NODE_OPTIONS:+$NODE_OPTIONS }--import ./test/support/register-worker-start-timeout.mjs\" vitest run",
+    "test:file": "NODE_OPTIONS=\"${NODE_OPTIONS:+$NODE_OPTIONS }--import ./test/support/register-worker-start-timeout.mjs\" vitest run",
+    "test:changed": "NODE_OPTIONS=\"${NODE_OPTIONS:+$NODE_OPTIONS }--import ./test/support/register-worker-start-timeout.mjs\" vitest run --changed $(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)",
     "test:unit": "vitest run --config vitest.unit.config.ts"
   },
   "dependencies": {

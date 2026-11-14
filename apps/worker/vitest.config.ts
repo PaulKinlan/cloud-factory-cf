@@ -45,6 +45,10 @@ export default defineConfig({
     // regression (cloud-factory-cf-t8mu). 60s still fails a genuinely hung test but gives
     // the DO round-trips room on a busy machine.
     testTimeout: 60_000,
+    // NOTE: the 90s pool runner-start budget (vitest's hardcoded WORKER_START_TIMEOUT)
+    // is a separate limit from testTimeout and is NOT configurable upstream; the test
+    // scripts raise it to 240s via the in-memory hook in
+    // test/support/vitest-worker-start-timeout.mjs (cloud-factory-cf-zcil).
     fileParallelism: false,
   },
 });

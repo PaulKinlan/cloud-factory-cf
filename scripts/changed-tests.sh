@@ -19,6 +19,22 @@
 set -uo pipefail
 
 export PATH="$PWD/node_modules/.bin:$PATH"
+
+# cloud-factory-cf-zcil: vitest gives a pool runner exactly 90s to start
+# (WORKER_START_TIMEOUT, hardcoded in 4.1.12 and still in 5.1.0); a
+# cloudflare-pool runner start exceeds that under gate load and fails before
+# any test runs. This script invokes `npx vitest` directly (not the workspace
+# scripts that set it), so raise the budget here too via the same in-memory
+# module hook. The path is absolute because the --import resolves against each
+# node child's cwd; the hook is a no-op for pools whose chunks never declare
+# the constant (e.g. apps/web's node-mode run). Guarded on the hook existing:
+# the gate self-test runs this script inside a fixture repo that has no
+# node_modules and no apps/worker tree, and a dangling --import would fail
+# every node child there.
+WORKER_TIMEOUT_HOOK="$PWD/apps/worker/test/support/register-worker-start-timeout.mjs"
+if [ -f "$WORKER_TIMEOUT_HOOK" ]; then
+  export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--import $WORKER_TIMEOUT_HOOK"
+fi
 BASE=""
 LIST=0
 while [ $# -gt 0 ]; do

@@ -29,7 +29,21 @@ Per file (inside the workerd suite): `test/computer-dependency.test.ts` ≈ 1.0s
 (it imports the 11 MB `@cloudflare/computer` bundle, which is the point of the
 test), `test/queue.test.ts` ≈ 0.6s, `test/ingest.test.ts` ≈ 0.2s,
 `test/worker.test.ts` ≈ 0.2s, `test/repo-coordinator.test.ts` ≈ 0.1s. The rest
-is vitest + workerd pool startup.
+is vitest + workerd pool startup (~15-50s idle per runner start on the 2-core
+fleet VM; see below).
+
+### Pool runner-start budget (vitest hard limit, patched in-memory)
+
+vitest gives a pool runner exactly 90s to start (`WORKER_START_TIMEOUT = 9e4`,
+hardcoded in vitest 4.1.12 and still hardcoded in 5.1.0 — no env var or option).
+Under concurrent gate load a `cloudflare-pool` runner start exceeded 90s and
+failed before any test ran (bead `cloud-factory-cf-zcil`). `apps/worker`'s test
+scripts therefore load `test/support/vitest-worker-start-timeout.mjs` via
+`NODE_OPTIONS --import`, a module-customization hook that rewrites the constant
+to 240s as vitest's chunk loads (node_modules is a read-only hard-linked
+fleet-deps store, so the dist file cannot be edited on disk). Override with
+`VITEST_WORKER_START_TIMEOUT=<ms>`. The limit still applies per runner start, so
+a genuinely hung workerd still fails — just after 240s, not 90s.
 
 ## Tiers
 
